@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "inktrope",
+  "main": "./worker/index.js",
+  "compatibility_date": "2026-11-22",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "inktrope-db",
+      "database_id": "bb2b7499-4466-4dc1-a097-512f5c96964f"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "routes": [
+    { "pattern": "inktrope.com", "custom_domain": true },
+    { "pattern": "www.inktrope.com", "custom_domain": true }
+  ],
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true
+    }
+  }
+}

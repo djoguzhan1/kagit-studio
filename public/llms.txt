@@ -1,0 +1,31 @@
+# INKTROPE
+
+> Free, ad-free, browser-based 2D & 2.5D hand-drawn animation studio (`https://inktrope.com`). Preserve 100% of your original pen, pencil, or digital drawing pixels while animating 7 universal creature types, stitching 360° 2.5D multi-angle turnarounds, scanning A4 flipbook notebooks, performing live talking puppets, and directing 1–6 actor mini films.
+
+## Key Capabilities (V4.1)
+
+- **100% Original Hand-Drawn Pixel Preservation:** Default animation never redraws or alters artwork with generative AI. Drawings are converted into soft-skinned conforming meshes and animated directly in real time at 60 FPS (WebGL2) or GPU-free CPU scanline.
+- **7 Universal Creature Skeletons:** Automatic detection and custom physics for `biped` (humans/heroes), `quadruped` (cats, dogs, horses, dinosaurs), `avian_winged` (birds, dragons, butterflies), `serpentine_tentacle` (snakes, octopuses, fish), `arachnid_multi` (spiders, crabs, insects), `cute_blob` (head-and-legs mascots, slimes), and `amorphous_vehicle` (cars, rockets, objects).
+- **Zero-Tear Touching-Limb Separation:** Automatically detaches arms, legs, wings, and tails drawn close to the torso with connectivity verification so limbs never tear or detach awkwardly.
+- **360° 2.5D Multi-Angle Turnaround & A4 Multi-Pose Slicer:** Combine front, side (left/right), back, and 3/4 hand-drawn views into one unified 2.5D character rig, or scan/upload a single A4 page with multiple angles and slice them automatically.
+- **Frame-by-Frame 2D Lightbox & A4 Paper Camera:** Multi-layer backlit drawing desk with onion skinning, pressure-sensitive brushes, perspective guides, and an A4 paper scanner with automatic corner correction and shadow removal.
+- **1–6 Actor Mini Film Director & Live Talking Puppets:** Stage up to 6 hand-drawn characters together with camera choreography, microphone lip-sync, voice effects, and optional one-command screenplay direction.
+- **Universal Export (100% User Copyright):** Export H.264 MP4 video, animated GIF, transparent PNG ZIP, sprite sheets, printable A4 flipbook PDFs, and portable `.kagit.zip` project backups.
+
+## Türkçe Özet
+
+INKTROPE (`https://inktrope.com`), tarayıcı üzerinden kurulumsuz, reklamsız ve ücretsiz çalışan ışıklı 2D ve 2.5D el çizimi animasyon stüdyosudur. Kâğıda ya da ekrana çizilen insan, hayvan, ejderha, kuş, yılan, örümcek veya araç çizimlerini yapay zekâyla yeniden çizmeden piksellerini koruyarak saniyeler içinde canlandırır; ön/yan/arka açıları 360° 2.5D olarak birleştirir, A4 defter sayfalarını tarar ve 1–6 oyunculu mini filmler üretir.
+
+## Privacy & Optional Services
+
+- **Guest Mode (Default):** 100% on-device inside browser IndexedDB. Zero ads, zero third-party trackers, zero account required.
+- **Optional Cloud Vault:** Sign in optionally with Google Sign-In or Email/Password for strictly isolated per-user backups on Cloudflare D1.
+- **Optional AI Helpers:** Default animation is 100% local and free. Users may optionally use the AI Film Script Director (text prompt only; 0 drawing pixels uploaded) or the optional AI Side-Profile Tracing Guide, or supply their own session-only Gemini API key (stored only in browser `sessionStorage`, never logged on servers).
+
+## Links
+
+- Studio: https://inktrope.com/
+- Official GitHub Showcase & Docs: https://github.com/djoguzhan1/inktrope
+- Privacy Policy (TR / EN): https://inktrope.com/privacy
+- Terms of Service (TR / EN): https://inktrope.com/terms
+- Sitemap: https://inktrope.com/sitemap.xml

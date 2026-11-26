@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="lamp" cx="32%" cy="40%" r="58%">
+      <stop offset="0%" stop-color="#F7E0AE" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#151412" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#151412"/>
+  <rect width="1200" height="630" fill="url(#lamp)"/>
+  <!-- Lightbox Card -->
+  <rect x="76" y="102" width="590" height="426" rx="28" fill="#1B1916" stroke="#3C362E" stroke-width="2"/>
+  <rect x="296" y="128" width="150" height="22" rx="8" fill="#D8D1C2"/>
+  <circle cx="324" cy="139" r="5" fill="#2A2723"/>
+  <rect x="351" y="135" width="40" height="8" rx="4" fill="#2A2723"/>
+  <circle cx="418" cy="139" r="5" fill="#2A2723"/>
+  <rect x="116" y="150" width="510" height="310" rx="12" fill="#F7F3E9"/>
+  <path d="M180 390 Q310 315 440 375 T590 340" fill="none" stroke="#1C1917" stroke-width="4" stroke-linecap="round"/>
+  <path d="M235 335 C315 240, 420 220, 510 235" fill="none" stroke="#2563EB" stroke-width="2.5" stroke-dasharray="8 8" opacity="0.5"/>
+  <path d="M525 228 L452 246 L480 264 L494 294 Z" fill="#E54D2E" stroke="#1C1917" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Brand Typography -->
+  <text x="720" y="218" fill="#D99B26" font-family="monospace" font-size="18" font-weight="700" letter-spacing="4">IŞIKLI ANİMASYON STÜDYOSU</text>
+  <text x="720" y="290" fill="#F3EEE5" font-family="system-ui, sans-serif" font-size="68" font-weight="800" letter-spacing="2">INKTROPE</text>
+  <text x="720" y="344" fill="#FAF6EE" font-family="system-ui, sans-serif" font-size="27" font-weight="700">Işıklı Animasyon Masası</text>
+  <text x="720" y="394" fill="#9E9689" font-family="system-ui, sans-serif" font-size="20">Kâğıda çiz, tek tuşla canlandır,</text>
+  <text x="720" y="424" fill="#9E9689" font-family="system-ui, sans-serif" font-size="20">A4 tara ya da mini film yönet.</text>
+  <rect x="720" y="464" width="380" height="44" rx="12" fill="#E54D2E"/>
+  <text x="910" y="492" text-anchor="middle" fill="#FFFDF8" font-family="monospace" font-size="17" font-weight="700">MP4 · GIF · A4 FLIPBOOK PDF</text>
+</svg>

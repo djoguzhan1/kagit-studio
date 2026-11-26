@@ -1,0 +1,216 @@
+import { useEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Minimize2, Plus } from 'lucide-react';
+import { useStudioStore } from '../../store/useStudioStore';
+import type { StudioCanvasEngine } from '../../engine/canvasEngine';
+import { soundEngine } from '../../engine/soundEngine';
+import { useT } from '../../i18n/translations';
+import { MotionPlayIcon } from '../ui/AnimatedStudioIcons';
+import ToolDeck from './ToolDeck';
+import DrawingStage from './DrawingStage';
+import LayerReferenceRail from './LayerReferenceRail';
+import XSheetTimeline from './XSheetTimeline';
+import { RadialQuickWheel } from './RadialQuickWheel';
+
+export default function DrawWorkspace() {
+  const {
+    projects,
+    activeProjectId,
+    activeFrameIndex,
+    playbackFrameIndex,
+    isPlaying,
+    setPlaying,
+    selectFrame,
+    addFrameAfterCurrent,
+    updateLayerBlobAndThumb,
+    zenMode,
+    toggleZenMode,
+    setZenMode,
+  } = useStudioStore();
+  const t = useT();
+  const engineRef = useRef<StudioCanvasEngine | null>(null);
+  const lastPointerRef = useRef({ x: 480, y: 340 });
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const [mobileLayersOpen, setMobileLayersOpen] = useState(false);
+  const [wheelState, setWheelState] = useState<{ open: boolean; x: number; y: number }>({
+    open: false,
+    x: 480,
+    y: 340,
+  });
+
+  const project = projects.find((p) => p.id === activeProjectId);
+  const frameCount = project?.frames.length ?? 1;
+
+  // Global Tab (Zen Mode) + Q (Radial Quick Wheel) shortcuts
+  useEffect(() => {
+    const onPointerMove = (e: PointerEvent) => {
+      lastPointerRef.current = { x: e.clientX, y: e.clientY };
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if ((e.target as HTMLElement | null)?.isContentEditable) return;
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        soundEngine.toggle(!useStudioStore.getState().zenMode);
+        toggleZenMode();
+      } else if (e.key.toLowerCase() === 'q') {
+        e.preventDefault();
+        soundEngine.click(1.1);
+        setWheelState((prev) =>
+          prev.open
+            ? { ...prev, open: false }
+            : { open: true, x: lastPointerRef.current.x, y: lastPointerRef.current.y }
+        );
+      }
+    };
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [toggleZenMode]);
+
+  const persistAfterHistory = (layerId: string | null) => {
+    if (!layerId || !engineRef.current) return;
+    const st = useStudioStore.getState();
+    const proj = st.projects.find((p) => p.id === st.activeProjectId);
+    const frame = proj?.frames[st.activeFrameIndex];
+    const layer = frame?.layers.find((l) => l.id === layerId);
+    if (!frame || !layer) return;
+    void engineRef.current
+      .persistLayerAndThumb(layerId, layer.blobKey, frame.thumbKey)
+      .then((res) => {
+        if (res) updateLayerBlobAndThumb(frame.id, layerId, res.layerBlobKey, res.thumbKey);
+      });
+  };
+
+  const handleUndo = () => persistAfterHistory(engineRef.current?.undo() ?? null);
+  const handleRedo = () => persistAfterHistory(engineRef.current?.redo() ?? null);
+
+  return (
+    <div className="relative flex-1 flex flex-col min-h-0">
+      <div className="flex-1 flex flex-col lg:flex-row min-h-0">
+        {!zenMode && (
+          <ToolDeck
+            canUndo={canUndo}
+            canRedo={canRedo}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+            onClearLayer={() => engineRef.current?.clearActiveLayer()}
+            onToggleMobileLayers={() => setMobileLayersOpen((v) => !v)}
+          />
+        )}
+
+        <div
+          className="flex-1 flex min-w-0 min-h-0"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            soundEngine.click(1.12);
+            setWheelState({ open: true, x: e.clientX, y: e.clientY });
+          }}
+        >
+          <DrawingStage
+            engineRef={engineRef}
+            onHistoryState={(u, r) => {
+              setCanUndo(u);
+              setCanRedo(r);
+            }}
+          />
+        </div>
+
+        {!zenMode && (
+          <LayerReferenceRail
+            mobileOpen={mobileLayersOpen}
+            onCloseMobile={() => setMobileLayersOpen(false)}
+          />
+        )}
+      </div>
+      {!zenMode && <XSheetTimeline />}
+
+      {/* 8-Slice Radial Quick Wheel (Q or Right-Click on Stage) */}
+      <RadialQuickWheel
+        open={wheelState.open}
+        x={wheelState.x}
+        y={wheelState.y}
+        onClose={() => setWheelState((s) => ({ ...s, open: false }))}
+        onUndo={handleUndo}
+      />
+
+      {/* Enhanced Zen Floating Mini-Transport Bar */}
+      {zenMode && (
+        <div className="toast-pop-in fixed bottom-5 left-1/2 -translate-x-1/2 z-40 px-2.5 py-1.5 rounded-full bg-desk-panel/95 backdrop-blur-md border border-ink-brass/55 shadow-2xl flex items-center gap-1.5">
+          <button
+            type="button"
+            disabled={activeFrameIndex <= 0}
+            onClick={() => {
+              soundEngine.paperFlip();
+              selectFrame(Math.max(0, activeFrameIndex - 1));
+            }}
+            className="p-1.5 rounded-full hover:bg-desk-well text-desk-text disabled:opacity-35 transition-colors"
+            title={t('stagePrevPaper')}
+            aria-label={t('stagePrevPaper')}
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setPlaying(!isPlaying)}
+            className="px-2.5 py-1 rounded-full bg-ink-vermilion text-white font-mono text-[10.5px] font-bold inline-flex items-center gap-1.5"
+            title={t('playPause')}
+          >
+            <MotionPlayIcon playing={isPlaying} className="w-3.5 h-3.5" />
+            <span>
+              #{(playbackFrameIndex ?? activeFrameIndex) + 1}/{frameCount}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            disabled={activeFrameIndex >= frameCount - 1}
+            onClick={() => {
+              soundEngine.paperFlip();
+              selectFrame(Math.min(frameCount - 1, activeFrameIndex + 1));
+            }}
+            className="p-1.5 rounded-full hover:bg-desk-well text-desk-text disabled:opacity-35 transition-colors"
+            title={t('stageNextPaper')}
+            aria-label={t('stageNextPaper')}
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              soundEngine.paperFlip();
+              void addFrameAfterCurrent(false);
+            }}
+            className="px-2 py-1 rounded-full console-well border border-desk-border hover:border-ink-brass text-[10.5px] font-mono font-bold text-desk-text inline-flex items-center gap-1 transition-colors"
+            title={t('xsheetBlankFrame')}
+          >
+            <Plus className="w-3.5 h-3.5 text-ink-brass" />
+            <span>{t('radialNewFrame')}</span>
+          </button>
+
+          <span className="w-px h-4 bg-desk-border mx-0.5" aria-hidden="true" />
+
+          <button
+            type="button"
+            onClick={() => {
+              soundEngine.toggle(false);
+              setZenMode(false);
+            }}
+            className="px-2.5 py-1 rounded-full text-xs font-mono font-bold text-ink-brass hover:text-desk-text inline-flex items-center gap-1 transition-colors"
+          >
+            <Minimize2 className="w-3.5 h-3.5" />
+            {t('exitZen')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

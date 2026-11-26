@@ -1,0 +1,1832 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   KÂĞIT — 10/10 FİZİKSEL IŞIKLI ANİMASYON MASASI & 3D KONSOL SİSTEMİ
+   Sıfır neon/AI klişesi · İşlenmiş 3D Mekanik Tuşlar · 120 FPS Compositor
+   ========================================================================== */
+
+:root,
+[data-theme='night'] {
+  --desk-bg-rgb: 21 20 18;
+  --desk-surface-rgb: 29 27 24;
+  --desk-panel-rgb: 37 34 30;
+  --desk-well-rgb: 16 15 13;
+  --desk-border-rgb: 53 48 42;
+  --desk-text-rgb: 243 238 229;
+  --desk-muted-rgb: 158 150 137;
+  --desk-bg: #151412;
+  --desk-surface: #1d1b18;
+  --desk-panel: #25221e;
+  --desk-well: #100f0d;
+  --desk-border: #35302a;
+  --desk-text: #f3eee5;
+  --desk-muted: #9e9689;
+  --desk-dot: rgba(243, 238, 229, 0.048);
+
+  /* Keycap: Graphite */
+  --key-graphite-top: #342f2a;
+  --key-graphite-bottom: #25221e;
+  --key-graphite-lip: #100e0c;
+  --key-graphite-border: #4a443c;
+  --key-graphite-spec: rgba(255, 250, 240, 0.16);
+  --key-graphite-glare: rgba(255, 248, 232, 0.18);
+  --key-graphite-text: #efe9de;
+
+  /* Keycap: Ivory */
+  --key-ivory-top: #fbf7ee;
+  --key-ivory-bottom: #e7decb;
+  --key-ivory-lip: #aea28a;
+  --key-ivory-border: #ffffff;
+  --key-ivory-spec: rgba(255, 255, 255, 0.92);
+  --key-ivory-glare: rgba(255, 255, 255, 0.55);
+  --key-ivory-text: #1c1917;
+
+  /* Keycap: Vermilion */
+  --key-vermilion-top: #f26142;
+  --key-vermilion-bottom: #d64223;
+  --key-vermilion-lip: #82200d;
+  --key-vermilion-border: #ff8a70;
+  --key-vermilion-spec: rgba(255, 238, 228, 0.42);
+  --key-vermilion-glare: rgba(255, 228, 210, 0.34);
+  --key-vermilion-text: #fffaf7;
+
+  /* Keycap: Brass */
+  --key-brass-top: #ebb03c;
+  --key-brass-bottom: #c88918;
+  --key-brass-lip: #754d07;
+  --key-brass-border: #fad075;
+  --key-brass-spec: rgba(255, 251, 228, 0.52);
+  --key-brass-glare: rgba(255, 246, 200, 0.38);
+  --key-brass-text: #1c1405;
+
+  /* Keycap: Ink Blue */
+  --key-blue-top: #3c7ef8;
+  --key-blue-bottom: #1f5bd4;
+  --key-blue-lip: #0f327d;
+  --key-blue-border: #70a3ff;
+  --key-blue-spec: rgba(225, 242, 255, 0.4);
+  --key-blue-glare: rgba(205, 230, 255, 0.34);
+  --key-blue-text: #f7faff;
+
+  --key-ambient: rgba(0, 0, 0, 0.58);
+  --paper-shadow: 0 24px 68px rgba(0, 0, 0, 0.68), 0 4px 16px rgba(0, 0, 0, 0.48);
+}
+
+[data-theme='day'] {
+  --desk-bg-rgb: 229 223 210;
+  --desk-surface-rgb: 238 233 222;
+  --desk-panel-rgb: 246 242 233;
+  --desk-well-rgb: 214 207 192;
+  --desk-border-rgb: 201 191 173;
+  --desk-text-rgb: 30 27 24;
+  --desk-muted-rgb: 96 89 78;
+  --desk-bg: #e5dfd2;
+  --desk-surface: #eee9de;
+  --desk-panel: #f6f2e9;
+  --desk-well: #d6cfc0;
+  --desk-border: #c9bfad;
+  --desk-text: #1e1b18;
+  --desk-muted: #60594e;
+  --desk-dot: rgba(28, 25, 23, 0.065);
+
+  --key-graphite-top: #faf6ee;
+  --key-graphite-bottom: #e7dfd0;
+  --key-graphite-lip: #b4a995;
+  --key-graphite-border: #ffffff;
+  --key-graphite-spec: rgba(255, 255, 255, 0.94);
+  --key-graphite-glare: rgba(255, 255, 255, 0.65);
+  --key-graphite-text: #221f1b;
+
+  --key-ivory-top: #322e2a;
+  --key-ivory-bottom: #201e1b;
+  --key-ivory-lip: #0a0908;
+  --key-ivory-border: #4d4841;
+  --key-ivory-spec: rgba(255, 250, 240, 0.2);
+  --key-ivory-glare: rgba(255, 246, 230, 0.2);
+  --key-ivory-text: #f7f2e8;
+
+  --key-vermilion-top: #f05c3d;
+  --key-vermilion-bottom: #d44123;
+  --key-vermilion-lip: #82200d;
+  --key-vermilion-border: #ff866b;
+  --key-vermilion-spec: rgba(255, 238, 228, 0.42);
+  --key-vermilion-glare: rgba(255, 230, 212, 0.35);
+  --key-vermilion-text: #fffaf7;
+
+  --key-brass-top: #ebb03c;
+  --key-brass-bottom: #c88918;
+  --key-brass-lip: #784f08;
+  --key-brass-border: #fad27a;
+  --key-brass-spec: rgba(255, 252, 230, 0.55);
+  --key-brass-glare: rgba(255, 248, 210, 0.4);
+  --key-brass-text: #1c1405;
+
+  --key-blue-top: #3a7af5;
+  --key-blue-bottom: #1e59cf;
+  --key-blue-lip: #0f317a;
+  --key-blue-border: #6da0ff;
+  --key-blue-spec: rgba(225, 242, 255, 0.42);
+  --key-blue-glare: rgba(205, 230, 255, 0.35);
+  --key-blue-text: #f7faff;
+
+  --key-ambient: rgba(45, 37, 25, 0.25);
+  --paper-shadow: 0 22px 52px rgba(45, 37, 25, 0.22), 0 3px 12px rgba(45, 37, 25, 0.14);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background-color: var(--desk-bg);
+    color: var(--desk-text);
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+  }
+
+  * {
+    box-sizing: border-box;
+    border-color: var(--desk-border);
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--desk-well);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--desk-border);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--desk-muted);
+  }
+}
+
+.desk-surface-mat {
+  background-color: var(--desk-bg);
+  background-image: radial-gradient(var(--desk-dot) 1.2px, transparent 1.2px);
+  background-size: 20px 20px;
+}
+
+.console-well {
+  background-color: var(--desk-well);
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.35),
+    0 1px 0 rgba(255, 250, 240, 0.05);
+}
+
+/* ==========================================================================
+   GERÇEK 4-KATMANLI 3D ANİMASYONLU DONANIM TUŞLARI (.k3d)
+   Extruded 3D Duvar + İçbükey Üst Kapak + 3D Paralaks İçerik + Yaylı Tepki
+   100% GPU-Composited · Sıfır Neon Klişesi · Her Cihazda 60/120 FPS
+   ========================================================================== */
+.k3d {
+  --k-top: var(--key-graphite-top);
+  --k-bot: var(--key-graphite-bottom);
+  --k-lip: var(--key-graphite-lip);
+  --k-border: var(--key-graphite-border);
+  --k-spec: var(--key-graphite-spec);
+  --k-glare: var(--key-graphite-glare);
+  --k-text: var(--key-graphite-text);
+  --k-raise: 6px;
+  --k-hover-raise: 8px;
+  --k-radius: 12px;
+  --rx: 0deg;
+  --ry: 0deg;
+  --tx: 0px;
+  --ty: 0px;
+  --gx: 50%;
+  --gy: 20%;
+  --glare-op: 0;
+
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  color: var(--k-text);
+  font-weight: 700;
+  perspective: 520px;
+  margin-top: var(--k-raise);
+  outline: none;
+}
+
+.k3d-sm {
+  --k-raise: 5px;
+  --k-hover-raise: 6.5px;
+  --k-radius: 10px;
+}
+
+.k3d-lg {
+  --k-raise: 9px;
+  --k-hover-raise: 11.5px;
+  --k-radius: 16px;
+}
+
+/* Layer 1: Optical floor shadow shifting opposite to 3D tilt */
+.k3d-shadow {
+  position: absolute;
+  inset: 2px 3px -3px 3px;
+  border-radius: calc(var(--k-radius) + 1px);
+  background: rgba(0, 0, 0, 0.56);
+  filter: blur(6px);
+  transform: translate3d(calc(var(--tx) * -0.9), calc(3px + var(--ty) * -0.5), 0);
+  transition: transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 180ms ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+[data-theme='day'] .k3d-shadow {
+  background: rgba(38, 30, 18, 0.28);
+}
+
+/* Layer 2: Solid 3D Extruded Mechanical Wall / Skirt with cylindrical bevel shading */
+.k3d-wall {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--k-radius);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--k-lip) 88%, #ffffff 12%) 0%,
+    var(--k-lip) 12%,
+    color-mix(in srgb, var(--k-lip) 86%, #000000 14%) 50%,
+    var(--k-lip) 88%,
+    color-mix(in srgb, var(--k-lip) 82%, #ffffff 18%) 100%
+  );
+  box-shadow:
+    inset 0 -2px 3px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 1px 0 rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Layer 3: Sculpted Elevated 3D Top Cap */
+.k3d-cap {
+  position: relative;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: var(--k-radius);
+  border: 1px solid var(--k-border);
+  background: linear-gradient(175deg, var(--k-top) 0%, var(--k-bot) 100%);
+  box-shadow:
+    inset 0 1.5px 0 var(--k-spec),
+    inset 0 -2px 3px rgba(0, 0, 0, 0.22),
+    inset 1px 0 0 rgba(255, 255, 255, 0.08),
+    inset -1px 0 0 rgba(0, 0, 0, 0.14);
+  transform-style: preserve-3d;
+  transform: translate3d(0, calc(var(--k-raise) * -1), 0) rotateX(var(--rx)) rotateY(var(--ry));
+  transition:
+    transform 300ms cubic-bezier(0.34, 1.65, 0.64, 1),
+    filter 140ms ease,
+    box-shadow 180ms ease;
+  will-change: transform;
+  z-index: 2;
+}
+
+/* Zero-lag tilt response while pointer glides across the cap */
+.k3d[data-tilting='true'] .k3d-cap {
+  transition:
+    transform 65ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 140ms ease,
+    box-shadow 180ms ease;
+}
+
+/* Sculpted concave PBT keycap finger-dish bevel inside top face */
+.k3d-dish {
+  position: absolute;
+  inset: 3px;
+  border-radius: calc(var(--k-radius) - 3px);
+  background: radial-gradient(
+    ellipse 85% 75% at 50% 35%,
+    rgba(255, 255, 255, 0.1) 0%,
+    rgba(0, 0, 0, 0.05) 72%,
+    rgba(0, 0, 0, 0.12) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Real-time cursor-tracking anodized specular glare clipped inside cap */
+.k3d-fx {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.k3d-glare {
+  position: absolute;
+  inset: -1px;
+  background: radial-gradient(
+    140px circle at var(--gx) var(--gy),
+    var(--k-glare) 0%,
+    transparent 68%
+  );
+  opacity: var(--glare-op);
+  transition: opacity 180ms ease;
+}
+
+/* Machined studio lamp diagonal light sweep */
+@keyframes k3d-sheen-idle {
+  0%,
+  72% {
+    transform: translate3d(-160%, 0, 0);
+    opacity: 0;
+  }
+  78% {
+    opacity: 1;
+  }
+  94% {
+    transform: translate3d(290%, 0, 0);
+    opacity: 0.9;
+  }
+  100% {
+    transform: translate3d(290%, 0, 0);
+    opacity: 0;
+  }
+}
+
+.k3d-sheen {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 55%;
+  height: 100%;
+  background: linear-gradient(
+    108deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.28) 48%,
+    rgba(255, 255, 255, 0.06) 62%,
+    transparent 100%
+  );
+  transform: translate3d(-160%, 0, 0);
+  transition: transform 560ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.k3d[data-sheen='true'] .k3d-sheen {
+  animation: k3d-sheen-idle 5.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  animation-delay: var(--sheen-delay, 0s);
+}
+
+.k3d:hover:not(:disabled) .k3d-sheen {
+  animation: none;
+  transform: translate3d(290%, 0, 0);
+}
+
+/* Tactile Click Impulse Shockwave Ring */
+@keyframes k3d-ripple-burst {
+  0% {
+    transform: translate(-50%, -50%) scale(0.15);
+    opacity: 0.72;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2.8);
+    opacity: 0;
+  }
+}
+
+.k3d-ripple {
+  position: absolute;
+  width: 90px;
+  height: 90px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.55) 0%, transparent 70%);
+  pointer-events: none;
+  animation: k3d-ripple-burst 440ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Layer 4: True 3D Floating Content Plane (translateZ creates visible binocular parallax!) */
+.k3d-content {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  display: inline-flex;
+  align-items: inherit;
+  justify-content: inherit;
+  flex-direction: inherit;
+  gap: inherit;
+  transform: translateZ(14px);
+  transform-style: preserve-3d;
+}
+
+/* Hover: Cap physically levitates higher, wall exposes more depth, tilt engages */
+.k3d:hover:not(:disabled) {
+  --glare-op: 1;
+}
+
+.k3d:hover:not(:disabled) .k3d-cap {
+  transform: translate3d(0, calc(var(--k-hover-raise) * -1), 0) rotateX(var(--rx)) rotateY(var(--ry));
+  filter: brightness(1.06);
+}
+
+.k3d:hover:not(:disabled) .k3d-shadow {
+  transform: translate3d(calc(var(--tx) * -1.1), calc(5px + var(--ty) * -0.7), 0) scale(1.02);
+  opacity: 0.9;
+}
+
+/* Press / Active / Latched: Full 6px-10px physical mechanical travel down into the 3D wall! */
+.k3d:active:not(:disabled) .k3d-cap,
+.k3d[data-pressed='true']:not(:disabled) .k3d-cap {
+  transform: translate3d(0, -1px, 0) rotateX(0deg) rotateY(0deg) scale(0.992);
+  transition: transform 55ms cubic-bezier(0.2, 0.9, 0.2, 1), filter 55ms ease;
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  filter: brightness(0.95);
+}
+
+.k3d:active:not(:disabled) .k3d-shadow,
+.k3d[data-pressed='true']:not(:disabled) .k3d-shadow {
+  transform: translate3d(0, 1px, 0) scale(0.96);
+  opacity: 0.45;
+  transition: transform 55ms ease, opacity 55ms ease;
+}
+
+.k3d:focus-visible .k3d-cap {
+  outline: 2px solid #e54d2e;
+  outline-offset: 2px;
+}
+
+.k3d:disabled {
+  opacity: 0.64;
+  filter: saturate(0.55);
+  cursor: not-allowed;
+}
+
+.k3d:disabled .k3d-cap {
+  transform: translate3d(0, -2px, 0);
+}
+
+/* Colorway Tokens */
+.k3d-ivory {
+  --k-top: var(--key-ivory-top);
+  --k-bot: var(--key-ivory-bottom);
+  --k-lip: var(--key-ivory-lip);
+  --k-border: var(--key-ivory-border);
+  --k-spec: var(--key-ivory-spec);
+  --k-glare: var(--key-ivory-glare);
+  --k-text: var(--key-ivory-text);
+}
+
+.k3d-vermilion {
+  --k-top: var(--key-vermilion-top);
+  --k-bot: var(--key-vermilion-bottom);
+  --k-lip: var(--key-vermilion-lip);
+  --k-border: var(--key-vermilion-border);
+  --k-spec: var(--key-vermilion-spec);
+  --k-glare: var(--key-vermilion-glare);
+  --k-text: var(--key-vermilion-text);
+}
+
+.k3d-brass {
+  --k-top: var(--key-brass-top);
+  --k-bot: var(--key-brass-bottom);
+  --k-lip: var(--key-brass-lip);
+  --k-border: var(--key-brass-border);
+  --k-spec: var(--key-brass-spec);
+  --k-glare: var(--key-brass-glare);
+  --k-text: var(--key-brass-text);
+}
+
+.k3d-blue {
+  --k-top: var(--key-blue-top);
+  --k-bot: var(--key-blue-bottom);
+  --k-lip: var(--key-blue-lip);
+  --k-border: var(--key-blue-border);
+  --k-spec: var(--key-blue-spec);
+  --k-glare: var(--key-blue-glare);
+  --k-text: var(--key-blue-text);
+}
+
+/* Carved Desk Socket Bezel for Sculpted Hardware Switches */
+.keycap-socket {
+  display: inline-flex;
+  padding: 5px 6px 7px;
+  border-radius: 21px;
+  background: linear-gradient(180deg, #0b0a09 0%, var(--desk-well) 100%);
+  border: 1px solid var(--desk-border);
+  box-shadow:
+    inset 0 3px 7px rgba(0, 0, 0, 0.62),
+    0 1px 0 rgba(255, 250, 240, 0.08);
+}
+
+.keycap-socket > .k3d {
+  margin-bottom: 0;
+}
+
+[data-theme='day'] .keycap-socket {
+  background: linear-gradient(180deg, #c7bfae 0%, var(--desk-well) 100%);
+  box-shadow:
+    inset 0 3px 6px rgba(45, 37, 25, 0.24),
+    0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+/* Embedded Hardware LED with Breathing Pulse */
+@keyframes led-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.52;
+    transform: scale(0.86);
+  }
+}
+
+.hardware-led {
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: 999px;
+  background: rgba(120, 113, 102, 0.35);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.5);
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+  flex-shrink: 0;
+}
+
+.hardware-led[data-on='amber'] {
+  background: #f5b436;
+  box-shadow: 0 0 8px rgba(245, 180, 54, 0.95), inset 0 1px 1px rgba(255, 255, 255, 0.75);
+}
+
+.hardware-led[data-on='vermilion'] {
+  background: #ff5b37;
+  box-shadow: 0 0 9px rgba(255, 91, 55, 0.98), inset 0 1px 1px rgba(255, 255, 255, 0.7);
+}
+
+.hardware-led[data-on='emerald'] {
+  background: #22c55e;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.95), inset 0 1px 1px rgba(255, 255, 255, 0.75);
+}
+
+.hardware-led[data-on='blue'] {
+  background: #3b82f6;
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.95), inset 0 1px 1px rgba(255, 255, 255, 0.75);
+}
+
+.hardware-led[data-pulse='true'] {
+  animation: led-breathe 1.5s ease-in-out infinite;
+}
+
+/* ==========================================================================
+   CANLI KİNETİK STÜDYO İKONLARI (3D Sayfa Çevirme, İris, Kemik, Kalem)
+   ========================================================================== */
+/* 1. Camera 6-blade iris shutter twists & snaps */
+@keyframes icon-iris-idle {
+  0%,
+  75%,
+  100% {
+    transform: rotate(0deg) scale(1);
+  }
+  84% {
+    transform: rotate(45deg) scale(0.84);
+  }
+  92% {
+    transform: rotate(0deg) scale(1.06);
+  }
+}
+
+.studio-icon-iris {
+  transition: transform 300ms cubic-bezier(0.34, 1.65, 0.64, 1);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.k3d[data-sheen='true'] .studio-icon-iris {
+  animation: icon-iris-idle 4.4s cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+}
+.k3d:hover .studio-icon-iris {
+  animation: none;
+  transform: rotate(60deg) scale(1.12);
+}
+.k3d:active .studio-icon-iris {
+  animation: none;
+  transform: rotate(105deg) scale(0.74);
+}
+
+/* 2. G-Pen Nib tilts & draws live ink stroke */
+@keyframes icon-nib-draw {
+  0%,
+  100% {
+    transform: rotate(0deg) translate3d(0, 0, 0);
+  }
+  45% {
+    transform: rotate(-16deg) translate3d(-2px, -2px, 0);
+  }
+  70% {
+    transform: rotate(-6deg) translate3d(1px, 0, 0);
+  }
+}
+
+.studio-icon-nib {
+  transition: transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-box: fill-box;
+  transform-origin: 35% 75%;
+}
+.k3d:hover .studio-icon-nib {
+  animation: icon-nib-draw 720ms ease-in-out infinite;
+}
+.studio-icon-trail {
+  stroke-dasharray: 20;
+  stroke-dashoffset: 20;
+  transition: stroke-dashoffset 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.k3d:hover .studio-icon-trail,
+.k3d[data-pressed='true'] .studio-icon-trail {
+  stroke-dashoffset: 0;
+}
+
+/* 3. Onion Skin red/blue 3D parallax fan */
+.studio-icon-onion-prev,
+.studio-icon-onion-next {
+  transition: transform 280ms cubic-bezier(0.34, 1.6, 0.64, 1), opacity 200ms ease;
+}
+.k3d:hover .studio-icon-onion-prev,
+.k3d[data-pressed='true'] .studio-icon-onion-prev {
+  transform: translate3d(-3.5px, -1.2px, 0);
+  opacity: 0.95;
+}
+.k3d:hover .studio-icon-onion-next,
+.k3d[data-pressed='true'] .studio-icon-onion-next {
+  transform: translate3d(3.5px, 1.2px, 0);
+  opacity: 0.95;
+}
+
+/* 4. 3D Flipbook Page Stack: top page physically flips in 3D space! */
+@keyframes icon-page-flip {
+  0%,
+  68%,
+  100% {
+    transform: perspective(120px) rotateY(0deg);
+  }
+  82% {
+    transform: perspective(120px) rotateY(-42deg) translate3d(-1px, -1px, 0);
+  }
+  92% {
+    transform: perspective(120px) rotateY(8deg);
+  }
+}
+
+.studio-icon-flip-sheet {
+  transition: transform 320ms cubic-bezier(0.34, 1.65, 0.64, 1);
+  transform-box: fill-box;
+  transform-origin: left center;
+}
+.k3d[data-sheen='true'] .studio-icon-flip-sheet {
+  animation: icon-page-flip 3.8s cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+}
+.k3d:hover .studio-icon-flip-sheet {
+  animation: none;
+  transform: perspective(120px) rotateY(-44deg) translate3d(-1px, -1px, 0);
+}
+
+.studio-icon-page-curl {
+  transition: transform 280ms cubic-bezier(0.34, 1.65, 0.64, 1);
+  transform-box: fill-box;
+  transform-origin: top right;
+}
+.k3d:hover .studio-icon-page-curl {
+  transform: scale(1.28) translate3d(-1px, 1px, 0);
+}
+
+/* 5. Articulated Puppet Bone Arm waves from its hinge pivot */
+@keyframes icon-bone-wave {
+  0%,
+  68%,
+  100% {
+    transform: rotate(0deg);
+  }
+  78% {
+    transform: rotate(-28deg);
+  }
+  88% {
+    transform: rotate(10deg);
+  }
+}
+
+.studio-icon-bone-arm {
+  transition: transform 300ms cubic-bezier(0.34, 1.65, 0.64, 1);
+  transform-box: view-box;
+  transform-origin: 11.5px 11.5px;
+}
+.k3d[data-sheen='true'] .studio-icon-bone-arm {
+  animation: icon-bone-wave 4.2s ease-in-out infinite;
+  animation-delay: 0.8s;
+}
+.k3d:hover .studio-icon-bone-arm,
+.k3d[data-pressed='true'] .studio-icon-bone-arm {
+  animation: none;
+  transform: rotate(-26deg);
+}
+
+/* 6. Play triangle & Export mechanical drop */
+.studio-icon-play-tri {
+  transition: transform 240ms cubic-bezier(0.34, 1.65, 0.64, 1);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.k3d:hover .studio-icon-play-tri {
+  transform: translate3d(2px, 0, 0) scale(1.14);
+}
+
+.studio-icon-export-arrow {
+  transition: transform 260ms cubic-bezier(0.34, 1.65, 0.64, 1);
+}
+.k3d:hover .studio-icon-export-arrow {
+  transform: translate3d(0, 2.5px, 0);
+}
+
+/* Physical 110ms Paper Sheet Flip Micro-Motion on Frame Step */
+@keyframes sheet-flip-next {
+  0% {
+    transform: translate3d(7px, -2px, 0) rotate(0.45deg);
+    opacity: 0.94;
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+@keyframes sheet-flip-prev {
+  0% {
+    transform: translate3d(-7px, -2px, 0) rotate(-0.45deg);
+    opacity: 0.94;
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+.sheet-flip-next {
+  animation: sheet-flip-next 115ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sheet-flip-prev {
+  animation: sheet-flip-prev 115ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Tactile Fader / Slider (Always visible high-contrast recessed channel on both wells & panels) */
+input[type='range'].studio-fader {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--desk-border) 82%, var(--desk-well) 18%);
+  border: 1px solid rgba(255, 248, 232, 0.1);
+  box-shadow: inset 0 1.5px 3px rgba(0, 0, 0, 0.55);
+  outline: none;
+  cursor: pointer;
+}
+
+[data-theme='day'] input[type='range'].studio-fader {
+  background: color-mix(in srgb, var(--desk-border) 75%, #8f8473 25%);
+  border-color: rgba(45, 37, 25, 0.18);
+  box-shadow: inset 0 1.5px 2px rgba(45, 37, 25, 0.28);
+}
+
+input[type='range'].studio-fader::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, #f6f1e7 0%, #cfc6b5 100%);
+  border: 1px solid #8a8070;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 2px 0 #70675a,
+    0 3px 5px rgba(0, 0, 0, 0.4);
+  transition: transform 80ms ease;
+}
+
+input[type='range'].studio-fader::-moz-range-track {
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--desk-border) 82%, var(--desk-well) 18%);
+  border: 1px solid rgba(255, 248, 232, 0.1);
+}
+
+input[type='range'].studio-fader::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, #f6f1e7 0%, #cfc6b5 100%);
+  border: 1px solid #8a8070;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 2px 0 #70675a,
+    0 3px 5px rgba(0, 0, 0, 0.4);
+}
+
+input[type='range'].studio-fader::-webkit-slider-thumb:active {
+  transform: scale(0.94);
+}
+
+.lightbox-sheet {
+  box-shadow: var(--paper-shadow);
+  transition: box-shadow 220ms ease;
+}
+
+.paper-grain-overlay {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 140 140' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.055'/%3E%3C/svg%3E");
+  pointer-events: none;
+}
+
+/* ==========================================================================
+   V2 10/10 — İMZA 3D ANİMASYONLU ATÖLYE OBJELERİ & MEKANİK KONTROLLER
+   Film Klaketi · 6-Bıçaklı Kamera Lensi · Sarkaçlı Kukla · 3D Flipbook Defter
+   Mandal Şalter · Pirinç Döner Kadran · Oyulmuş Kalem Yuvası
+   ========================================================================== */
+
+/* Warm Architectural Drafting Workbench Surface */
+.desk-workbench-mat {
+  background-color: var(--desk-bg);
+  background-image:
+    radial-gradient(ellipse 68% 54% at 32% 38%, rgba(245, 224, 178, 0.085) 0%, transparent 66%),
+    radial-gradient(var(--desk-dot) 1.2px, transparent 1.2px),
+    linear-gradient(180deg, rgba(255, 248, 232, 0.025) 0%, rgba(0, 0, 0, 0.16) 100%);
+  background-size: 100% 100%, 22px 22px, 100% 100%;
+}
+
+[data-theme='day'] .desk-workbench-mat {
+  background-image:
+    radial-gradient(ellipse 68% 54% at 32% 38%, rgba(255, 252, 242, 0.72) 0%, transparent 66%),
+    radial-gradient(var(--desk-dot) 1.2px, transparent 1.2px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.25) 0%, rgba(120, 104, 82, 0.07) 100%);
+}
+
+/* Embedded Frosted-Glass Lightbox Frame recessed into the desk */
+.desk-lightbox-bezel {
+  background: linear-gradient(180deg, #100f0d 0%, #191714 100%);
+  border: 1px solid #3c362e;
+  box-shadow:
+    inset 0 4px 14px rgba(0, 0, 0, 0.7),
+    inset 0 0 0 1px rgba(255, 248, 230, 0.05),
+    0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+[data-theme='day'] .desk-lightbox-bezel {
+  background: linear-gradient(180deg, #cfc7b8 0%, #ddd6c8 100%);
+  border-color: #b7ae9c;
+  box-shadow:
+    inset 0 4px 12px rgba(45, 37, 25, 0.18),
+    0 18px 42px rgba(45, 37, 25, 0.14);
+}
+
+/* Shared 3D Mechanical Object Base */
+.mech-obj {
+  --rx: 0deg;
+  --ry: 0deg;
+  --gx: 50%;
+  --gy: 30%;
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  perspective: 720px;
+  transform-style: preserve-3d;
+  outline: none;
+}
+
+.mech-body {
+  position: relative;
+  border-radius: 20px;
+  transform-style: preserve-3d;
+  transform: rotateX(var(--rx)) rotateY(var(--ry)) translate3d(0, 0, 0);
+  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 220ms ease;
+  will-change: transform;
+}
+
+.mech-obj[data-tilting='true'] .mech-body {
+  transition: transform 65ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 140ms ease;
+}
+
+.mech-obj:hover .mech-body {
+  transform: rotateX(var(--rx)) rotateY(var(--ry)) translate3d(0, -4px, 0);
+}
+
+.mech-obj:active .mech-body {
+  transform: rotateX(0deg) rotateY(0deg) translate3d(0, 4px, 0) scale(0.988);
+  transition: transform 65ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+.mech-glare {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(220px circle at var(--gx) var(--gy), rgba(255, 248, 232, 0.2) 0%, transparent 68%);
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+.mech-obj:hover .mech-glare {
+  opacity: 1;
+}
+
+/* 1. 3D CINEMA CLAPPERBOARD BUTTON */
+.clapper-slate {
+  background: linear-gradient(175deg, #2b2723 0%, #1a1815 100%);
+  border: 1px solid #4c453c;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 250, 240, 0.16),
+    0 9px 0 #0c0b0a,
+    0 18px 34px rgba(0, 0, 0, 0.58);
+}
+
+.clapper-arm {
+  height: 22px;
+  border-radius: 14px 14px 4px 4px;
+  background: repeating-linear-gradient(
+    -58deg,
+    #f7f3e9 0px,
+    #f7f3e9 13px,
+    #1b1917 13px,
+    #1b1917 26px
+  );
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.65),
+    0 3px 8px rgba(0, 0, 0, 0.48);
+  transform-origin: 18px 18px;
+  transform: rotate(-4deg);
+  transition: transform 320ms cubic-bezier(0.34, 1.65, 0.64, 1);
+}
+
+.mech-obj:hover .clapper-arm {
+  transform: rotate(-18deg) translate3d(0, -3px, 10px);
+}
+
+.mech-obj:active .clapper-arm,
+.mech-obj[data-snapping='true'] .clapper-arm {
+  transform: rotate(0deg) translate3d(0, 0, 0);
+  transition: transform 65ms cubic-bezier(0.18, 0.92, 0.25, 1);
+}
+
+.clapper-bar-base {
+  height: 11px;
+  background: repeating-linear-gradient(
+    58deg,
+    #e54d2e 0px,
+    #e54d2e 13px,
+    #1b1917 13px,
+    #1b1917 26px
+  );
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.45);
+}
+
+@keyframes clapper-flash-ring {
+  0% {
+    opacity: 0.85;
+    transform: scale(0.96);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.06);
+  }
+}
+
+.clapper-flash {
+  position: absolute;
+  inset: -3px;
+  border-radius: 22px;
+  border: 2px solid #f5b436;
+  pointer-events: none;
+  animation: clapper-flash-ring 380ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* 2. 3D MACHINED CAMERA LENS SHUTTER BUTTON */
+.shutter-chassis {
+  background: linear-gradient(175deg, #fbf7ee 0%, #e5dcc9 100%);
+  color: #1c1917;
+  border: 1px solid #ffffff;
+  box-shadow:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.95),
+    0 8px 0 #a99d85,
+    0 16px 30px rgba(0, 0, 0, 0.45);
+}
+
+[data-theme='day'] .shutter-chassis {
+  background: linear-gradient(175deg, #2d2925 0%, #1c1a17 100%);
+  color: #f7f3e9;
+  border-color: #4f4840;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 250, 240, 0.2),
+    0 8px 0 #0c0b0a,
+    0 14px 26px rgba(35, 28, 18, 0.25);
+}
+
+.lens-barrel {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  background:
+    repeating-conic-gradient(from 0deg, #3c3731 0deg 8deg, #24211d 8deg 16deg);
+  border: 2px solid #756b5e;
+  box-shadow:
+    0 5px 0 #141210,
+    0 9px 16px rgba(0, 0, 0, 0.42),
+    inset 0 2px 3px rgba(255, 255, 255, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 280ms cubic-bezier(0.34, 1.65, 0.64, 1), box-shadow 200ms ease;
+}
+
+.mech-obj:hover .lens-barrel {
+  transform: translate3d(0, -3px, 16px) rotate(24deg);
+  box-shadow:
+    0 8px 0 #141210,
+    0 14px 22px rgba(0, 0, 0, 0.48),
+    inset 0 2px 4px rgba(255, 255, 255, 0.35);
+}
+
+.mech-obj:active .lens-barrel,
+.mech-obj[data-snapping='true'] .lens-barrel {
+  transform: translate3d(0, 3px, 0) rotate(68deg) scale(0.94);
+  box-shadow:
+    0 1px 0 #141210,
+    0 3px 6px rgba(0, 0, 0, 0.35);
+  transition: transform 90ms ease;
+}
+
+.lens-iris-blades {
+  transition: transform 260ms cubic-bezier(0.34, 1.6, 0.64, 1);
+  transform-origin: center;
+}
+
+.mech-obj:hover .lens-iris-blades {
+  transform: rotate(-35deg) scale(1.1);
+}
+
+.mech-obj:active .lens-iris-blades,
+.mech-obj[data-snapping='true'] .lens-iris-blades {
+  transform: rotate(45deg) scale(0.64);
+  transition: transform 80ms ease;
+}
+
+/* 3. 3D MARIONETTE CROSS & PENDULUM PUPPET BUTTON */
+.marionette-chassis {
+  background: linear-gradient(175deg, #ebb03c 0%, #c68615 100%);
+  color: #1c1405;
+  border: 1px solid #fae098;
+  box-shadow:
+    inset 0 1.5px 0 rgba(255, 252, 232, 0.65),
+    0 8px 0 #734b07,
+    0 16px 30px rgba(0, 0, 0, 0.45);
+}
+
+@keyframes marionette-sway {
+  0%,
+  100% {
+    transform: rotate(-5deg);
+  }
+  50% {
+    transform: rotate(7deg);
+  }
+}
+
+.marionette-crossbar {
+  transform-origin: 28px 10px;
+  transition: transform 320ms cubic-bezier(0.34, 1.65, 0.64, 1);
+}
+
+.mech-obj:hover .marionette-crossbar {
+  transform: rotate(-11deg) translateY(-1px);
+}
+
+.marionette-dangler {
+  transform-origin: 28px 14px;
+  transition: transform 360ms cubic-bezier(0.34, 1.65, 0.64, 1);
+}
+
+.mech-obj:hover .marionette-dangler {
+  animation: marionette-sway 1.4s ease-in-out infinite;
+}
+
+.mech-obj:active .marionette-dangler {
+  animation: none;
+  transform: translateY(-6px) scale(1.08);
+}
+
+/* 4. 3D PAGE-FLIPPING NOTEBOOK / FLIPBOOK CARD */
+.flipbook-3d {
+  position: relative;
+  perspective: 950px;
+  transform-style: preserve-3d;
+}
+
+.flipbook-3d-back1,
+.flipbook-3d-back2 {
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  border: 1px solid var(--desk-border);
+  background: var(--desk-panel);
+  pointer-events: none;
+  transition: transform 340ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: left center;
+}
+
+.flipbook-3d-back1 {
+  transform: translate3d(4px, 4px, -4px);
+  opacity: 0.65;
+}
+
+.flipbook-3d-back2 {
+  transform: translate3d(8px, 8px, -8px);
+  opacity: 0.38;
+}
+
+.flipbook-3d-cover {
+  position: relative;
+  border-radius: 18px;
+  border: 1px solid var(--desk-border);
+  background: var(--desk-surface);
+  overflow: hidden;
+  transform-origin: left center;
+  transition: transform 340ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 260ms ease;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.36);
+}
+
+.flipbook-3d:hover .flipbook-3d-cover {
+  transform: rotateY(-8deg) translate3d(-2px, -4px, 8px);
+  box-shadow: 12px 18px 34px rgba(0, 0, 0, 0.45);
+}
+
+.flipbook-3d:hover .flipbook-3d-back1 {
+  transform: rotateY(-3deg) translate3d(5px, 2px, 0);
+}
+
+.flipbook-3d:hover .flipbook-3d-back2 {
+  transform: translate3d(10px, 6px, -6px);
+}
+
+/* 5. 3D METAL TOGGLE LEVER SWITCH (Soğan Zarı, Kadraj, Simetri, Tema) */
+.lever-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 44px;
+  height: 22px;
+  padding: 2px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #0d0c0a 0%, #1c1916 100%);
+  border: 1px solid var(--desk-border);
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.7),
+    0 1px 0 rgba(255, 250, 240, 0.08);
+  cursor: pointer;
+  transition: border-color 180ms ease;
+  flex-shrink: 0;
+}
+
+[data-theme='day'] .lever-switch {
+  background: linear-gradient(180deg, #c2b9a8 0%, #d9d2c4 100%);
+  box-shadow: inset 0 2px 4px rgba(45, 37, 25, 0.25);
+}
+
+.lever-switch-knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #faf5eb 0%, #bfb6a5 100%);
+  border: 1px solid #ffffff;
+  box-shadow:
+    0 2px 0 #6b6356,
+    0 3px 6px rgba(0, 0, 0, 0.48);
+  transform: translate3d(0, 0, 0);
+  transition: transform 220ms cubic-bezier(0.34, 1.7, 0.64, 1), background 180ms ease;
+}
+
+.lever-switch[data-on='true'] {
+  border-color: rgba(217, 155, 38, 0.65);
+}
+
+.lever-switch[data-on='true'] .lever-switch-knob {
+  transform: translate3d(22px, 0, 0);
+  background: linear-gradient(180deg, #f9d47d 0%, #d4921c 100%);
+  box-shadow:
+    0 2px 0 #754c07,
+    0 0 10px rgba(245, 180, 54, 0.55);
+}
+
+/* 6. KNURLED BRASS ROTARY DIAL (Flip Wheel & Lightbox Dimmer) */
+.brass-dial {
+  position: relative;
+  border-radius: 999px;
+  background:
+    repeating-conic-gradient(from 0deg, #e0a93b 0deg 10deg, #b87b12 10deg 20deg);
+  border: 1.5px solid #fae098;
+  box-shadow:
+    0 4px 0 #6b4506,
+    0 8px 16px rgba(0, 0, 0, 0.45),
+    inset 0 2px 4px rgba(255, 252, 232, 0.55);
+  cursor: grab;
+  touch-action: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.brass-dial:active {
+  cursor: grabbing;
+  transform: translateY(1px);
+  box-shadow:
+    0 2px 0 #6b4506,
+    0 4px 10px rgba(0, 0, 0, 0.4);
+}
+
+.brass-dial-cap {
+  width: 74%;
+  height: 74%;
+  border-radius: 999px;
+  background: radial-gradient(circle at 35% 30%, #f5ce73 0%, #c78819 72%, #8f5e0a 100%);
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.65);
+  position: relative;
+}
+
+.brass-dial-notch {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  width: 3px;
+  height: 9px;
+  margin-left: -1.5px;
+  border-radius: 999px;
+  background: #1c1405;
+}
+
+/* 7. CARVED STUDIO TOOL SLOT (Clean Pen-Tray Aesthetic in ToolDeck) */
+.tool-slot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.42rem 0.6rem;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--desk-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 180ms ease;
+}
+
+[data-theme='day'] .tool-slot {
+  background: rgba(45, 37, 25, 0.055);
+}
+
+.tool-slot:hover {
+  color: var(--desk-text);
+  background: var(--desk-panel);
+  border-color: var(--desk-border);
+  transform: translate3d(0, -1.5px, 0);
+}
+
+.tool-slot[data-active='true'] {
+  color: var(--desk-text);
+  background: linear-gradient(180deg, var(--desk-panel) 0%, var(--desk-surface) 100%);
+  border-color: rgba(217, 155, 38, 0.72);
+  transform: translate3d(0, -2.5px, 0);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 250, 240, 0.14),
+    0 4px 0 rgba(0, 0, 0, 0.45),
+    0 8px 14px rgba(0, 0, 0, 0.28);
+}
+
+[data-theme='day'] .tool-slot[data-active='true'] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 3px 0 #c5bba9,
+    0 6px 12px rgba(45, 37, 25, 0.14);
+}
+
+.tool-slot[data-active='true'][data-accent='blue'] {
+  border-color: rgba(59, 130, 246, 0.85);
+}
+
+.tool-slot[data-active='true'][data-accent='vermilion'] {
+  border-color: rgba(229, 77, 46, 0.85);
+}
+
+/* ==========================================================================
+   V3 10/10 — HALOGEN LIGHTBOX WARMUP · ARCHITECTURAL RULER · 3D POCKET FLIPBOOK
+   ========================================================================== */
+
+/* Brand Emblem subtle page curl hover */
+.brand-emblem-curl {
+  transition: transform 280ms cubic-bezier(0.34, 1.65, 0.64, 1);
+  transform-origin: 40px 0px;
+}
+.brand-emblem:hover .brand-emblem-curl {
+  transform: scale(1.16);
+}
+
+/* 600ms Halogen Lightbox Warmup Ritual (Zero-blocking visual breath on arrival) */
+@keyframes desk-lamp-warmup {
+  0% {
+    filter: brightness(0.68) saturate(0.85);
+    opacity: 0.72;
+  }
+  42% {
+    filter: brightness(1.06) saturate(1.02);
+    opacity: 1;
+  }
+  100% {
+    filter: brightness(1) saturate(1);
+    opacity: 1;
+  }
+}
+
+.desk-lightbox-warmup {
+  animation: desk-lamp-warmup 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Subtle Architectural Millimeter Drafting Ruler Edge */
+.desk-ruler-top {
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(243, 238, 229, 0.16) 0px,
+      rgba(243, 238, 229, 0.16) 1px,
+      transparent 1px,
+      transparent 8px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(217, 155, 38, 0.28) 0px,
+      rgba(217, 155, 38, 0.28) 1px,
+      transparent 1px,
+      transparent 40px
+    );
+  background-size: 100% 5px, 100% 10px;
+  background-repeat: no-repeat;
+  background-position: bottom left;
+}
+
+[data-theme='day'] .desk-ruler-top {
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(30, 27, 24, 0.14) 0px,
+      rgba(30, 27, 24, 0.14) 1px,
+      transparent 1px,
+      transparent 8px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(168, 114, 18, 0.34) 0px,
+      rgba(168, 114, 18, 0.34) 1px,
+      transparent 1px,
+      transparent 40px
+    );
+}
+
+/* ==========================================================================
+   V3.5 10/10 — 3D 16MM PROJECTOR · 3D BRASS LAMP · AWAKENING · DRAWER · TRANSITIONS
+   ========================================================================== */
+
+/* 3D 16mm Twin-Reel Cinema Projector Chassis */
+.projector-chassis {
+  position: relative;
+  border-radius: 16px;
+  background: linear-gradient(155deg, #252220 0%, #161413 58%, #100f0e 100%);
+  border: 1px solid rgba(139, 185, 255, 0.26);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 5px 0 #0a0908,
+    0 12px 24px rgba(0, 0, 0, 0.42);
+}
+
+.mech-obj:hover .projector-chassis {
+  border-color: rgba(217, 155, 38, 0.65);
+}
+
+.projector-beam {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(
+    260px circle at 92% 52%,
+    rgba(245, 198, 102, 0.26) 0%,
+    rgba(96, 165, 250, 0.1) 42%,
+    transparent 74%
+  );
+  transition: opacity 260ms ease;
+}
+
+.mech-obj:hover .projector-beam {
+  opacity: 1;
+}
+
+@keyframes projector-reel-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.projector-reel {
+  animation: projector-reel-spin 9s linear infinite;
+}
+
+.projector-reel-rev {
+  animation-duration: 7.4s;
+}
+
+.mech-obj:hover .projector-reel {
+  animation-duration: 1.8s;
+}
+
+.mech-obj:hover .projector-reel-rev {
+  animation-duration: 1.5s;
+}
+
+/* 3D Articulated Brass Desk Lamp */
+.desk-lamp-head {
+  transform-origin: 29px 12px;
+  transition: transform 340ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.desk-lamp-btn[data-lit='false'] .desk-lamp-head {
+  transform: rotate(22deg);
+}
+
+@keyframes lamp-head-nod {
+  0% {
+    transform: rotate(0deg);
+  }
+  32% {
+    transform: rotate(-14deg);
+  }
+  65% {
+    transform: rotate(7deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+.desk-lamp-btn[data-swinging='true'] .desk-lamp-head {
+  animation: lamp-head-nod 480ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 1.0s Non-Blocking Opening Awakening Stagger */
+@keyframes desk-awaken-rise {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.985);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.desk-awaken {
+  animation: desk-awaken-rise 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Brass-Handle Studio Drawer Slide-Up */
+@keyframes drawer-slide-up {
+  0% {
+    transform: translate3d(0, 100%, 0);
+    opacity: 0.4;
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+}
+
+.studio-drawer-sheet {
+  animation: drawer-slide-up 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* 350ms Classic Cartoon Studio Room Transitions */
+@keyframes studio-trans-iris {
+  0% {
+    clip-path: circle(0% at 50% 50%);
+    opacity: 0.96;
+  }
+  42% {
+    clip-path: circle(22% at 50% 50%);
+    opacity: 1;
+  }
+  100% {
+    clip-path: circle(120% at 50% 50%);
+    opacity: 0;
+  }
+}
+
+@keyframes studio-trans-page {
+  0% {
+    transform: translateX(-8%) scaleX(1.06);
+    opacity: 0.92;
+  }
+  50% {
+    transform: translateX(0%) scaleX(1);
+    opacity: 0.85;
+  }
+  100% {
+    transform: translateX(102%) scaleX(0.95);
+    opacity: 0;
+  }
+}
+
+@keyframes studio-trans-curtain-l {
+  0% {
+    transform: translateX(0%);
+  }
+  35% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-104%);
+  }
+}
+
+@keyframes studio-trans-curtain-r {
+  0% {
+    transform: translateX(0%);
+  }
+  35% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(104%);
+  }
+}
+
+@keyframes studio-trans-gate {
+  0% {
+    opacity: 0.96;
+    filter: brightness(1.35);
+  }
+  45% {
+    opacity: 0.85;
+    filter: brightness(0.9);
+  }
+  100% {
+    opacity: 0;
+    filter: brightness(1);
+  }
+}
+
+.studio-trans-iris {
+  animation: studio-trans-iris 360ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.studio-trans-page {
+  animation: studio-trans-page 350ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.studio-trans-curtain-l {
+  animation: studio-trans-curtain-l 360ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.studio-trans-curtain-r {
+  animation: studio-trans-curtain-r 360ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.studio-trans-gate {
+  animation: studio-trans-gate 350ms ease-out forwards;
+}
+
+/* Radial Quick Wheel Pop (Draw Workspace Q / Right-Click) */
+@keyframes radial-wheel-pop {
+  0% {
+    transform: translate(-50%, -50%) scale(0.76);
+    opacity: 0;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+}
+
+.radial-wheel-pop {
+  animation: radial-wheel-pop 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* 3D Physical Thumb-Flip Pocket Flipbook Book */
+.pocket-flip-stage {
+  perspective: 920px;
+  transform-style: preserve-3d;
+}
+
+.pocket-flip-book {
+  position: relative;
+  transform-style: preserve-3d;
+  transform: rotateX(8deg) rotateY(-6deg);
+  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.pocket-flip-stage:hover .pocket-flip-book {
+  transform: rotateX(4deg) rotateY(-3deg);
+}
+
+@keyframes pocket-leaf-turn {
+  0% {
+    transform: rotateY(0deg);
+    opacity: 0.96;
+  }
+  100% {
+    transform: rotateY(-135deg);
+    opacity: 0;
+  }
+}
+
+.pocket-leaf-turning {
+  transform-origin: left center;
+  animation: pocket-leaf-turn 220ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Non-intrusive Bottom-Right Toast Pop-In */
+@keyframes toast-pop-in {
+  0% {
+    transform: translate3d(0, 12px, 0) scale(0.96);
+    opacity: 0;
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 1;
+  }
+}
+
+.toast-pop-in {
+  animation: toast-pop-in 210ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Living Studio Guide: Hand-Drawn Ink Ring, Bereli Gezgin Mascot & Ghost Ink Pencil */
+@keyframes tour-draw-ring {
+  0% {
+    stroke-dashoffset: 1000;
+    opacity: 0.4;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes tour-ring-pulse {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 6px rgba(217, 155, 38, 0.55));
+  }
+  50% {
+    filter: drop-shadow(0 0 14px rgba(229, 77, 46, 0.85));
+  }
+}
+
+@keyframes tour-mascot-breathe {
+  0%,
+  100% {
+    transform: translateY(0px) scale(1, 1);
+  }
+  50% {
+    transform: translateY(-2.5px) scale(0.985, 1.02);
+  }
+}
+
+@keyframes tour-mascot-jump {
+  0% {
+    transform: translateY(0) scale(1.06, 0.92);
+  }
+  40% {
+    transform: translateY(-12px) scale(0.94, 1.08);
+  }
+  75% {
+    transform: translateY(1px) scale(1.05, 0.94);
+  }
+  100% {
+    transform: translateY(0) scale(1, 1);
+  }
+}
+
+@keyframes ghost-pencil-draw {
+  0% {
+    stroke-dashoffset: 420;
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.42;
+  }
+  75% {
+    stroke-dashoffset: 0;
+    opacity: 0.36;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0.16;
+  }
+}
+
+.tour-ink-ring {
+  stroke-dasharray: 1000;
+  animation:
+    tour-draw-ring 620ms cubic-bezier(0.22, 1, 0.36, 1) forwards,
+    tour-ring-pulse 2.2s ease-in-out infinite 620ms;
+}
+
+.tour-mascot-idle {
+  animation: tour-mascot-breathe 2.6s ease-in-out infinite;
+}
+
+.tour-mascot-celebrate {
+  animation: tour-mascot-jump 520ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.ghost-ink-stroke {
+  stroke-dasharray: 420;
+  animation: ghost-pencil-draw 2.8s cubic-bezier(0.22, 1, 0.36, 1) infinite alternate;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .k3d,
+  .k3d-cap,
+  .k3d-shadow,
+  .k3d-sheen,
+  .k3d-ripple,
+  .mech-body,
+  .clapper-arm,
+  .lens-barrel,
+  .lens-iris-blades,
+  .marionette-crossbar,
+  .marionette-dangler,
+  .projector-reel,
+  .projector-reel-rev,
+  .projector-beam,
+  .desk-lamp-head,
+  .desk-awaken,
+  .studio-drawer-sheet,
+  .studio-trans-iris,
+  .studio-trans-page,
+  .studio-trans-curtain-l,
+  .studio-trans-curtain-r,
+  .studio-trans-gate,
+  .radial-wheel-pop,
+  .flipbook-3d-cover,
+  .flipbook-3d-back1,
+  .flipbook-3d-back2,
+  .lever-switch-knob,
+  .studio-icon-iris,
+  .studio-icon-nib,
+  .studio-icon-flip-sheet,
+  .studio-icon-bone-arm,
+  .hardware-led,
+  .sheet-flip-next,
+  .sheet-flip-prev,
+  .desk-lightbox-warmup,
+  .pocket-leaf-turning,
+  .toast-pop-in,
+  .brand-emblem-curl,
+  .tour-ink-ring,
+  .tour-mascot-idle,
+  .tour-mascot-celebrate,
+  .ghost-ink-stroke {
+    transition: none !important;
+    animation: none !important;
+  }
+}

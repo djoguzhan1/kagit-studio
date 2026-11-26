@@ -1,0 +1,7 @@
+# Install on CUDA GPU workers (RunPod / Modal / AWS G5 / A100 / L40S) on top of requirements.txt
+torch>=2.4.0
+torchvision>=0.19.0
+diffusers>=0.31.0
+transformers>=4.46.0
+accelerate>=1.0.0
+google-genai>=1.0.0
