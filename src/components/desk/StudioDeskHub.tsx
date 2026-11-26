@@ -17,7 +17,8 @@ import { StudioDrawer } from './StudioDrawer';
 import { GuideLauncherButton } from '../guide/GuideLauncherButton';
 import { AccountButton } from '../account/AccountButton';
 import { soundEngine } from '../../engine/soundEngine';
-import { useT } from '../../i18n/translations';
+import { localizeProjectName, useT, useTFmt } from '../../i18n/translations';
+import { useModalA11y } from '../../hooks/useModalA11y';
 import { preloadStudioModule } from '../../App';
 
 const AWAKEN_SESSION_KEY = 'kagit:desk-awakened:v3';
@@ -50,11 +51,16 @@ export default function StudioDeskHub() {
   } = useStudioStore();
 
   const t = useT();
-
+  const tf = useTFmt();
   const [newName, setNewName] = useState('');
   const [newAspect, setNewAspect] = useState<AspectPreset>('16:9');
   const [newFps, setNewFps] = useState<8 | 12 | 15 | 24>(12);
   const [showSpecPopover, setShowSpecPopover] = useState(false);
+  const specPopoverRef = useModalA11y<HTMLDivElement>({
+    open: showSpecPopover,
+    onClose: () => setShowSpecPopover(false),
+    modal: false,
+  });
   const [previewMode, setPreviewMode] = useState<DeskPreviewMode>('draw');
   const [hoveredObj, setHoveredObj] = useState<UniverseHoverTarget>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -84,13 +90,7 @@ export default function StudioDeskHub() {
   const handleCreate = (targetMode: 'draw' | 'paper' | 'puppet' = 'draw') => {
     const customName = newName.trim();
     const fallbackName =
-      locale === 'en'
-        ? targetMode === 'paper'
-          ? 'Paper Flipbook'
-          : 'New Animation'
-        : targetMode === 'paper'
-          ? 'Kağıt Flipbook'
-          : 'Yeni Çizgi Film';
+      targetMode === 'paper' ? t('deskPaperFlipbookName') : t('deskNewAnimationName');
     const project =
       targetMode === 'draw'
         ? openOrCreateBlankProject(customName, newAspect, newFps)
@@ -100,11 +100,7 @@ export default function StudioDeskHub() {
     if (targetMode !== 'draw') {
       openProject(project.id, targetMode);
     }
-    notify(
-      locale === 'en'
-        ? `"${project.name}" opened on the backlit desk`
-        : `"${project.name}" ışıklı masaya açıldı`
-    );
+    notify(tf('deskProjectOpenedToast', { name: localizeProjectName(project.name, locale) }));
   };
 
   const awakenStyle = (delayMs: number): React.CSSProperties | undefined =>
@@ -146,36 +142,25 @@ export default function StudioDeskHub() {
             <AccountButton />
             <GuideLauncherButton />
 
-            <div
-              className="flex items-center p-0.5 rounded-lg console-well border border-desk-border font-mono text-[11px]"
-              role="group"
-              aria-label="Language"
+            <button
+              type="button"
+              onClick={() => {
+                soundEngine.click(1.06);
+                setLocale(locale === 'tr' ? 'en' : 'tr');
+              }}
+              title={t('langToggleAria')}
+              aria-label={t('langToggleAria')}
+              className="min-w-[44px] min-h-[44px] px-2.5 rounded-xl console-well border border-desk-border hover:border-ink-brass/60 font-mono text-[11px] font-bold uppercase text-ink-brass inline-flex items-center justify-center transition-colors"
             >
-              {(['tr', 'en'] as const).map((lng) => (
-                <button
-                  key={lng}
-                  type="button"
-                  onClick={() => {
-                    soundEngine.click(1.06);
-                    setLocale(lng);
-                  }}
-                  className={`px-1.5 py-0.5 rounded-md font-bold uppercase transition-colors ${
-                    locale === lng
-                      ? 'bg-desk-panel text-ink-brass border border-desk-border'
-                      : 'text-desk-muted hover:text-desk-text border border-transparent'
-                  }`}
-                >
-                  {lng}
-                </button>
-              ))}
-            </div>
+              {locale}
+            </button>
 
             <button
               type="button"
               onClick={toggleSound}
-              className="p-2 rounded-xl border border-desk-border bg-desk-well/75 text-desk-muted hover:text-desk-text hover:border-desk-muted/60 transition-colors"
+              className="min-w-[44px] min-h-[44px] p-2 rounded-xl border border-desk-border bg-desk-well/75 text-desk-muted hover:text-desk-text hover:border-desk-muted/60 inline-flex items-center justify-center transition-colors"
               title={soundEnabled ? t('soundToggleTitleOn') : t('soundToggleTitleOff')}
-              aria-label="Ses efektleri"
+              aria-label={soundEnabled ? t('soundToggleTitleOn') : t('soundToggleTitleOff')}
             >
               {soundEnabled ? (
                 <Volume2 className="w-4 h-4 text-ink-emerald" />
@@ -246,6 +231,7 @@ export default function StudioDeskHub() {
               {/* Floating Glass Scene Spec Popover (NEVER pushes layout!) */}
               {showSpecPopover && (
                 <div
+                  ref={specPopoverRef}
                   role="dialog"
                   aria-label={t('sceneSettingsTitle')}
                   className="toast-pop-in absolute left-0 right-0 top-[calc(100%+8px)] z-30 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-ink-brass/50 p-4 space-y-3 shadow-2xl"
@@ -258,7 +244,7 @@ export default function StudioDeskHub() {
                       type="button"
                       onClick={() => setShowSpecPopover(false)}
                       className="p-1 rounded-lg text-desk-muted hover:text-desk-text"
-                      aria-label="Kapat"
+                      aria-label={t('radialClose')}
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>

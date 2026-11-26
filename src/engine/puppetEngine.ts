@@ -7,6 +7,7 @@ import type {
   PuppetRig,
 } from '../types/studio';
 import { canvasToPngBlob, getBlobBitmap, makeId, saveBlob } from './db';
+import { localizePinOrPartLabel, type StudioLocale } from '../i18n/translations';
 import { rmsToMouthViseme } from './audioEngine';
 import { getOrBuildCachedRigPack } from './characterIntakeEngine';
 import type { LimbPartId } from './skeletonSkinEngine';
@@ -662,7 +663,7 @@ export function extractLassoCutout(
  */
 export async function autoSplitCanvasToPuppetParts(
   sourceCanvas: HTMLCanvasElement,
-  locale: 'tr' | 'en' = 'tr'
+  locale: StudioLocale = 'tr'
 ): Promise<PuppetPart[]> {
   const sw = sourceCanvas.width;
   const sh = sourceCanvas.height;
@@ -696,7 +697,7 @@ export async function autoSplitCanvasToPuppetParts(
     return [
       {
         id: rootId,
-        name: locale === 'en' ? 'Body' : 'Gövde',
+        name: localizePinOrPartLabel('Gövde', locale),
         parentId: null,
         blobKey,
         x: 0,
@@ -745,7 +746,7 @@ export async function autoSplitCanvasToPuppetParts(
 
     parts.push({
       id: sp.isRoot ? rootId : makeId('prt'),
-      name: locale === 'en' ? sp.nameEn : sp.nameTr,
+      name: localizePinOrPartLabel(sp.nameTr, locale),
       parentId: sp.isRoot ? null : rootId,
       blobKey,
       x: x0,

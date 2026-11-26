@@ -18,7 +18,9 @@ import {
   X,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
-import { useT } from '../../i18n/translations';
+import { localizeActorName, localizePinOrPartLabel, useT, useTFmt } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
+import { useModalA11y } from '../../hooks/useModalA11y';
 import type {
   EasingType,
   PartTransform,
@@ -62,6 +64,7 @@ const MAX_UNDO = 25;
 
 export default function PuppetStudio() {
   const t = useT();
+  const tf = useTFmt();
   const {
     projects,
     activeProjectId,
@@ -88,7 +91,7 @@ export default function PuppetStudio() {
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [placingPivot, setPlacingPivot] = useState(false);
   const [autoSplitting, setAutoSplitting] = useState(false);
-  const [partNameDraft, setPartNameDraft] = useState(() => (locale === 'en' ? 'Torso' : 'Gövde'));
+  const [partNameDraft, setPartNameDraft] = useState(() => localizePinOrPartLabel('Gövde', locale));
   const [confirmDeleteRig, setConfirmDeleteRig] = useState(false);
 
   const cutCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -103,6 +106,18 @@ export default function PuppetStudio() {
 
   // Export state for Cutout Mode
   const [exportingKind, setExportingKind] = useState<null | 'video' | 'gif' | 'draw'>(null);
+  const activeTourMode = useStudioStore((st) => st.activeTourMode);
+  useEffect(() => {
+    if (activeTourMode === 'puppet' && engineTab !== 'mesh') {
+      setEngineTab('mesh');
+    }
+  }, [activeTourMode, engineTab]);
+  const cutoutExportDialogRef = useModalA11y<HTMLDivElement>({
+    open: Boolean(engineTab === 'cutout' && puppetExportOpen && activeRig),
+    onClose: () => setPuppetExportOpen(false),
+    closeDisabled: Boolean(exportingKind),
+    modal: true,
+  });
   const [exportPct, setExportPct] = useState(0);
   const [exportLabel, setExportLabel] = useState('');
   const exportAbortRef = useRef(false);
@@ -226,11 +241,7 @@ export default function PuppetStudio() {
     setActiveRigId(rig.id);
     setSubMode('cut');
     setConfirmDeleteRig(false);
-    notify(
-      locale === 'en'
-        ? `"${name}" loaded — lasso around each limb to cut!`
-        : `"${name}" kukla tezgahına yüklendi — kementle parçaları kes!`
-    );
+    notify(tf('puppetCutLoadedToast', { name: localizeActorName(name, locale) }));
   };
 
   const handleLoadSampleCutout = async () => {
@@ -241,19 +252,14 @@ export default function PuppetStudio() {
     c.width = sample.sourceW;
     c.height = sample.sourceH;
     c.getContext('2d')!.drawImage(bmp, 0, 0, c.width, c.height);
-    await createRigFromCanvas(c, locale === 'en' ? 'Horned Baron' : 'Şapkalı Baron');
+    await createRigFromCanvas(c, localizeActorName('Şapkalı Baron', locale));
   };
 
   const handleLoadFromCurrentFrame = async () => {
     if (!project) return;
     const frame = project.frames[activeFrameIndex] ?? project.frames[0];
     if (!frame || frame.layers.every((l) => !l.blobKey)) {
-      notify(
-        locale === 'en'
-          ? 'Active drawing frame is empty — try Sample Hero or draw first!'
-          : 'Aktif çizim karesi boş — Hazır Karakterle başla ya da önce çizim yap!',
-        'info'
-      );
+      notify(t('puppetBlankFrameInfo'), 'info');
       return;
     }
     const raw = await renderFrameComposite(project, frame, {
@@ -263,7 +269,7 @@ export default function PuppetStudio() {
     const prepared = prepareCharacterCanvas(raw, { maxDim: 768, stripPaper: false });
     await createRigFromCanvas(
       prepared.canvas,
-      locale === 'en' ? `Frame #${activeFrameIndex + 1} Puppet` : `Kare #${activeFrameIndex + 1} Kuklası`
+      tf('puppetFramePuppetName', { num: activeFrameIndex + 1 })
     );
   };
 
@@ -284,9 +290,9 @@ export default function PuppetStudio() {
         notify(t('puppetEmptyUploadError'), 'error');
         return;
       }
-      await createRigFromCanvas(prepared.canvas, file.name.replace(/\.[^.]+$/, '').slice(0, 26) || 'Kukla');
+      await createRigFromCanvas(prepared.canvas, file.name.replace(/\.[^.]+$/, '').slice(0, 26) || localizeActorName('Kukla', locale));
     } catch {
-      notify(locale === 'en' ? 'Could not read image' : 'Karakter görseli okunamadı', 'error');
+      notify(t('puppetErrReadImage'), 'error');
     } finally {
       URL.revokeObjectURL(url);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -310,7 +316,7 @@ export default function PuppetStudio() {
       }
       const autoParts = await autoSplitCanvasToPuppetParts(src, locale);
       if (autoParts.length === 0) {
-        notify(locale === 'en' ? 'Could not detect parts' : 'Parçalar tespit edilemedi', 'error');
+        notify(t('puppetErrDetectParts'), 'error');
         return;
       }
       const nextTransforms: Record<string, PartTransform> = {};
@@ -331,11 +337,7 @@ export default function PuppetStudio() {
       setSelectedPartId(autoParts[0]?.id ?? null);
       setSubMode('animate');
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en'
-          ? `Auto-split into ${autoParts.length} rigged parts — ready to animate!`
-          : `Otomatik olarak ${autoParts.length} eklemli parçaya ayrıldı — hareket vermeye hazır!`
-      );
+      notify(tf('puppetAutoSplitToast', { count: autoParts.length }));
     } finally {
       setAutoSplitting(false);
     }
@@ -534,7 +536,7 @@ export default function PuppetStudio() {
     if (selectedPartId && joints.has(selectedPartId)) {
       const selJ = joints.get(selectedPartId)!;
       if (Math.hypot(x - selJ.rotHandleX, y - selJ.rotHandleY) < 24) {
-        e.currentTarget.setPointerCapture(e.pointerId);
+        safeSetPointerCapture(e.currentTarget, e.pointerId);
         gizmoDragRef.current = {
           mode: 'rotate',
           partId: selectedPartId,
@@ -550,7 +552,7 @@ export default function PuppetStudio() {
         return;
       }
       if (Math.hypot(x - selJ.scaleHandleX, y - selJ.scaleHandleY) < 22) {
-        e.currentTarget.setPointerCapture(e.pointerId);
+        safeSetPointerCapture(e.currentTarget, e.pointerId);
         gizmoDragRef.current = {
           mode: 'scale',
           partId: selectedPartId,
@@ -576,7 +578,7 @@ export default function PuppetStudio() {
         Math.hypot(x - j.centerX, y - j.centerY) < j.radius
       ) {
         setSelectedPartId(part.id);
-        e.currentTarget.setPointerCapture(e.pointerId);
+        safeSetPointerCapture(e.currentTarget, e.pointerId);
         gizmoDragRef.current = {
           mode: 'move',
           partId: part.id,
@@ -663,11 +665,11 @@ export default function PuppetStudio() {
       commitRig({ ...activeRig, parts: updatedParts });
       setPlacingPivot(false);
       soundEngine.click(1.1);
-      notify(locale === 'en' ? 'Joint pin updated!' : 'Eklem noktası güncellendi!');
+      notify(t('puppetJointUpdated'));
       return;
     }
 
-    e.currentTarget.setPointerCapture(e.pointerId);
+    safeSetPointerCapture(e.currentTarget, e.pointerId);
     setDrawingLasso(true);
     setLassoPts([pt]);
   };
@@ -696,7 +698,7 @@ export default function PuppetStudio() {
         const rootPart = activeRig.parts.find((p) => p.parentId === null);
         const newPart: PuppetPart = {
           id: makeId('prt'),
-          name: partNameDraft.trim() || `${locale === 'en' ? 'Part' : 'Parça'} ${activeRig.parts.length + 1}`,
+          name: partNameDraft.trim() || `${t('puppetPartPrefix')} ${activeRig.parts.length + 1}`,
           parentId: activeRig.parts.length === 0 ? null : rootPart?.id ?? null,
           blobKey,
           x: cut.x,
@@ -718,17 +720,10 @@ export default function PuppetStudio() {
         };
         commitRig(updated);
         setSelectedPartId(newPart.id);
-        const suggestions =
-          locale === 'en'
-            ? ['Torso', 'Head', 'Right Arm', 'Left Arm', 'Right Leg', 'Left Leg', 'Tail']
-            : ['Gövde', 'Baş', 'Sağ Kol', 'Sol Kol', 'Sağ Bacak', 'Sol Bacak', 'Kuyruk'];
-        setPartNameDraft(suggestions[(activeRig.parts.length + 1) % suggestions.length]);
+        const baseSuggestions = ['Gövde', 'Baş', 'Sağ Kol', 'Sol Kol', 'Sağ Bacak', 'Sol Bacak', 'Kuyruk'];
+        setPartNameDraft(localizePinOrPartLabel(baseSuggestions[(activeRig.parts.length + 1) % baseSuggestions.length], locale));
         soundEngine.shutter();
-        notify(
-          locale === 'en'
-            ? `"${newPart.name}" cut cleanly!`
-            : `"${newPart.name}" kesildi — eklem noktasını taşıyabilirsin!`
-        );
+        notify(tf('puppetPartCutToast', { name: localizePinOrPartLabel(newPart.name, locale) }));
       }
     }
     setLassoPts([]);
@@ -776,9 +771,9 @@ export default function PuppetStudio() {
         (ctx, idx, w, h) => ctx.drawImage(preRendered[idx], 0, 0, w, h),
         {
           replace: false,
-          notePrefix: locale === 'en' ? 'Puppet' : 'Kukla',
-          layerName: locale === 'en' ? 'Puppet Layer' : 'Kukla Sahnesi',
-          topLayerName: locale === 'en' ? 'Top Ink (Effects)' : 'Üst Çizim (Efekt)',
+          notePrefix: t('puppetNotePrefix'),
+          layerName: t('puppetLayerSceneName'),
+          topLayerName: t('filmLayerTopEffects'),
           onProgress: (done, total) => {
             setExportPct(45 + Math.round((done / total) * 55));
             setExportLabel(`${t('puppetSendingToDraw')}… ${done}/${total}`);
@@ -788,11 +783,7 @@ export default function PuppetStudio() {
       preRendered.forEach((b) => b.close());
       setPuppetExportOpen(false);
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en'
-          ? `${added} puppet frames sent to Draw Desk!`
-          : `${added} kukla karesi Çizim Masası'na aktarıldı!`
-      );
+      notify(tf('puppetFramesSentDraw', { count: added }));
     } finally {
       setExportingKind(null);
       setExportPct(0);
@@ -834,7 +825,7 @@ export default function PuppetStudio() {
       const safe = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
       triggerDownload(gifBlob, `${safe}.gif`);
       soundEngine.clapperSnap();
-      notify(locale === 'en' ? 'Puppet GIF downloaded!' : 'Animasyonlu GIF indirildi!');
+      notify(t('puppetGifDownloaded'));
       setPuppetExportOpen(false);
     } finally {
       setExportingKind(null);
@@ -879,7 +870,7 @@ export default function PuppetStudio() {
           const safe = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
           triggerDownload(mp4Blob, `${safe}.mp4`);
           soundEngine.clapperSnap();
-          notify(locale === 'en' ? 'Puppet MP4 downloaded!' : 'Kukla videosu (.mp4) indirildi!');
+          notify(t('puppetMp4Downloaded'));
           setPuppetExportOpen(false);
           return;
         }
@@ -929,7 +920,7 @@ export default function PuppetStudio() {
       const safe = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
       triggerDownload(new Blob(chunks, { type: mime }), `${safe}.${ext}`);
       soundEngine.clapperSnap();
-      notify(locale === 'en' ? 'Puppet video downloaded!' : 'Kukla videosu indirildi!');
+      notify(t('puppetVideoDownloaded'));
       setPuppetExportOpen(false);
     } finally {
       exportPlayer.dispose();
@@ -953,7 +944,7 @@ export default function PuppetStudio() {
     const safe = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
     triggerDownload(blob, `${safe}_kare${rigFrame + 1}.png`);
     soundEngine.shutter();
-    notify(locale === 'en' ? 'HD PNG downloaded!' : 'HD kare indirildi!');
+    notify(t('puppetPngDownloaded'));
   };
 
   const toggleMicRecord = async () => {
@@ -964,11 +955,11 @@ export default function PuppetStudio() {
         setRecording(false);
         const track = await analyzeAndStoreAudio(
           blob,
-          locale === 'en' ? 'Puppet Voice' : 'Kukla Seslendirmesi',
+          t('puppetVoiceTrackLabel'),
           project.fps
         );
         setAudioTrack(track);
-        notify(locale === 'en' ? 'Voice lip-sync ready!' : 'Konuşma senkronu hazır!');
+        notify(t('puppetVoiceLipReady'));
       } catch {
         setRecording(false);
         recorderRef.current?.cleanup();
@@ -981,7 +972,7 @@ export default function PuppetStudio() {
       recorderRef.current = rec;
       setRecording(true);
     } catch {
-      notify(locale === 'en' ? 'Microphone permission denied' : 'Mikrofon izni alınamadı', 'error');
+      notify(t('puppetMicDeniedErr'), 'error');
     }
   };
 
@@ -1107,7 +1098,7 @@ export default function PuppetStudio() {
           </button>
         </div>
 
-        <span className="font-mono text-[10px] text-desk-muted hidden md:inline">
+        <span className="font-mono text-[11px] text-desk-muted hidden md:inline">
           {engineTab === 'mesh' ? t('puppetHintFlex') : t('puppetHintCutout')}
         </span>
       </div>
@@ -1200,7 +1191,7 @@ export default function PuppetStudio() {
                     >
                       {project.rigs.map((r) => (
                         <option key={r.id} value={r.id}>
-                          {r.name} ({r.parts.length})
+                          {localizeActorName(r.name, locale)} ({r.parts.length})
                         </option>
                       ))}
                     </select>
@@ -1275,13 +1266,13 @@ export default function PuppetStudio() {
               </div>
 
               {/* Main 2-Column Cutout Workspace — Fits Strictly Inside 1280x800 (ZERO Bottom Clip!) */}
-              <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-3 overflow-hidden">
-                <div className="flex-1 min-w-0 min-h-0 rounded-2xl bg-desk-surface border border-desk-border p-3 shadow-xl flex flex-col gap-2 overflow-hidden">
+              <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-3 overflow-y-auto lg:overflow-hidden">
+                <div className="shrink-0 min-h-[268px] sm:min-h-[340px] lg:shrink lg:min-h-0 lg:flex-1 min-w-0 rounded-2xl bg-desk-surface border border-desk-border p-3 shadow-xl flex flex-col gap-2 overflow-hidden">
                   {subMode === 'cut' ? (
                     <>
                       <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
                         <div className="flex items-center gap-2">
-                          <span className="font-mono text-[10px] font-bold uppercase text-desk-muted">
+                          <span className="font-mono text-[11px] font-bold uppercase text-desk-muted">
                             {t('puppetCutPartName')}:
                           </span>
                           <input
@@ -1340,7 +1331,7 @@ export default function PuppetStudio() {
                         />
                       </div>
 
-                      <div className="flex flex-wrap items-center justify-between gap-1.5 font-mono text-[10px] text-desk-muted px-0.5 shrink-0">
+                      <div className="flex flex-wrap items-center justify-between gap-1.5 font-mono text-[11px] text-desk-muted px-0.5 shrink-0">
                         <span className="truncate">{t('puppetCutStageTip')}</span>
                         <div className="flex items-center gap-1">
                           <span>{t('puppetCutQuickLoop')}:</span>
@@ -1401,7 +1392,7 @@ export default function PuppetStudio() {
                               {recording ? t('puppetVoiceMicStop') : t('puppetVoiceMicBtn')}
                             </KeycapButton>
                             {project.audio && !project.audio.muted && (
-                              <span className="font-mono text-[10px] px-2 py-1 rounded bg-desk-panel border border-desk-border text-ink-brass">
+                              <span className="font-mono text-[11px] px-2 py-1 rounded bg-desk-panel border border-desk-border text-ink-brass">
                                 {t('puppetCutVoiceActive')} · {visemeHumanLabel}
                               </span>
                             )}
@@ -1409,13 +1400,13 @@ export default function PuppetStudio() {
                         </div>
 
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-mono text-[10px] text-desk-muted">
+                          <span className="font-mono text-[11px] text-desk-muted">
                             {t('puppetCutKeyframes')}:
                           </span>
                           {activeRig.keyframes.map((kf) => (
                             <span
                               key={kf.id}
-                              className={`inline-flex items-center rounded font-mono text-[10px] border overflow-hidden ${
+                              className={`inline-flex items-center rounded font-mono text-[11px] border overflow-hidden ${
                                 kf.frame === rigFrame
                                   ? 'bg-ink-brass text-[#1c1405] border-ink-brass font-bold'
                                   : 'bg-desk-surface border-desk-border text-desk-muted'
@@ -1465,7 +1456,7 @@ export default function PuppetStudio() {
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     ) : (
-                      <div className="flex items-center gap-1 font-mono text-[9.5px]">
+                      <div className="flex items-center gap-1 font-mono text-[11px]">
                         <span className="text-ink-vermilion">{t('puppetDeleteConfirm')}</span>
                         <button
                           type="button"
@@ -1514,10 +1505,10 @@ export default function PuppetStudio() {
                                   className="hardware-led"
                                   data-on={isSel ? 'vermilion' : undefined}
                                 />
-                                {part.name}
+                                {localizePinOrPartLabel(part.name, locale)}
                               </div>
-                              <div className="font-mono text-[10px] text-desk-muted">
-                                {parentName ? `↳ ${parentName}` : t('puppetCutRootBone')}
+                              <div className="font-mono text-[11px] text-desk-muted">
+                                {parentName ? `↳ ${localizePinOrPartLabel(parentName, locale)}` : t('puppetCutRootBone')}
                               </div>
                             </div>
 
@@ -1549,7 +1540,7 @@ export default function PuppetStudio() {
                     <div className="pt-2.5 border-t border-desk-border space-y-2.5">
                       <div className="grid grid-cols-2 gap-2">
                         <div>
-                          <label className="block font-mono text-[10px] text-desk-muted mb-1">
+                          <label className="block font-mono text-[11px] text-desk-muted mb-1">
                             {t('puppetCutParentLabel')}
                           </label>
                           <select
@@ -1574,14 +1565,14 @@ export default function PuppetStudio() {
                               .filter((p) => !wouldCreateBoneCycle(activeRig.parts, selectedPart.id, p.id))
                               .map((p) => (
                                 <option key={p.id} value={p.id}>
-                                  {p.name}
+                                  {localizePinOrPartLabel(p.name, locale)}
                                 </option>
                               ))}
                           </select>
                         </div>
 
                         <div>
-                          <label className="block font-mono text-[10px] text-desk-muted mb-1">
+                          <label className="block font-mono text-[11px] text-desk-muted mb-1">
                             {t('puppetCutMouthLabel')}
                           </label>
                           <select
@@ -1609,7 +1600,7 @@ export default function PuppetStudio() {
                       {subMode === 'animate' && (
                         <div className="rounded-xl console-well border border-desk-border p-2.5 space-y-2">
                           <div>
-                            <div className="flex justify-between font-mono text-[10px] text-desk-muted mb-0.5">
+                            <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
                               <span>{t('puppetCutAngle')}</span>
                               <span className="text-desk-text font-bold">{Math.round(selTransform.rotation)}°</span>
                             </div>
@@ -1627,7 +1618,7 @@ export default function PuppetStudio() {
 
                           <div className="grid grid-cols-2 gap-2">
                             <div>
-                              <div className="flex justify-between font-mono text-[10px] text-desk-muted mb-0.5">
+                              <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
                                 <span>{t('puppetCutStretchX')}</span>
                                 <span>{selTransform.scaleX.toFixed(2)}</span>
                               </div>
@@ -1644,7 +1635,7 @@ export default function PuppetStudio() {
                               />
                             </div>
                             <div>
-                              <div className="flex justify-between font-mono text-[10px] text-desk-muted mb-0.5">
+                              <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
                                 <span>{t('puppetCutStretchY')}</span>
                                 <span>{selTransform.scaleY.toFixed(2)}</span>
                               </div>
@@ -1663,7 +1654,7 @@ export default function PuppetStudio() {
                           </div>
 
                           <div>
-                            <span className="block font-mono text-[10px] text-desk-muted mb-1">
+                            <span className="block font-mono text-[11px] text-desk-muted mb-1">
                               {t('puppetCutCurve')}
                             </span>
                             <div className="flex flex-wrap gap-1">
@@ -1672,7 +1663,7 @@ export default function PuppetStudio() {
                                   key={ec.id}
                                   type="button"
                                   onClick={() => setEasing(ec.id)}
-                                  className={`px-2 py-0.5 rounded font-mono text-[10px] border ${
+                                  className={`px-2 py-0.5 rounded font-mono text-[11px] border ${
                                     easing === ec.id
                                       ? 'border-ink-brass bg-ink-brass/20 text-desk-text font-bold'
                                       : 'border-desk-border text-desk-muted'
@@ -1709,23 +1700,26 @@ export default function PuppetStudio() {
               className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
             >
               <div
+                ref={cutoutExportDialogRef}
                 role="dialog"
                 aria-modal="true"
+                aria-labelledby="cutout-puppet-export-title"
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-2xl rounded-3xl bg-desk-surface border border-desk-border shadow-2xl overflow-hidden"
+                className="w-full max-w-2xl max-h-[calc(100dvh-1.5rem)] flex flex-col overflow-y-auto rounded-3xl bg-desk-surface border border-desk-border shadow-2xl"
               >
-                <div className="px-5 py-4 border-b border-desk-border flex items-center justify-between">
+                <div className="px-5 py-4 border-b border-desk-border flex items-center justify-between shrink-0">
                   <div>
-                    <h2 className="text-base font-extrabold text-desk-text">{t('puppetExportTitle')}</h2>
-                    <p className="font-mono text-[10.5px] text-desk-muted mt-0.5">
-                      {activeRig.name} · {activeRig.parts.length} · {activeRig.totalFrames} · {t('puppetExportSub')}
+                    <h2 id="cutout-puppet-export-title" className="text-base font-extrabold text-desk-text">{t('puppetExportTitle')}</h2>
+                    <p className="font-mono text-[11px] text-desk-muted mt-0.5">
+                      {localizeActorName(activeRig.name, locale)} · {activeRig.parts.length} · {activeRig.totalFrames} · {t('puppetExportSub')}
                     </p>
                   </div>
                   <button
                     type="button"
+                    aria-label={t('exportCloseAria')}
                     disabled={Boolean(exportingKind)}
                     onClick={() => setPuppetExportOpen(false)}
-                    className="p-2 rounded-xl console-well border border-desk-border text-desk-muted hover:text-desk-text disabled:opacity-40"
+                    className="min-w-[44px] min-h-[44px] p-2 rounded-xl inline-flex items-center justify-center console-well border border-desk-border text-desk-muted hover:text-desk-text disabled:opacity-40"
                   >
                     <X className="w-4 h-4" />
                   </button>

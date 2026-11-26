@@ -87,7 +87,8 @@ import {
   type StagePropId,
 } from '../../engine/shareCodec';
 import { useStudioStore } from '../../store/useStudioStore';
-import { useT } from '../../i18n/translations';
+import { localizeActorName, translate, useT, useTFmt, type TranslationKey } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
 import { getLiveDeviceProfile, reportRenderFrameTime } from '../../engine/deviceTierEngine';
 import {
   countRigViews,
@@ -168,26 +169,25 @@ interface BouncyBallState {
 
 interface SurprisePrompt {
   id: string;
-  tr: string;
-  en: string;
+  labelKey: TranslationKey;
   guide: 'cat' | 'robot' | 'hero' | 'ghost' | 'mushroom' | 'cloud';
 }
 
 const SURPRISE_PROMPTS: SurprisePrompt[] = [
-  { id: 'cat', tr: 'Şemsiyeli şaşkın kedi', en: 'Surprised cat with umbrella', guide: 'cat' },
-  { id: 'robot', tr: 'Kahvesini döken robot', en: 'Clumsy coffee robot', guide: 'robot' },
-  { id: 'hero', tr: 'Pelerinli cesur çöp adam', en: 'Caped stickman hero', guide: 'hero' },
-  { id: 'ghost', tr: 'Şapkalı neşeli hayalet', en: 'Happy ghost in a top hat', guide: 'ghost' },
-  { id: 'mushroom', tr: 'Yağmurda dans eden mantar', en: 'Dancing rainy mushroom', guide: 'mushroom' },
-  { id: 'cloud', tr: 'Güneş gözlüklü bulut', en: 'Cool cloud with shades', guide: 'cloud' },
+  { id: 'cat', labelKey: 'alivePromptCat', guide: 'cat' },
+  { id: 'robot', labelKey: 'alivePromptRobot', guide: 'robot' },
+  { id: 'hero', labelKey: 'alivePromptHero', guide: 'hero' },
+  { id: 'ghost', labelKey: 'alivePromptGhost', guide: 'ghost' },
+  { id: 'mushroom', labelKey: 'alivePromptMushroom', guide: 'mushroom' },
+  { id: 'cloud', labelKey: 'alivePromptCloud', guide: 'cloud' },
 ];
 
-const INK_SWATCHES = [
-  { hex: '#1C1917', tr: 'Mürekkep', en: 'Ink' },
-  { hex: '#E54D2E', tr: 'Kırmızı', en: 'Vermilion' },
-  { hex: '#2563EB', tr: 'Mavi', en: 'Blue' },
-  { hex: '#D99B26', tr: 'Altın', en: 'Gold' },
-  { hex: '#16A34A', tr: 'Yeşil', en: 'Green' },
+const INK_SWATCHES: ReadonlyArray<{ hex: string; labelKey: TranslationKey }> = [
+  { hex: '#1C1917', labelKey: 'swatchInk' },
+  { hex: '#E54D2E', labelKey: 'swatchVermilion' },
+  { hex: '#2563EB', labelKey: 'swatchBlue' },
+  { hex: '#D99B26', labelKey: 'swatchGold' },
+  { hex: '#16A34A', labelKey: 'swatchGreen' },
 ];
 
 /** Draws a super-faint non-photo-blue drafting silhouette when a Surprise Prompt is active */
@@ -1513,6 +1513,7 @@ export function InstantAliveStage({
   onOpenBlankDesk,
 }: InstantAliveStageProps) {
   const t = useT();
+  const tf = useTFmt();
   const locale = useStudioStore((s) => s.locale);
   const notify = useStudioStore((s) => s.notify);
   const performancePref = useStudioStore((s) => s.performancePref);
@@ -1695,15 +1696,7 @@ export function InstantAliveStage({
       const curLocale = useStudioStore.getState().locale;
       useStudioStore
         .getState()
-        .notify(
-          duet
-            ? curLocale === 'en'
-              ? 'Friend duo scene loaded — hit Draw 2nd to add yourself!'
-              : 'Arkadaşının 2 karakterli filmi açıldı — 2.\'yi Çiz ile kendini ekleyebilirsin!'
-            : curLocale === 'en'
-              ? 'Friend scene loaded — hit + Buddy to join in!'
-              : 'Arkadaşının çizgi filmi açıldı — + Arkadaş ile yanına katıl!'
-        );
+        .notify(translate(curLocale, duet ? 'aliveSharedTwoToast' : 'aliveSharedOneToast'));
     };
     hydrateFromHash();
     window.addEventListener('hashchange', hydrateFromHash);
@@ -2189,11 +2182,7 @@ export function InstantAliveStage({
   };
 
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch {
-      // Synthetic/interrupted pointer safe ignore
-    }
+    safeSetPointerCapture(e.currentTarget, e.pointerId);
     setGhostDismissed(true);
     const pt = toCanvasCoords(e);
     drawingRef.current = true;
@@ -2405,12 +2394,7 @@ export function InstantAliveStage({
             if (!prep.empty) decoded.push({ angle: entry.angle, canvas: prep.canvas });
           }
           if (decoded.length === 0) {
-            notify(
-              locale === 'en'
-                ? 'Could not detect drawings in these photos — try clearer ink!'
-                : 'Bu fotoğraflarda çizim algılanamadı — daha net çizimler dene!',
-              'error'
-            );
+            notify(t('aliveErrNoDrawingsBatch'), 'error');
             return;
           }
 
@@ -2421,7 +2405,7 @@ export function InstantAliveStage({
           const baseRig = createMasterRigFromFront(
             pack.filledCanvas.toDataURL('image/png'),
             pack.creatureClass,
-            'Karakter',
+            localizeActorName('Karakter', locale),
             frontAnchors,
             pack.filledCanvas.width,
             pack.filledCanvas.height
@@ -2466,24 +2450,14 @@ export function InstantAliveStage({
           setToy('dance');
           setPhase('alive');
           const vc = countRigViews(fullRig);
-          notify(
-            locale === 'en'
-              ? `✓ ${vc} angles stitched — drag the 360° slider below!`
-              : `✓ ${vc} açı otomatik bağlandı — alttaki 360° sürgüyle dene!`,
-            'ok'
-          );
+          notify(tf('aliveAnglesStitchedToast', { count: vc }), 'ok');
           return;
         }
 
         // Single-photo instant animate path
         const prepared = await decodePreparedFile(files[0]);
         if (prepared.empty) {
-          notify(
-            locale === 'en'
-              ? 'Could not detect a character in this photo — try clearer ink!'
-              : 'Bu fotoğrafta çizim algılanamadı — daha net bir çizim dene!',
-            'error'
-          );
+          notify(t('aliveErrNoCharacterPhoto'), 'error');
           return;
         }
         const anatomy = analyzeCanvasAnatomy(prepared.canvas);
@@ -2503,7 +2477,7 @@ export function InstantAliveStage({
         const freshRig = createMasterRigFromFront(
           pack.filledCanvas.toDataURL('image/png'),
           pack.creatureClass,
-          'Karakter',
+          localizeActorName('Karakter', locale),
           freshAnchors,
           pack.filledCanvas.width,
           pack.filledCanvas.height
@@ -2530,16 +2504,9 @@ export function InstantAliveStage({
         setMood('natural');
         setToy('dance');
         setPhase('alive');
-        notify(
-          locale === 'en'
-            ? 'Character extracted automatically & brought to life!'
-            : 'Karakter kağıttan otomatik ayıklandı ve canlandı!'
-        );
+        notify(t('aliveCharExtractedToast'));
       } catch {
-        notify(
-          locale === 'en' ? 'Could not read image file' : 'Görsel dosyası okunamadı',
-          'error'
-        );
+        notify(t('aliveErrReadImage'), 'error');
       } finally {
         if (uploadInputRef.current) uploadInputRef.current.value = '';
       }
@@ -2610,7 +2577,7 @@ export function InstantAliveStage({
       return createMasterRigFromFront(
         pack.filledCanvas.toDataURL('image/png'),
         pack.creatureClass,
-        'Karakter',
+        localizeActorName('Karakter', locale),
         anchors,
         pack.filledCanvas.width,
         pack.filledCanvas.height
@@ -2657,12 +2624,7 @@ export function InstantAliveStage({
 
     const vc = countRigViews(saved);
     if (vc >= 2) {
-      notify(
-        locale === 'en'
-          ? `360° 2.5D character ready (${vc}/4 angles)`
-          : `360° 2.5D karakter hazır (${vc}/4 açı)`,
-        'ok'
-      );
+      notify(tf('alive360ReadyToast', { count: vc }), 'ok');
     }
   };
 
@@ -2714,7 +2676,7 @@ export function InstantAliveStage({
       const floorY = c.height * 0.82;
       const nearHero = Math.abs(cx - charX) < 92 && cy > floorY - 295 && cy < floorY + 25;
       if (nearHero) {
-        e.currentTarget.setPointerCapture(e.pointerId);
+        safeSetPointerCapture(e.currentTarget, e.pointerId);
         flingRef.current = {
           mode: 'grabbing',
           x: charX,
@@ -2769,7 +2731,7 @@ export function InstantAliveStage({
         }
       }
       if (closestId) {
-        e.currentTarget.setPointerCapture(e.pointerId);
+        safeSetPointerCapture(e.currentTarget, e.pointerId);
         draggingPinRef.current = closestId;
         soundEngine.click(1.1);
       }
@@ -2906,7 +2868,7 @@ export function InstantAliveStage({
       setTimeout(() => URL.revokeObjectURL(url), 1500);
       notify(t('magicGifDone'));
     } catch {
-      notify(locale === 'en' ? 'Could not create GIF' : 'GIF oluşturulamadı', 'error');
+      notify(t('aliveErrGif'), 'error');
     } finally {
       setGifExporting(false);
     }
@@ -2994,7 +2956,7 @@ export function InstantAliveStage({
       setTimeout(() => URL.revokeObjectURL(url), 1500);
       notify(t('magicVideoDone'));
     } catch {
-      notify(locale === 'en' ? 'Could not record video' : 'Video kaydedilemedi', 'error');
+      notify(t('aliveErrVideo'), 'error');
     } finally {
       setVideoExporting(false);
     }
@@ -3040,7 +3002,7 @@ export function InstantAliveStage({
       }
       const dest: 'draw' | 'puppet' | 'film' =
         destOverride ?? (toy === 'film' ? 'film' : toy === 'pull' || toy === 'talk' ? 'puppet' : 'draw');
-      await onSendToStudio(sketch, dest, activePrompt ? (locale === 'en' ? activePrompt.en : activePrompt.tr) : undefined);
+      await onSendToStudio(sketch, dest, activePrompt ? t(activePrompt.labelKey) : undefined);
     } finally {
       setSendingStudio(false);
     }
@@ -3115,9 +3077,7 @@ export function InstantAliveStage({
           {dragOverUpload && (
             <div className="absolute inset-0 z-30 bg-neutral-950/65 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
               <div className="px-4 py-2 rounded-full bg-ink-vermilion text-white text-xs font-extrabold shadow-xl">
-                {locale === 'en'
-                  ? 'Drop 1 drawing or 2–4 angles at once!'
-                  : 'Tek çizim veya 2–4 açıyı birden bırak!'}
+                {t('aliveDropAnglesHint')}
               </div>
             </div>
           )}
@@ -3162,7 +3122,7 @@ export function InstantAliveStage({
                     className="pointer-events-auto stage-floating-pill px-3 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1.5 transition-colors"
                   >
                     <ArrowLeft className="w-3.5 h-3.5" />
-                    {locale === 'en' ? 'Back to Scene' : 'Sahneye Dön'}
+                    {t('aliveBackToScene')}
                   </button>
                 ) : (
                   <div className="pointer-events-auto flex items-center gap-1">
@@ -3173,7 +3133,7 @@ export function InstantAliveStage({
                     >
                       <Dices className="w-3.5 h-3.5 text-ink-brass shrink-0" />
                       <span className="truncate max-w-[150px] sm:max-w-[230px]">
-                        {activePrompt ? (locale === 'en' ? activePrompt.en : activePrompt.tr) : t('magicSurpriseBtn')}
+                        {activePrompt ? t(activePrompt.labelKey) : t('magicSurpriseBtn')}
                       </span>
                     </button>
                     {activePrompt && (
@@ -3184,8 +3144,8 @@ export function InstantAliveStage({
                           setPromptIdx(null);
                         }}
                         className="stage-floating-pill p-1.5 rounded-full hover:bg-ink-vermilion hover:text-white transition-colors"
-                        title={locale === 'en' ? 'Hide guide' : 'Rehberi gizle'}
-                        aria-label={locale === 'en' ? 'Hide guide' : 'Rehberi gizle'}
+                        title={t('aliveHideGuide')}
+                        aria-label={t('aliveHideGuide')}
                       >
                         <X className="w-3 h-3" />
                       </button>
@@ -3206,8 +3166,8 @@ export function InstantAliveStage({
                         inkColor === sw.hex ? 'border-ink-brass scale-110 ring-1 ring-ink-brass' : 'border-black/25'
                       }`}
                       style={{ backgroundColor: sw.hex }}
-                      title={locale === 'en' ? sw.en : sw.tr}
-                      aria-label={locale === 'en' ? sw.en : sw.tr}
+                      title={t(sw.labelKey)}
+                      aria-label={t(sw.labelKey)}
                     />
                   ))}
 
@@ -3433,10 +3393,8 @@ export function InstantAliveStage({
                     <UserPlus className="w-3.5 h-3.5 text-ink-brass shrink-0" />
                     <span>
                       {hasBuddy
-                        ? locale === 'en'
-                          ? '2 Actors · 2.5D'
-                          : '2 Oyuncu · 2.5D'
-                        : `${t('addBuddy')} · 2.5D`}
+                        ? t('aliveTwoActorsBadge')
+                        : `${t('addBuddy')} · ${t('aliveSingleAnglesSuffix')}`}
                     </span>
                     <ChevronDown className="w-3.5 h-3.5 opacity-75" />
                   </button>
@@ -3544,15 +3502,11 @@ export function InstantAliveStage({
               key="upload-photo"
               size="sm"
               variant="graphite"
-              title={
-                locale === 'en'
-                  ? 'Pick 1 drawing or 2–4 angle photos at once (Front/Side/Back)'
-                  : 'Tek çizim veya 2–4 açı fotoğrafını birden seç (Ön/Yan/Arka)'
-              }
+              title={t('alivePickAnglesTitle')}
               onClick={() => uploadInputRef.current?.click()}
             >
               <Upload className="w-3.5 h-3.5 text-ink-brass" />
-              {locale === 'en' ? 'Upload Drawing' : 'Çizim Yükle'}
+              {t('aliveUploadDrawing')}
             </KeycapButton>
           </div>
 
@@ -3628,7 +3582,7 @@ export function InstantAliveStage({
                 }`}
               >
                 <SlidersHorizontal className="w-3.5 h-3.5 text-ink-brass shrink-0" />
-                <span>{locale === 'en' ? 'FX & Props' : 'Sahne Ayarı'}</span>
+                <span>{t('aliveFxPropsBtn')}</span>
               </button>
 
               {openAliveMenu === 'fx' && (
@@ -3637,7 +3591,7 @@ export function InstantAliveStage({
                     <>
                       <div className="space-y-1">
                         <div className="font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold">
-                          {locale === 'en' ? 'Acting Mood' : 'Oyunculuk Hali'}
+                          {t('aliveActingMood')}
                         </div>
                         <div className="flex flex-wrap gap-1">
                           {(
@@ -3671,7 +3625,7 @@ export function InstantAliveStage({
                       <div className="space-y-1 pt-2 border-t border-desk-border">
                         <div className="flex items-center justify-between">
                           <span className="font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold">
-                            {locale === 'en' ? 'Stage Prop' : 'Aksesuar'}
+                            {t('aliveStageProp')}
                           </span>
                           {toy === 'film' && (
                             <button
@@ -3726,7 +3680,7 @@ export function InstantAliveStage({
                   {toy === 'talk' && (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between text-[11px] font-bold text-desk-text">
-                        <span>{locale === 'en' ? 'Live Mic Level' : 'Canlı Mikrofon'}</span>
+                        <span>{t('aliveLiveMic')}</span>
                         <span className="font-mono text-ink-emerald">{Math.round(liveAudioBar * 100)}%</span>
                       </div>
                       <button
@@ -3802,7 +3756,7 @@ export function InstantAliveStage({
                 onClick={() => setOpenAliveMenu((m) => (m === 'export' ? null : 'export'))}
               >
                 <Download className="w-3.5 h-3.5" />
-                {locale === 'en' ? 'Export & Share' : 'İndir & Paylaş'}
+                {t('aliveExportShare')}
               </KeycapButton>
 
               {openAliveMenu === 'export' && (
@@ -3854,7 +3808,7 @@ export function InstantAliveStage({
                     className="w-full px-2.5 py-1.5 rounded-xl text-xs font-bold text-desk-muted hover:text-desk-text hover:bg-desk-surface flex items-center gap-2 border-t border-desk-border pt-2"
                   >
                     <Upload className="w-3.5 h-3.5 text-ink-brass" />
-                    {locale === 'en' ? 'Upload New Drawing' : 'Yeni Çizim Yükle'}
+                    {t('aliveUploadNew')}
                   </button>
                 </div>
               )}

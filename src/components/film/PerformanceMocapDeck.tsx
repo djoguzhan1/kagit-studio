@@ -32,8 +32,8 @@ import {
 } from '../../engine/filmMocapLipSync';
 import { saveBlob } from '../../engine/db';
 import { soundEngine } from '../../engine/soundEngine';
-import { useStudioStore } from '../../store/useStudioStore';
-import { useT } from '../../i18n/translations';
+import { useT, useTFmt } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
 
 type DeckTab = 'webcam' | 'video' | 'live-pad';
 
@@ -62,7 +62,7 @@ export default function PerformanceMocapDeck({
   notify,
 }: PerformanceMocapDeckProps) {
   const t = useT();
-  const locale = useStudioStore((s) => s.locale);
+  const tf = useTFmt();
   const [tab, setTab] = useState<DeckTab>('live-pad');
   const [camActive, setCamActive] = useState(false);
   const [camError, setCamError] = useState<string | null>(null);
@@ -159,7 +159,7 @@ export default function PerformanceMocapDeck({
   const handleStartCamera = async () => {
     setCamError(null);
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      const msg = 'Bu tarayıcıda kamera erişimi desteklenmiyor — Canlı Kukla Pedi veya Video Aktar kullanabilirsin.';
+      const msg = t('capErrNoCam');
       setCamError(msg);
       notify(msg, 'info');
       return;
@@ -196,10 +196,9 @@ export default function PerformanceMocapDeck({
       smoothRef.current = null;
       setCamActive(true);
       soundEngine.toggle(true);
-      notify('Canlı kamera takibi aktif — hareket ettikçe karakterin seni aynalar!');
+      notify(t('capCamActiveToast'));
     } catch {
-      const msg =
-        'Kamera izni verilmedi veya cihazda kamera bulunamadı. Video Aktar veya Canlı Kukla Pedi ile devam edebilirsin.';
+      const msg = t('capErrCamDenied');
       setCamError(msg);
       notify(msg, 'info');
     }
@@ -209,7 +208,7 @@ export default function PerformanceMocapDeck({
   const handleCalibrate = () => {
     baselineRef.current = null;
     soundEngine.click(1.18);
-    notify('Nötr duruş kalibre edildi!');
+    notify(t('capCalibratedToast'));
   };
 
   // Webcam real-time 24–30 FPS CV tracking loop
@@ -383,7 +382,7 @@ export default function PerformanceMocapDeck({
 
   const startRecording = () => {
     if (tab === 'webcam' && !camActive) {
-      notify('Önce "Kamerayı Aç" düğmesine bas', 'info');
+      notify(t('capOpenCamFirst'), 'info');
       return;
     }
     recSamplesRef.current = [];
@@ -409,7 +408,7 @@ export default function PerformanceMocapDeck({
     recordingRef.current = true;
     setRecording(true);
     soundEngine.clapperSnap();
-    notify('Canlı 2.5D performans kaydı başladı — hareket et ve bitir!');
+    notify(t('capRecStartedToast'));
   };
 
   const finishRecording = async (source: 'webcam' | 'live-pad') => {
@@ -447,7 +446,7 @@ export default function PerformanceMocapDeck({
     }
 
     if (samples.length < 3) {
-      notify('Kayıt çok kısaydı — en az yarım saniye hareket kaydet', 'info');
+      notify(t('capRecTooShort'), 'info');
       return;
     }
 
@@ -457,7 +456,7 @@ export default function PerformanceMocapDeck({
       fps: 24,
       samples,
       createdAt: new Date().toISOString(),
-      label: source === 'webcam' ? 'Kamera Performansı' : 'Canlı Kukla Kaydı',
+      label: source === 'webcam' ? t('capLabelWebcam') : t('capLabelPad'),
     };
 
     onLivePoseChange(null);
@@ -465,8 +464,8 @@ export default function PerformanceMocapDeck({
     soundEngine.clapperSnap();
     notify(
       voiceTrack
-        ? `Kamera pozu (${samples.length} kare) + gerçek ses dudak senkronu Plan #${shotIndex + 1}'e işlendi!`
-        : `2.5D canlı performans (${samples.length} kare, ${track.durationSec}s) Plan #${shotIndex + 1}'e kaydedildi!`
+        ? tf('capSavedWebcamToast', { frames: samples.length, shot: shotIndex + 1 })
+        : tf('capSavedPadToast', { frames: samples.length, sec: track.durationSec, shot: shotIndex + 1 })
     );
   };
 
@@ -479,9 +478,9 @@ export default function PerformanceMocapDeck({
       const track = await extractMocapTrackFromVideoFile(file, (pct) => setVideoProgress(pct));
       onCommitMocap(track, null);
       soundEngine.clapperSnap();
-      notify(`"${track.label}" videosundan ${track.samples.length} kare 2.5D poz Plan #${shotIndex + 1}'e aktarıldı!`);
+      notify(tf('capRefImportedToast', { label: track.label, frames: track.samples.length, shot: shotIndex + 1 }));
     } catch (err) {
-      notify(err instanceof Error ? err.message : 'Referans video işlenemedi', 'error');
+      notify(err instanceof Error ? err.message : t('capErrRefVideo'), 'error');
     } finally {
       setVideoProgress(null);
       if (videoFileRef.current) videoFileRef.current.value = '';
@@ -508,7 +507,7 @@ export default function PerformanceMocapDeck({
             data-on={recording ? 'vermilion' : camActive || tab === 'live-pad' ? 'emerald' : 'amber'}
             data-pulse={recording || camActive}
           />
-          <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-brass">
+          <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass">
             {t('mocapHeader')} ({t('filmShotWord')} #{shotIndex + 1})
           </span>
         </div>
@@ -532,7 +531,7 @@ export default function PerformanceMocapDeck({
                   soundEngine.click(1.06);
                   setTab(item.id);
                 }}
-                className={`px-2 py-1 rounded-lg font-mono text-[9.5px] font-bold inline-flex items-center gap-1 border transition-colors ${
+                className={`px-2 py-1 rounded-lg font-mono text-[11px] font-bold inline-flex items-center gap-1 border transition-colors ${
                   active
                     ? 'bg-desk-panel border-ink-vermilion text-desk-text'
                     : 'bg-desk-surface/70 border-desk-border text-desk-muted hover:text-desk-text'
@@ -565,7 +564,7 @@ export default function PerformanceMocapDeck({
           {/* Interactive XY Stage Joystick */}
           <div
             onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture(e.pointerId);
+              safeSetPointerCapture(e.currentTarget, e.pointerId);
               padDraggingRef.current = true;
               updatePadFromPointer(e);
             }}
@@ -578,11 +577,7 @@ export default function PerformanceMocapDeck({
             }}
             onDoubleClick={() => setPadPos({ x: 0, y: 0 })}
             className="relative h-[96px] rounded-xl bg-neutral-950 border border-desk-border overflow-hidden cursor-crosshair select-none touch-none"
-            title={
-              locale === 'en'
-                ? 'Drag: Left/Right = Head Turn & Lean, Up = Jump, Down = Crouch (Double-click to reset)'
-                : 'Sürükle: Yatay = Kafa Dönüşü & Eğim, Yukarı = Zıpla, Aşağı = Çömel (Çift tık = Sıfırla)'
-            }
+            title={t('capPadDragHint')}
           >
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="w-full h-px bg-desk-border/50" />
@@ -590,13 +585,13 @@ export default function PerformanceMocapDeck({
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="h-full w-px bg-desk-border/50" />
             </div>
-            <span className="absolute top-1 left-1.5 font-mono text-[8px] text-desk-muted pointer-events-none">
+            <span className="absolute top-1 left-1.5 font-mono text-[11px] text-desk-muted pointer-events-none">
               {t('mocapJumpUp')}
             </span>
-            <span className="absolute bottom-1 left-1.5 font-mono text-[8px] text-desk-muted pointer-events-none">
+            <span className="absolute bottom-1 left-1.5 font-mono text-[11px] text-desk-muted pointer-events-none">
               {t('mocapCrouchDown')}
             </span>
-            <span className="absolute bottom-1 right-1.5 font-mono text-[8px] text-ink-brass pointer-events-none">
+            <span className="absolute bottom-1 right-1.5 font-mono text-[11px] text-ink-brass pointer-events-none">
               {t('mocapTurnLabel')} {telemetry.yawDeg}°
             </span>
             <div
@@ -626,7 +621,7 @@ export default function PerformanceMocapDeck({
                     soundEngine.click(1.08);
                     setPadGestures((prev) => ({ ...prev, [g.key]: !prev[g.key] }));
                   }}
-                  className={`py-1.5 px-1.5 rounded-lg font-mono text-[9.5px] font-bold border transition-colors ${
+                  className={`py-1.5 px-1.5 rounded-lg font-mono text-[11px] font-bold border transition-colors ${
                     padGestures[g.key]
                       ? 'bg-ink-brass/25 border-ink-brass text-desk-text'
                       : 'bg-desk-surface border-desk-border text-desk-muted hover:text-desk-text'
@@ -637,7 +632,7 @@ export default function PerformanceMocapDeck({
               ))}
             </div>
 
-            <div className="grid grid-cols-3 gap-1.5 font-mono text-[9px] text-desk-muted">
+            <div className="grid grid-cols-3 gap-1.5 font-mono text-[11px] text-desk-muted">
               <div className="px-2 py-1 rounded-lg bg-desk-surface/70 border border-desk-border flex items-center justify-between gap-1">
                 <span>{t('mocapHeadLabel')}</span>
                 <span className="text-desk-text font-bold shrink-0">{telemetry.yawDeg}°</span>
@@ -661,7 +656,7 @@ export default function PerformanceMocapDeck({
               <button
                 type="button"
                 onClick={startRecording}
-                className="w-full py-2 px-3 rounded-xl bg-ink-vermilion text-white font-mono text-[10.5px] font-bold inline-flex items-center justify-center gap-1.5 hover:brightness-110 shadow transition-all"
+                className="w-full py-2 px-3 rounded-xl bg-ink-vermilion text-white font-mono text-[11px] font-bold inline-flex items-center justify-center gap-1.5 hover:brightness-110 shadow transition-all"
               >
                 <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
                 {t('mocapRecordBtn')}
@@ -670,7 +665,7 @@ export default function PerformanceMocapDeck({
               <button
                 type="button"
                 onClick={() => void finishRecording('live-pad')}
-                className="w-full py-2 px-3 rounded-xl bg-red-600 text-white font-mono text-[10.5px] font-bold inline-flex items-center justify-center gap-1.5 shadow animate-pulse"
+                className="w-full py-2 px-3 rounded-xl bg-red-600 text-white font-mono text-[11px] font-bold inline-flex items-center justify-center gap-1.5 shadow animate-pulse"
               >
                 <Square className="w-3 h-3 fill-current" />
                 {t('mocapStopRecordBtn')} ({recElapsed.toFixed(1)}s)
@@ -684,7 +679,7 @@ export default function PerformanceMocapDeck({
                   setPadPos({ x: 0, y: 0 });
                   setPadGestures({ handsUp: false, wave: false, surprise: false, speak: false });
                 }}
-                className="flex-1 py-1 px-2 rounded-lg bg-desk-surface border border-desk-border text-[9.5px] font-mono text-desk-muted hover:text-desk-text inline-flex items-center justify-center gap-1"
+                className="flex-1 py-1 px-2 rounded-lg bg-desk-surface border border-desk-border text-[11px] font-mono text-desk-muted hover:text-desk-text inline-flex items-center justify-center gap-1"
               >
                 <RefreshCw className="w-3 h-3" />
                 {t('mocapReset')}
@@ -693,7 +688,7 @@ export default function PerformanceMocapDeck({
                 <button
                   type="button"
                   onClick={onClearMocap}
-                  className="py-1 px-2 rounded-lg bg-desk-surface border border-desk-border hover:border-ink-vermilion text-[9.5px] font-mono text-ink-vermilion inline-flex items-center gap-1"
+                  className="py-1 px-2 rounded-lg bg-desk-surface border border-desk-border hover:border-ink-vermilion text-[11px] font-mono text-ink-vermilion inline-flex items-center gap-1"
                   title={t('mocapClearTrack')}
                 >
                   <Trash2 className="w-3 h-3" />
@@ -718,21 +713,15 @@ export default function PerformanceMocapDeck({
             {!camActive && (
               <div className="text-center px-2 space-y-1">
                 <Camera className="w-5 h-5 text-desk-muted mx-auto" />
-                <div className="font-mono text-[8.5px] text-desk-muted">
-                  {camError
-                    ? locale === 'en'
-                      ? 'Camera off'
-                      : 'Kamera kapalı'
-                    : locale === 'en'
-                      ? 'Live preview'
-                      : 'Canlı önizleme'}
+                <div className="font-mono text-[11px] text-desk-muted">
+                  {camError ? t('capCamOff') : t('capLivePreview')}
                 </div>
               </div>
             )}
             {camActive && (
               <div className="absolute inset-0 pointer-events-none border-2 border-ink-emerald/40 rounded-xl">
-                <div className="absolute top-1 left-1.5 px-1 py-0.5 rounded bg-black/70 font-mono text-[8px] text-ink-emerald">
-                  {locale === 'en' ? 'LIVE TRACKING' : 'CANLI TAKİP'}
+                <div className="absolute top-1 left-1.5 px-1 py-0.5 rounded bg-black/70 font-mono text-[11px] text-ink-emerald">
+                  {t('capLiveTracking')}
                 </div>
               </div>
             )}
@@ -740,25 +729,25 @@ export default function PerformanceMocapDeck({
 
           <div className="space-y-1.5">
             {camError ? (
-              <div className="p-2 rounded-lg bg-ink-vermilion/10 border border-ink-vermilion/40 text-[10px] text-desk-text leading-snug">
+              <div className="p-2 rounded-lg bg-ink-vermilion/10 border border-ink-vermilion/40 text-[11px] text-desk-text leading-snug">
                 {camError}
               </div>
             ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 font-mono text-[9px]">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 font-mono text-[11px]">
                 <div className="px-2 py-1 rounded-lg bg-desk-surface/70 border border-desk-border">
-                  <div className="text-desk-muted text-[8px]">{t('mocapHeadLabel')}</div>
+                  <div className="text-desk-muted text-[11px]">{t('mocapHeadLabel')}</div>
                   <div className="text-desk-text font-bold">{telemetry.yawDeg}°</div>
                 </div>
                 <div className="px-2 py-1 rounded-lg bg-desk-surface/70 border border-desk-border">
-                  <div className="text-desk-muted text-[8px]">{locale === 'en' ? 'L ARM' : 'SOL KOL'}</div>
+                  <div className="text-desk-muted text-[11px]">{t('capLeftArm')}</div>
                   <div className="text-desk-text font-bold">{Math.round(telemetry.leftArm * 100)}%</div>
                 </div>
                 <div className="px-2 py-1 rounded-lg bg-desk-surface/70 border border-desk-border">
-                  <div className="text-desk-muted text-[8px]">{locale === 'en' ? 'R ARM' : 'SAĞ KOL'}</div>
+                  <div className="text-desk-muted text-[11px]">{t('capRightArm')}</div>
                   <div className="text-desk-text font-bold">{Math.round(telemetry.rightArm * 100)}%</div>
                 </div>
                 <div className="px-2 py-1 rounded-lg bg-desk-surface/70 border border-desk-border">
-                  <div className="text-desk-muted text-[8px]">{t('mocapMouthLabel')}</div>
+                  <div className="text-desk-muted text-[11px]">{t('mocapMouthLabel')}</div>
                   <div className="text-ink-brass font-bold whitespace-nowrap">
                     {compactVisemeLabel(telemetry.viseme, t('mocapQuiet'))}
                   </div>
@@ -771,20 +760,20 @@ export default function PerformanceMocapDeck({
                 type="button"
                 onClick={() => setWithMic((v) => !v)}
                 disabled={camActive}
-                className={`px-2 py-1 rounded-lg border font-mono text-[9.5px] inline-flex items-center gap-1 ${
+                className={`px-2 py-1 rounded-lg border font-mono text-[11px] inline-flex items-center gap-1 ${
                   withMic
                     ? 'bg-desk-panel border-ink-emerald text-ink-emerald font-bold'
                     : 'bg-desk-surface border-desk-border text-desk-muted'
                 } disabled:opacity-50`}
               >
                 <Mic className="w-3 h-3" />
-                {locale === 'en' ? 'Sync Microphone' : 'Eşzamanlı Mikrofon'}
+                {t('capSyncMic')}
               </button>
               {camActive && (
                 <button
                   type="button"
                   onClick={handleCalibrate}
-                  className="px-2 py-1 rounded-lg bg-desk-surface border border-desk-border hover:border-ink-brass font-mono text-[9.5px] text-desk-text inline-flex items-center gap-1"
+                  className="px-2 py-1 rounded-lg bg-desk-surface border border-desk-border hover:border-ink-brass font-mono text-[11px] text-desk-text inline-flex items-center gap-1"
                 >
                   <Crosshair className="w-3 h-3 text-ink-brass" />
                   {t('mocapCalibrate')}
@@ -798,7 +787,7 @@ export default function PerformanceMocapDeck({
               <button
                 type="button"
                 onClick={() => void handleStartCamera()}
-                className="w-full py-2 px-3 rounded-xl bg-ink-emerald text-neutral-950 font-mono text-[10.5px] font-bold inline-flex items-center justify-center gap-1.5 hover:brightness-110 transition-all"
+                className="w-full py-2 px-3 rounded-xl bg-ink-emerald text-neutral-950 font-mono text-[11px] font-bold inline-flex items-center justify-center gap-1.5 hover:brightness-110 transition-all"
               >
                 <Camera className="w-3.5 h-3.5" />
                 {t('mocapStartCam')}
@@ -807,7 +796,7 @@ export default function PerformanceMocapDeck({
               <button
                 type="button"
                 onClick={startRecording}
-                className="w-full py-2 px-3 rounded-xl bg-ink-vermilion text-white font-mono text-[10.5px] font-bold inline-flex items-center justify-center gap-1.5 hover:brightness-110 shadow"
+                className="w-full py-2 px-3 rounded-xl bg-ink-vermilion text-white font-mono text-[11px] font-bold inline-flex items-center justify-center gap-1.5 hover:brightness-110 shadow"
               >
                 <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
                 {t('mocapRecordBtn')}
@@ -816,7 +805,7 @@ export default function PerformanceMocapDeck({
               <button
                 type="button"
                 onClick={() => void finishRecording('webcam')}
-                className="w-full py-2 px-3 rounded-xl bg-red-600 text-white font-mono text-[10.5px] font-bold inline-flex items-center justify-center gap-1.5 animate-pulse"
+                className="w-full py-2 px-3 rounded-xl bg-red-600 text-white font-mono text-[11px] font-bold inline-flex items-center justify-center gap-1.5 animate-pulse"
               >
                 <Square className="w-3 h-3 fill-current" />
                 {t('mocapStopRecordBtn')} ({recElapsed.toFixed(1)}s)
@@ -829,7 +818,7 @@ export default function PerformanceMocapDeck({
                   stopCameraResources();
                   onLivePoseChange(null);
                 }}
-                className="w-full py-1 px-2 rounded-lg bg-desk-surface border border-desk-border text-[9.5px] font-mono text-desk-muted hover:text-desk-text"
+                className="w-full py-1 px-2 rounded-lg bg-desk-surface border border-desk-border text-[11px] font-mono text-desk-muted hover:text-desk-text"
               >
                 {t('mocapStopCam')}
               </button>
@@ -845,7 +834,7 @@ export default function PerformanceMocapDeck({
             <div className="text-[11px] font-bold text-desk-text">
               {t('mocapTabVideo')}
             </div>
-            <p className="text-[10px] text-desk-muted leading-snug">
+            <p className="text-[11px] text-desk-muted leading-snug">
               {t('mocapVideoHint')}
             </p>
             {videoProgress !== null && (
@@ -856,8 +845,8 @@ export default function PerformanceMocapDeck({
                     style={{ width: `${videoProgress}%` }}
                   />
                 </div>
-                <div className="font-mono text-[9px] text-ink-brass">
-                  {locale === 'en' ? `Analyzing motion… ${videoProgress}%` : `Hareket okunuyor… %${videoProgress}`}
+                <div className="font-mono text-[11px] text-ink-brass">
+                  {tf('capAnalyzingProgress', { pct: videoProgress })}
                 </div>
               </div>
             )}
@@ -868,14 +857,10 @@ export default function PerformanceMocapDeck({
               type="button"
               disabled={videoProgress !== null}
               onClick={() => videoFileRef.current?.click()}
-              className="py-2 px-3.5 rounded-xl bg-ink-brass/20 border border-ink-brass text-ink-brass hover:bg-ink-brass/30 font-mono text-[10.5px] font-bold inline-flex items-center gap-1.5 disabled:opacity-50"
+              className="py-2 px-3.5 rounded-xl bg-ink-brass/20 border border-ink-brass text-ink-brass hover:bg-ink-brass/30 font-mono text-[11px] font-bold inline-flex items-center gap-1.5 disabled:opacity-50"
             >
               <Upload className="w-3.5 h-3.5" />
-              {videoProgress !== null
-                ? locale === 'en'
-                  ? 'Reading…'
-                  : 'Aktarılıyor…'
-                : t('mocapPickVideo')}
+              {videoProgress !== null ? t('capImportingBtn') : t('mocapPickVideo')}
             </button>
             <input
               ref={videoFileRef}
@@ -889,7 +874,7 @@ export default function PerformanceMocapDeck({
       )}
 
       {activeShot.mocapTrack && (
-        <div className="flex items-center justify-between pt-1.5 border-t border-desk-border font-mono text-[9.5px]">
+        <div className="flex items-center justify-between pt-1.5 border-t border-desk-border font-mono text-[11px]">
           <span className="text-ink-emerald flex items-center gap-1.5">
             <CheckCircle2 className="w-3.5 h-3.5" />
             {t('mocapRecordedBadge')}: <strong>{activeShot.mocapTrack.label}</strong> ({activeShot.mocapTrack.samples.length} · {activeShot.mocapTrack.durationSec}s)

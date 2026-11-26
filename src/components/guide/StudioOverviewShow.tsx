@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, Pause, Play, Sparkles, X } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
-import { useT } from '../../i18n/translations';
+import { translate, useT } from '../../i18n/translations';
+import { useModalA11y } from '../../hooks/useModalA11y';
 import type { StudioMode } from '../../types/studio';
 import { soundEngine } from '../../engine/soundEngine';
 import { KeycapButton } from '../ui/KeycapButton';
@@ -443,7 +444,7 @@ function drawScene3Puppet(
   ctx.fillStyle = '#1C1917';
   ctx.font = 'bold 14px "Plus Jakarta Sans", sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(locale === 'en' ? 'Hello!' : 'Merhaba!', bx + bw * 0.5, by + 22);
+  ctx.fillText(translate(locale, 'overviewBubbleHello'), bx + bw * 0.5, by + 22);
   ctx.restore();
 }
 
@@ -566,12 +567,17 @@ function drawScene4Film(
   ctx.fillStyle = '#FAF6EE';
   ctx.font = 'bold 13px "Plus Jakarta Sans", sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(locale === 'en' ? '“Found it!”' : '“Sonunda buldum!”', w / 2, h - 34);
+  ctx.fillText(translate(locale, 'overviewSubtitleFound'), w / 2, h - 34);
 }
 
 export default function StudioOverviewShow() {
   const t = useT();
   const { overviewShowOpen, setOverviewShowOpen, startTour, mode, locale } = useStudioStore();
+  const dialogRef = useModalA11y<HTMLDivElement>({
+    open: overviewShowOpen,
+    onClose: () => setOverviewShowOpen(false),
+    modal: true,
+  });
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [playing, setPlaying] = useState(true);
@@ -660,16 +666,17 @@ export default function StudioOverviewShow() {
       className="fixed inset-0 z-[75] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 select-none"
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={t('overviewTitle')}
+        aria-labelledby="overview-show-title"
         onClick={(e) => e.stopPropagation()}
-        className="toast-pop-in w-full max-w-2xl rounded-3xl bg-desk-surface border border-desk-border shadow-2xl overflow-hidden"
+        className="toast-pop-in w-full max-w-2xl max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-3xl bg-desk-surface border border-desk-border shadow-2xl"
       >
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-desk-border flex items-center justify-between gap-2">
           <div>
-            <h2 className="text-base font-extrabold text-desk-text flex items-center gap-2">
+            <h2 id="overview-show-title" className="text-base font-extrabold text-desk-text flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-ink-brass" />
               {t('overviewTitle')}
             </h2>
@@ -678,7 +685,7 @@ export default function StudioOverviewShow() {
           <button
             type="button"
             onClick={() => setOverviewShowOpen(false)}
-            className="p-2 rounded-xl console-well border border-desk-border text-desk-muted hover:text-desk-text"
+            className="min-w-[44px] min-h-[44px] p-2 rounded-xl inline-flex items-center justify-center console-well border border-desk-border text-desk-muted hover:text-desk-text"
             aria-label={t('guideSkip')}
           >
             <X className="w-4 h-4" />

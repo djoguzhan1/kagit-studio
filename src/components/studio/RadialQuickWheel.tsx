@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   ChevronRight,
   Eraser,
@@ -21,8 +21,8 @@ interface RadialQuickWheelProps {
 }
 
 /**
- * 8-Slice Radial Animator's Quick Wheel (Press `Q` or Right-Click on Drawing Stage)
- * Lets animators switch tools, toggle onion skin, undo, or step frame without looking away from paper!
+ * 8-Slice Radial Animator's Quick Wheel (`Q`, Right-Click on Stage, or Toolbar Quick Wheel button on Mobile/Desktop)
+ * Fully keyboard-navigable (Arrow keys + Escape) with explicit accessible names on all 8 slices.
  */
 export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWheelProps) {
   const {
@@ -37,17 +37,40 @@ export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWhe
     addFrameAfterCurrent,
   } = useStudioStore();
   const t = useT();
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   useEffect(() => {
     if (!open) return;
+    const focusTimer = window.setTimeout(() => {
+      itemRefs.current[0]?.focus({ preventScroll: true });
+    }, 16);
+
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' || e.key.toLowerCase() === 'q') {
         e.preventDefault();
+        e.stopPropagation();
         onClose();
+        return;
+      }
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        const cur = itemRefs.current.findIndex((el) => el === document.activeElement);
+        const next = (cur + 1) % 8;
+        itemRefs.current[next]?.focus();
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        const cur = itemRefs.current.findIndex((el) => el === document.activeElement);
+        const prev = (cur <= 0 ? 7 : cur - 1) % 8;
+        itemRefs.current[prev]?.focus();
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener('keydown', onKey, true);
+    };
   }, [open, onClose]);
 
   if (!open) return null;
@@ -55,9 +78,8 @@ export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWhe
   const project = projects.find((p) => p.id === activeProjectId);
   const frameCount = project?.frames.length ?? 1;
 
-  // Clamp center position cleanly inside the viewport so none of the 8 slices ever clip!
-  const cx = Math.max(128, Math.min(window.innerWidth - 128, x));
-  const cy = Math.max(128, Math.min(window.innerHeight - 128, y));
+  const cx = Math.max(124, Math.min(window.innerWidth - 124, x));
+  const cy = Math.max(124, Math.min(window.innerHeight - 124, y));
   const R = 82;
 
   const actions = [
@@ -65,64 +87,56 @@ export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWhe
       id: 'gpen',
       label: t('toolGpen'),
       active: brush.tool === 'gpen',
-      accent: 'amber',
-      icon: <SketchNibIcon className="w-4 h-4" />,
+      icon: <SketchNibIcon className="w-4 h-4 shrink-0" />,
       run: () => updateBrush({ tool: 'gpen' }),
     },
     {
       id: 'blue-rough',
       label: t('radialBlue'),
       active: brush.tool === 'blue-rough',
-      accent: 'blue',
-      icon: <Feather className="w-4 h-4" />,
+      icon: <Feather className="w-4 h-4 shrink-0" />,
       run: () => updateBrush({ tool: 'blue-rough' }),
     },
     {
       id: 'bucket',
       label: t('toolBucket'),
       active: brush.tool === 'bucket',
-      accent: 'amber',
-      icon: <PaintBucket className="w-4 h-4" />,
+      icon: <PaintBucket className="w-4 h-4 shrink-0" />,
       run: () => updateBrush({ tool: 'bucket' }),
     },
     {
       id: 'lasso',
       label: t('toolLasso'),
       active: brush.tool === 'lasso',
-      accent: 'vermilion',
-      icon: <Lasso className="w-4 h-4" />,
+      icon: <Lasso className="w-4 h-4 shrink-0" />,
       run: () => updateBrush({ tool: 'lasso' }),
     },
     {
       id: 'eraser',
       label: t('toolEraser'),
       active: brush.tool === 'eraser',
-      accent: 'vermilion',
-      icon: <Eraser className="w-4 h-4" />,
+      icon: <Eraser className="w-4 h-4 shrink-0" />,
       run: () => updateBrush({ tool: 'eraser' }),
     },
     {
       id: 'onion',
       label: t('radialOnion'),
       active: onion.enabled,
-      accent: 'emerald',
-      icon: <OnionLayersIcon className="w-4 h-4" />,
+      icon: <OnionLayersIcon className="w-4 h-4 shrink-0" />,
       run: () => updateOnion({ enabled: !onion.enabled }),
     },
     {
       id: 'undo',
       label: t('undoShort'),
       active: false,
-      accent: 'amber',
-      icon: <Undo2 className="w-4 h-4" />,
+      icon: <Undo2 className="w-4 h-4 shrink-0" />,
       run: () => onUndo(),
     },
     {
       id: 'next',
       label: activeFrameIndex + 1 >= frameCount ? t('radialNewFrame') : t('railOnionNext'),
       active: false,
-      accent: 'brass',
-      icon: <ChevronRight className="w-4 h-4" />,
+      icon: <ChevronRight className="w-4 h-4 shrink-0" />,
       run: () => {
         soundEngine.paperFlip();
         if (activeFrameIndex + 1 >= frameCount) {
@@ -154,14 +168,15 @@ export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWhe
         <button
           type="button"
           onClick={onClose}
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-14 h-14 rounded-full console-well border border-ink-brass/55 flex flex-col items-center justify-center font-mono text-[11px] font-bold text-ink-brass hover:border-ink-vermilion transition-colors cursor-pointer"
+          aria-label={`${t('radialClose')} (Q)`}
           title={`${t('radialClose')} (Q / Esc)`}
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-14 h-14 rounded-full console-well border border-ink-brass/55 flex flex-col items-center justify-center font-mono text-[11px] font-bold text-ink-brass hover:border-ink-vermilion transition-colors cursor-pointer"
         >
           <span>Q</span>
-          <span className="text-[11px] text-desk-muted">{t('radialClose')}</span>
+          <span className="text-[11px] text-desk-muted truncate max-w-[48px]">{t('radialClose')}</span>
         </button>
 
-        {/* 8 Circular Tool Nodes */}
+        {/* 8 Circular Tool Nodes (48x48px >= 44px with full aria-label + title + roving focus) */}
         {actions.map((act, idx) => {
           const angle = -Math.PI / 2 + (idx / actions.length) * Math.PI * 2;
           const bx = 114 + Math.cos(angle) * R;
@@ -169,14 +184,19 @@ export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWhe
           return (
             <button
               key={act.id}
+              ref={(el) => {
+                itemRefs.current[idx] = el;
+              }}
               type="button"
               role="menuitem"
+              aria-label={act.label}
+              title={act.label}
               onClick={() => {
                 soundEngine.click(1.08);
                 act.run();
                 onClose();
               }}
-              className={`absolute -translate-x-1/2 -translate-y-1/2 w-12 h-12 rounded-full border flex flex-col items-center justify-center gap-0.5 transition-transform hover:scale-110 cursor-pointer ${
+              className={`absolute -translate-x-1/2 -translate-y-1/2 w-12 h-12 rounded-full border flex flex-col items-center justify-center gap-0.5 px-0.5 transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-ink-brass cursor-pointer ${
                 act.active
                   ? 'bg-ink-brass border-[#fae098] text-[#1a1407] shadow-lg'
                   : 'bg-desk-panel/95 border-desk-border text-desk-muted hover:text-desk-text hover:border-ink-brass/70'
@@ -184,7 +204,9 @@ export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWhe
               style={{ left: bx, top: by }}
             >
               {act.icon}
-              <span className="font-mono text-[11px] font-bold leading-none">{act.label}</span>
+              <span className="font-mono text-[11px] font-bold leading-none truncate max-w-[44px]">
+                {act.label}
+              </span>
             </button>
           );
         })}

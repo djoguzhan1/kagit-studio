@@ -16,7 +16,8 @@ import { StudioAudioPlayer } from '../../engine/audioEngine';
 import { soundEngine } from '../../engine/soundEngine';
 import { KeycapButton } from '../ui/KeycapButton';
 import { BrassRotaryDial } from '../ui/Studio3DControls';
-import { useT } from '../../i18n/translations';
+import { localizeLayerName, useT } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
 
 interface DrawingStageProps {
   onHistoryState: (canUndo: boolean, canRedo: boolean) => void;
@@ -51,7 +52,6 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
     addFrameAfterCurrent,
     updateLayerBlobAndThumb,
     notify,
-    locale,
   } = useStudioStore();
   const t = useT();
 
@@ -220,7 +220,14 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
     eng.onFloatingChange = (has) => setHasFloating(has);
     eng.onStrokeCommit = (layerId, committedFrameId) => {
       setHasSessionStroke(true);
-      flushPersistLayer(layerId, committedFrameId);
+      const st = useStudioStore.getState();
+      const cp = st.projects.find((p) => p.id === st.activeProjectId);
+      const cf = cp?.frames.find((f) => f.id === committedFrameId);
+      if (cf && !cf.thumbKey) {
+        void flushPersistNow({ frameId: committedFrameId, layerId });
+      } else {
+        flushPersistLayer(layerId, committedFrameId);
+      }
     };
     eng.onColorPicked = (hex) => {
       soundEngine.click(1.3);
@@ -234,10 +241,11 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
       if (now - lastBlockedToastRef.current < 1400) return;
       lastBlockedToastRef.current = now;
       soundEngine.click(0.65);
+      const dispLayer = layerName ? localizeLayerName(layerName, useStudioStore.getState().locale) : '';
       if (reason === 'locked') {
-        notify(`"${layerName ?? ''}" ${t('stageLayerLocked')}`, 'error');
+        notify(`"${dispLayer}" ${t('stageLayerLocked')}`, 'error');
       } else if (reason === 'hidden') {
-        notify(`"${layerName ?? ''}" ${t('stageLayerHidden')}`, 'error');
+        notify(`"${dispLayer}" ${t('stageLayerHidden')}`, 'error');
       } else {
         notify(t('stageNoLayer'), 'error');
       }
@@ -715,7 +723,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
 
     if (spacePanning || e.button === 1) {
       if (spacePanning) spaceUsedPanRef.current = true;
-      e.currentTarget.setPointerCapture(e.pointerId);
+      safeSetPointerCapture(e.currentTarget, e.pointerId);
       panDragRef.current = {
         active: true,
         startX: e.clientX,
@@ -727,7 +735,10 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
     }
 
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    e.currentTarget.setPointerCapture(e.pointerId);
+    safeSetPointerCapture(e.currentTarget, e.pointerId);
+    if (!activeLayerBlocked) {
+      setHasSessionStroke(true);
+    }
     const pos = clientToCanvas(e.clientX, e.clientY);
     void engineRef.current?.handlePointerDown(
       pos.x,
@@ -787,12 +798,12 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
             const lid = engineRef.current?.redo();
             if (lid) flushPersistLayer(lid);
             soundEngine.click(1.1);
-            notify('Yinelendi (3 parmak)', 'info');
+            notify(t('redoThreeFinger'), 'info');
           } else {
             const lid = engineRef.current?.undo();
             if (lid) flushPersistLayer(lid);
             soundEngine.click(0.85);
-            notify('Geri alındı (2 parmak)', 'info');
+            notify(t('undoTwoFinger'), 'info');
           }
         }
         return;
@@ -871,18 +882,18 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
           type="button"
           onClick={() => setZoom((z) => Math.max(0.4, Number((z - 0.15).toFixed(2))))}
           title={t('stageZoomOut')}
-          className="p-1.5 rounded-lg text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
+          className="min-w-[36px] min-h-[36px] p-2 rounded-lg inline-flex items-center justify-center text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
         >
           <ZoomOut className="w-3.5 h-3.5" />
         </button>
-        <span className="font-mono text-[10px] text-desk-muted px-1 w-10 text-center">
+        <span className="font-mono text-[11px] text-desk-muted px-1 w-10 text-center">
           {Math.round(zoom * 100)}%
         </span>
         <button
           type="button"
           onClick={() => setZoom((z) => Math.min(4, Number((z + 0.15).toFixed(2))))}
           title={t('stageZoomIn')}
-          className="p-1.5 rounded-lg text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
+          className="min-w-[36px] min-h-[36px] p-2 rounded-lg inline-flex items-center justify-center text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
         >
           <ZoomIn className="w-3.5 h-3.5" />
         </button>
@@ -891,7 +902,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
           type="button"
           onClick={() => setRotationDeg((r) => r - 15)}
           title={t('stageRotateL')}
-          className="p-1.5 rounded-lg text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
+          className="min-w-[36px] min-h-[36px] p-2 rounded-lg inline-flex items-center justify-center text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
         >
           <RotateCcw className="w-3.5 h-3.5" />
         </button>
@@ -899,7 +910,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
           type="button"
           onClick={() => setRotationDeg((r) => r + 15)}
           title={t('stageRotateR')}
-          className="p-1.5 rounded-lg text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
+          className="min-w-[36px] min-h-[36px] p-2 rounded-lg inline-flex items-center justify-center text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
         >
           <RotateCw className="w-3.5 h-3.5" />
         </button>
@@ -910,7 +921,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
             setMirrored((m) => !m);
           }}
           title={t('stageMirrorView')}
-          className={`p-1.5 rounded-lg transition-colors ${
+          className={`min-w-[36px] min-h-[36px] p-2 rounded-lg inline-flex items-center justify-center transition-colors ${
             mirrored
               ? 'bg-ink-brass/20 text-ink-brass'
               : 'text-desk-muted hover:text-desk-text hover:bg-desk-panel'
@@ -922,7 +933,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
           type="button"
           onClick={resetDeskView}
           title={t('stageResetView')}
-          className="p-1.5 rounded-lg text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
+          className="min-w-[36px] min-h-[36px] p-2 rounded-lg inline-flex items-center justify-center text-desk-muted hover:text-desk-text hover:bg-desk-panel transition-colors"
         >
           <Maximize2 className="w-3.5 h-3.5" />
         </button>
@@ -931,7 +942,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
       {/* Lasso Transform + Cross-Frame Copy Floating HUD */}
       {hasFloating && (
         <div className="absolute top-2.5 left-3 z-20 flex flex-wrap items-center gap-1.5 p-1.5 rounded-xl bg-desk-surface border border-ink-vermilion shadow-xl">
-          <span className="font-mono text-[10px] text-ink-vermilion px-1.5">
+          <span className="font-mono text-[11px] text-ink-vermilion px-1.5">
             {t('stageSelectionTag')}
           </span>
           <KeycapButton
@@ -1091,7 +1102,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
                       soundEngine.toggle(true);
                       updateGuides({ underlay: 'bounce' });
                     }}
-                    className="px-2.5 py-1 rounded-full bg-[#FAF6EE]/90 border border-[#1c1917]/20 text-[10.5px] font-semibold text-[#1c1917] hover:border-[#E54D2E] hover:text-[#E54D2E] transition-colors cursor-pointer"
+                    className="px-2.5 py-1 rounded-full bg-[#FAF6EE]/90 border border-[#1c1917]/20 text-[11px] font-semibold text-[#1c1917] hover:border-[#E54D2E] hover:text-[#E54D2E] transition-colors cursor-pointer"
                   >
                     {t('stageWhisperBounce')}
                   </button>
@@ -1101,7 +1112,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
                       soundEngine.toggle(true);
                       updateGuides({ underlay: 'walk' });
                     }}
-                    className="px-2.5 py-1 rounded-full bg-[#FAF6EE]/90 border border-[#1c1917]/20 text-[10.5px] font-semibold text-[#1c1917] hover:border-[#2563EB] hover:text-[#2563EB] transition-colors cursor-pointer"
+                    className="px-2.5 py-1 rounded-full bg-[#FAF6EE]/90 border border-[#1c1917]/20 text-[11px] font-semibold text-[#1c1917] hover:border-[#2563EB] hover:text-[#2563EB] transition-colors cursor-pointer"
                   >
                     {t('stageWhisperWalk')}
                   </button>
@@ -1111,7 +1122,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
                       soundEngine.click(1.05);
                       updateProjectSettings({ paperStyle: 'grid' });
                     }}
-                    className="px-2.5 py-1 rounded-full bg-[#FAF6EE]/90 border border-[#1c1917]/20 text-[10.5px] font-semibold text-[#1c1917] hover:border-[#D99B26] hover:text-[#9a6a0e] transition-colors cursor-pointer"
+                    className="px-2.5 py-1 rounded-full bg-[#FAF6EE]/90 border border-[#1c1917]/20 text-[11px] font-semibold text-[#1c1917] hover:border-[#D99B26] hover:text-[#9a6a0e] transition-colors cursor-pointer"
                   >
                     {t('stageWhisperGrid')}
                   </button>
@@ -1123,7 +1134,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
 
         {/* Bottom discrete desk stamp */}
         <div
-          className="absolute -bottom-6 left-0 right-0 flex items-center justify-between font-mono text-[10px] text-desk-muted pointer-events-none"
+          className="absolute -bottom-6 left-0 right-0 flex items-center justify-between font-mono text-[11px] text-desk-muted pointer-events-none"
           style={{ transform: mirrored ? 'scaleX(-1)' : undefined }}
         >
           <div className="flex items-center gap-3">
@@ -1132,7 +1143,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
             </span>
             <span>
               {t('stageHoldLabel')}: {frame.hold}{' '}
-              {locale === 'en' && frame.hold === 1 ? 'frame' : t('stageHoldUnit')}
+              {frame.hold === 1 ? t('stageHoldSingular') : t('stageHoldUnit')}
             </span>
             {rotationDeg !== 0 && (
               <span>
@@ -1166,10 +1177,10 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
             }}
           />
           <div className="flex flex-col">
-            <span className="font-mono text-[9px] uppercase tracking-wider text-ink-brass">
+            <span className="font-mono text-[11px] uppercase tracking-wider text-ink-brass">
               {t('stageFlipLabel')}
             </span>
-            <span className="font-mono text-[10px] text-desk-muted">
+            <span className="font-mono text-[11px] text-desk-muted">
               {activeFrameIndex + 1}/{project.frames.length}
             </span>
           </div>

@@ -3,7 +3,9 @@ import { BookOpen, Pause, Play, X } from 'lucide-react';
 import type { CelFrame } from '../../types/studio';
 import { BlobImage } from './KeycapButton';
 import { soundEngine } from '../../engine/soundEngine';
+import { localizeProjectName, useT } from '../../i18n/translations';
 import { useStudioStore } from '../../store/useStudioStore';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
 
 export interface PocketFlipbook3DPreviewProps {
   frames: CelFrame[];
@@ -36,7 +38,7 @@ export function PocketFlipbook3DPreview({
   compact = false,
 }: PocketFlipbook3DPreviewProps) {
   const locale = useStudioStore((s) => s.locale);
-  const isEn = locale === 'en';
+  const t = useT();
   const count = Math.max(1, frames.length);
   const [idx, setIdx] = useState(0);
   const [prevIdx, setPrevIdx] = useState<number | null>(null);
@@ -48,7 +50,7 @@ export function PocketFlipbook3DPreview({
   const safeIdx = idx % count;
   const activeFrame = frames[safeIdx] ?? frames[0];
   const turningFrame = prevIdx !== null ? frames[prevIdx % count] : null;
-  const displayTitle = title ?? projectName ?? (isEn ? '3D Pocket Flipbook' : '3B Cep Flipbook');
+  const displayTitle = title ?? (projectName ? localizeProjectName(projectName, locale) : undefined) ?? t('flip3dTitle');
 
   const stepTo = useCallback(
     (nextRaw: number, playAudio = true) => {
@@ -106,11 +108,7 @@ export function PocketFlipbook3DPreview({
   }, [count, safeIdx, stepTo]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch {
-      // ignore synthetic pointer
-    }
+    safeSetPointerCapture(e.currentTarget, e.pointerId);
     setAutoPlay(false);
     setPrevIdx(null);
     dragRef.current = { startX: e.clientX, startIdx: safeIdx };
@@ -157,11 +155,7 @@ export function PocketFlipbook3DPreview({
         className={`pocket-flip-stage cursor-grab active:cursor-grabbing select-none shrink-0 ${
           compact ? 'w-[126px] h-[78px]' : 'w-full max-w-[300px] aspect-[16/10] mx-auto'
         }`}
-        title={
-          isEn
-            ? 'Drag, click, or scroll wheel to thumb-flip pages'
-            : 'Sayfaları çevirmek için sürükle, tıkla veya tekerleği çevir'
-        }
+        title={t('flip3dHintTitle')}
       >
         <div className="pocket-flip-book w-full h-full">
           {/* Physical stacked paper edge depth layers */}
@@ -254,7 +248,7 @@ export function PocketFlipbook3DPreview({
             <button
               type="button"
               onClick={onClose}
-              aria-label={isEn ? 'Close 3D Flipbook' : '3B Flipbook Kapat'}
+              aria-label={t('flip3dCloseAria')}
               className="p-1 rounded-lg bg-desk-surface border border-desk-border text-desk-muted hover:text-desk-text"
             >
               <X className="w-3.5 h-3.5" />
@@ -270,10 +264,10 @@ export function PocketFlipbook3DPreview({
               setAutoPlay((p) => !p);
             }}
             className="px-2.5 py-1 rounded-lg bg-desk-surface border border-desk-border text-[11px] font-mono font-bold text-desk-text hover:border-ink-brass inline-flex items-center gap-1.5 transition-colors"
-            title={isEn ? 'Auto-flip pages' : 'Otomatik Çevir'}
+            title={t('flip3dAutoTitle')}
           >
             {autoPlay ? <Pause className="w-3 h-3 text-ink-vermilion" /> : <Play className="w-3 h-3 text-ink-brass" />}
-            <span>{autoPlay ? (isEn ? 'Pause' : 'Durdur') : (isEn ? 'Auto Flip' : 'Otomatik Çevir')} · {safeIdx + 1}/{count}</span>
+            <span>{autoPlay ? t('flip3dPause') : t('flip3dAuto')} · {safeIdx + 1}/{count}</span>
           </button>
 
           {actionLabel && onAction && (

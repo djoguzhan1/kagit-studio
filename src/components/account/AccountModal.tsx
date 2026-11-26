@@ -1,9 +1,10 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import {
+  AlertCircle,
   CheckCircle2,
   Cloud,
   CloudOff,
-  FolderInput,
+  FolderUp,
   Loader2,
   Lock,
   LogOut,
@@ -15,31 +16,29 @@ import {
   X,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
-import {
-  getGoogleLoginUrl,
-  loginWithEmail,
-  registerWithEmail,
-} from '../../engine/cloudSync';
+import { getGoogleLoginUrl, loginWithEmail, registerWithEmail } from '../../engine/cloudSync';
 import { soundEngine } from '../../engine/soundEngine';
+import { toBcp47Locale, useT, useTFmt } from '../../i18n/translations';
+import { useModalA11y } from '../../hooks/useModalA11y';
 
-function GoogleGIcon() {
+function GoogleGLogo() {
   return (
-    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+    <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" aria-hidden="true">
       <path
-        fill="#4285F4"
-        d="M23.49 12.27c0-.79-.07-1.54-.2-2.27H12v4.3h6.44a5.5 5.5 0 0 1-2.39 3.61v3h3.87c2.26-2.08 3.57-5.15 3.57-8.64z"
+        fill="#EA4335"
+        d="M12 10.2v3.9h5.5c-.24 1.26-.97 2.33-2.06 3.05l3.33 2.58c1.94-1.79 3.06-4.43 3.06-7.55 0-.73-.07-1.43-.19-2.1H12z"
       />
       <path
         fill="#34A853"
-        d="M12 24c3.24 0 5.95-1.07 7.93-2.91l-3.87-3c-1.07.72-2.44 1.15-4.06 1.15-3.12 0-5.77-2.11-6.71-4.95H1.29v3.1A12 12 0 0 0 12 24z"
+        d="M12 22c2.78 0 5.12-.92 6.83-2.5l-3.33-2.58c-.92.62-2.1.99-3.5.99-2.69 0-4.97-1.82-5.79-4.26H2.77v2.67C4.47 19.7 7.97 22 12 22z"
       />
       <path
         fill="#FBBC05"
-        d="M5.29 14.29a7.2 7.2 0 0 1 0-4.58v-3.1H1.29a12 12 0 0 0 0 10.78l4-3.1z"
+        d="M6.21 13.65A6.02 6.02 0 0 1 5.89 12c0-.57.1-1.13.32-1.65V7.68H2.77A9.98 9.98 0 0 0 2 12c0 1.61.39 3.13 1.07 4.32l3.14-2.67z"
       />
       <path
-        fill="#EA4335"
-        d="M12 4.76c1.76 0 3.34.61 4.58 1.8l3.44-3.44C17.94 1.19 15.24 0 12 0A12 12 0 0 0 1.29 6.61l4 3.1c.94-2.84 3.59-4.95 6.71-4.95z"
+        fill="#4285F4"
+        d="M12 5.98c1.51 0 2.87.52 3.94 1.54l2.95-2.95C17.11 2.9 14.78 2 12 2 7.97 2 4.47 4.3 2.77 7.68l3.44 2.67c.82-2.44 3.1-4.37 5.79-4.37z"
       />
     </svg>
   );
@@ -47,25 +46,27 @@ function GoogleGIcon() {
 
 export default function AccountModal() {
   const {
-    accountModalOpen,
-    closeAccountModal,
     cloudUser,
-    googleAuthEnabled,
     cloudSyncStatus,
     cloudLastSyncedAt,
     cloudBlobBytes,
-    projects,
+    googleAuthEnabled,
     guestImportableCount,
+    projects,
     locale,
+    accountModalOpen,
+    closeAccountModal,
     completeCloudSignIn,
-    syncCloudNow,
     importGuestProjectsToAccount,
+    syncCloudNow,
     signOutAccount,
     permanentlyDeleteAccount,
     notify,
   } = useStudioStore();
 
-  const isEn = locale === 'en';
+  const t = useT();
+  const tf = useTFmt();
+
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -74,30 +75,24 @@ export default function AccountModal() {
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  useEffect(() => {
-    if (!accountModalOpen) return;
-    setError(null);
-    setConfirmDelete(false);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeAccountModal();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [accountModalOpen, closeAccountModal]);
+  const dialogRef = useModalA11y<HTMLDivElement>({
+    open: accountModalOpen,
+    onClose: closeAccountModal,
+    closeDisabled: busy,
+  });
 
   if (!accountModalOpen) return null;
 
-  const handleEmailSubmit = async (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (busy) return;
     setError(null);
-    const cleanEmail = email.trim();
+    const cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail || !password) {
-      setError(isEn ? 'Please enter email and password.' : 'Lütfen e-posta ve şifreni gir.');
+      setError(t('acctErrEmailPass'));
       return;
     }
     if (tab === 'register' && password.length < 8) {
-      setError(isEn ? 'Password must be at least 8 characters.' : 'Şifre en az 8 karakter olmalı.');
+      setError(t('acctErrPassLen'));
       return;
     }
 
@@ -107,52 +102,45 @@ export default function AccountModal() {
         tab === 'register'
           ? await registerWithEmail({ email: cleanEmail, password, name: name.trim() || undefined })
           : await loginWithEmail({ email: cleanEmail, password });
-      soundEngine.click(1.12);
-      setPassword('');
+
       await completeCloudSignIn(res.user, res.googleEnabled);
+      soundEngine.clapperSnap();
       notify(
         tab === 'register'
-          ? isEn
-            ? `Welcome ${res.user.name}! Your private cloud vault is ready.`
-            : `Hoş geldin ${res.user.name}! Özel bulut kasan oluşturuldu.`
-          : isEn
-            ? `Signed in as ${res.user.name}`
-            : `Giriş yapıldı: ${res.user.name}`,
+          ? tf('acctWelcomeToast', { name: res.user.name })
+          : tf('acctSignedInToast', { name: res.user.name }),
         'ok'
       );
+      setPassword('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : isEn ? 'Action failed.' : 'İşlem başarısız oldu.');
+      setError(err instanceof Error ? err.message : t('acctErrActionFailed'));
     } finally {
       setBusy(false);
     }
   };
 
-  const handleGoogleClick = () => {
+  const handleGoogleSignIn = () => {
     soundEngine.click(1.08);
     if (!googleAuthEnabled) {
-      setError(
-        isEn
-          ? 'Google Sign-In keys are not connected yet — sign up with Email & Password below in 5 seconds.'
-          : 'Google giriş anahtarı henüz bağlanmadı — aşağıdaki E-posta & Şifre ile 5 saniyede hemen üye olabilirsin.'
-      );
+      setError(t('acctErrGoogleUnconfigured'));
       return;
     }
     window.location.href = getGoogleLoginUrl();
   };
 
-  const handleSync = async () => {
-    if (busy) return;
+  const handleManualSync = async () => {
     setBusy(true);
+    setError(null);
     try {
-      await syncCloudNow(false);
+      await syncCloudNow();
     } finally {
       setBusy(false);
     }
   };
 
   const handleImportGuest = async () => {
-    if (busy) return;
     setBusy(true);
+    setError(null);
     try {
       await importGuestProjectsToAccount();
     } finally {
@@ -161,7 +149,6 @@ export default function AccountModal() {
   };
 
   const handleSignOut = async () => {
-    if (busy) return;
     setBusy(true);
     try {
       await signOutAccount();
@@ -171,12 +158,11 @@ export default function AccountModal() {
   };
 
   const handleDeleteAccount = async () => {
-    if (busy) return;
     setBusy(true);
     try {
       await permanentlyDeleteAccount();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Hesap silinemedi.');
+      setError(err instanceof Error ? err.message : t('acctErrDeleteFailed'));
     } finally {
       setBusy(false);
     }
@@ -184,7 +170,7 @@ export default function AccountModal() {
 
   const usedMb = (cloudBlobBytes / (1024 * 1024)).toFixed(2);
   const lastSyncLabel = cloudLastSyncedAt
-    ? new Date(cloudLastSyncedAt).toLocaleTimeString(isEn ? 'en-US' : 'tr-TR', {
+    ? new Date(cloudLastSyncedAt).toLocaleTimeString(toBcp47Locale(locale), {
         hour: '2-digit',
         minute: '2-digit',
       })
@@ -192,90 +178,75 @@ export default function AccountModal() {
 
   return (
     <div
-      onClick={closeAccountModal}
-      className="fixed inset-0 z-[85] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 select-none"
+      onClick={() => !busy && closeAccountModal()}
+      className="fixed inset-0 z-[85] bg-black/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 select-none"
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={isEn ? 'INKTROPE Cloud Account' : 'INKTROPE Bulut Hesabı'}
+        aria-labelledby="account-modal-title"
+        aria-label={t('acctModalAria')}
         onClick={(e) => e.stopPropagation()}
-        className="toast-pop-in w-full max-w-md rounded-3xl bg-desk-surface border border-desk-border shadow-2xl overflow-hidden"
+        className="toast-pop-in w-full max-w-md max-h-[calc(100dvh-1.5rem)] flex flex-col rounded-3xl bg-desk-surface border border-desk-border shadow-2xl overflow-hidden"
       >
-        {/* Header */}
-        <div className="px-5 py-4 border-b border-desk-border flex items-center justify-between gap-2">
+        {/* Fixed Header */}
+        <div className="px-5 py-3.5 border-b border-desk-border flex items-center justify-between gap-2 shrink-0">
           <div className="min-w-0">
-            <h2 className="text-base font-extrabold text-desk-text flex items-center gap-2">
+            <h2
+              id="account-modal-title"
+              className="text-base font-extrabold text-desk-text flex items-center gap-2"
+            >
               <Cloud className="w-4 h-4 text-ink-brass shrink-0" />
               <span className="truncate">
-                {cloudUser
-                  ? isEn
-                    ? 'Private Cloud Vault'
-                    : 'Özel Bulut Kasan'
-                  : isEn
-                    ? 'Optional Cloud Backup'
-                    : 'İsteğe Bağlı Bulut Yedekleme'}
+                {cloudUser ? t('acctTitlePrivate') : t('acctTitleOptional')}
               </span>
             </h2>
-            <p className="font-mono text-[10px] text-ink-emerald mt-0.5">
-              ●{' '}
-              {isEn
-                ? '100% private per-account vault · Zero ads'
-                : 'Her hesap %100 izole · Kimse çizimlerini göremez'}
+            <p className="font-mono text-[11px] text-ink-emerald mt-0.5">
+              ● {t('acctZeroAdsBadge')}
             </p>
           </div>
           <button
             type="button"
+            disabled={busy}
             onClick={closeAccountModal}
-            className="p-2 rounded-xl console-well border border-desk-border text-desk-muted hover:text-desk-text"
-            aria-label={isEn ? 'Close' : 'Kapat'}
+            className="min-w-[44px] min-h-[44px] p-2 rounded-xl console-well border border-desk-border text-desk-muted hover:text-desk-text inline-flex items-center justify-center"
+            aria-label={t('acctCloseAria')}
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
+        {/* Scrollable Body — 100% keyboard & 360x500 virtual-keyboard safe! */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 space-y-4">
           {!cloudUser ? (
             <>
-              {/* Reassuring Optional Guest Guarantee */}
               <div className="rounded-2xl console-well border border-desk-border p-3 flex items-start gap-2.5 text-xs text-desk-muted leading-relaxed">
                 <ShieldCheck className="w-4 h-4 text-ink-emerald shrink-0 mt-0.5" />
-                <span>
-                  {isEn
-                    ? 'Signing in is completely optional. Create a free vault to back up your flipbooks, puppets & films safely across phone and desktop — strictly private to your account.'
-                    : 'Üyelik zorunlu değildir. Çizimlerini kaybetmemek ve telefon/bilgisayardan erişmek istersen ücretsiz bulut kasanı açabilirsin — tüm dosyaların yalnızca sana özeldir.'}
-                </span>
+                <span>{t('acctGuestGuarantee')}</span>
               </div>
 
-              {/* Google OAuth Button */}
               <button
                 type="button"
-                onClick={handleGoogleClick}
                 disabled={busy}
-                className={`w-full py-2.5 px-4 rounded-xl border font-bold text-xs inline-flex items-center justify-center gap-2.5 transition-all shadow-sm ${
-                  googleAuthEnabled
-                    ? 'bg-white text-[#1F1F1F] border-white/80 hover:bg-[#F5F5F5]'
-                    : 'console-well text-desk-muted border-desk-border hover:border-ink-brass/50'
-                }`}
+                onClick={handleGoogleSignIn}
+                className="w-full min-h-[44px] py-2.5 px-4 rounded-2xl bg-white hover:bg-stone-100 text-stone-900 border border-stone-300 text-xs font-extrabold flex items-center justify-center gap-2.5 shadow-sm transition-colors disabled:opacity-50"
               >
-                <GoogleGIcon />
-                <span>
-                  {isEn ? 'Continue with Google' : 'Google ile Devam Et'}
-                </span>
+                <GoogleGLogo />
+                <span>{t('acctGoogleBtn')}</span>
                 {!googleAuthEnabled && (
-                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-desk-panel text-ink-brass border border-desk-border">
-                    {isEn ? 'Pending key' : 'Kurulum bekliyor'}
+                  <span className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-stone-200 text-stone-700 border border-stone-300">
+                    {t('acctGooglePending')}
                   </span>
                 )}
               </button>
 
-              <div className="flex items-center gap-3 text-[10px] font-mono uppercase tracking-wider text-desk-muted">
+              <div className="flex items-center gap-3 text-[11px] font-mono uppercase tracking-wider text-desk-muted">
                 <span className="flex-1 h-px bg-desk-border" />
-                <span>{isEn ? 'or with email' : 'veya e-posta ile'}</span>
+                <span>{t('acctOrEmail')}</span>
                 <span className="flex-1 h-px bg-desk-border" />
               </div>
 
-              {/* Login / Register Mode Switch */}
               <div className="grid grid-cols-2 gap-1 p-1 rounded-xl console-well border border-desk-border">
                 <button
                   type="button"
@@ -283,13 +254,13 @@ export default function AccountModal() {
                     setTab('login');
                     setError(null);
                   }}
-                  className={`py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                  className={`min-h-[40px] py-1.5 rounded-lg text-xs font-bold transition-colors ${
                     tab === 'login'
-                      ? 'bg-desk-panel text-desk-text border border-ink-brass/60 shadow-sm'
-                      : 'text-desk-muted hover:text-desk-text border border-transparent'
+                      ? 'bg-desk-panel text-desk-text border border-desk-border shadow-sm'
+                      : 'text-desk-muted hover:text-desk-text'
                   }`}
                 >
-                  {isEn ? 'Sign In' : 'Giriş Yap'}
+                  {t('acctSignIn')}
                 </button>
                 <button
                   type="button"
@@ -297,30 +268,31 @@ export default function AccountModal() {
                     setTab('register');
                     setError(null);
                   }}
-                  className={`py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                  className={`min-h-[40px] py-1.5 rounded-lg text-xs font-bold transition-colors ${
                     tab === 'register'
-                      ? 'bg-desk-panel text-desk-text border border-ink-brass/60 shadow-sm'
-                      : 'text-desk-muted hover:text-desk-text border border-transparent'
+                      ? 'bg-desk-panel text-desk-text border border-desk-border shadow-sm'
+                      : 'text-desk-muted hover:text-desk-text'
                   }`}
                 >
-                  {isEn ? 'Create Free Account' : 'Ücretsiz Üye Ol'}
+                  {t('acctCreateFreeTab')}
                 </button>
               </div>
 
-              <form onSubmit={handleEmailSubmit} className="space-y-3 select-text">
+              <form onSubmit={handleSubmit} className="space-y-3">
                 {tab === 'register' && (
                   <label className="block space-y-1">
                     <span className="text-[11px] font-bold text-desk-muted flex items-center gap-1.5">
                       <User className="w-3.5 h-3.5" />
-                      {isEn ? 'Display Name' : 'Adın / Sanatçı Adın'}
+                      {t('acctDisplayName')}
                     </span>
                     <input
                       type="text"
+                      autoComplete="name"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
-                      placeholder={isEn ? 'e.g. Alex' : 'ör. Oğuzhan'}
+                      placeholder={t('acctNamePlaceholder')}
                       maxLength={60}
-                      className="w-full px-3 py-2 rounded-xl console-well border border-desk-border text-xs text-desk-text placeholder:text-desk-muted/60 focus:outline-none focus:border-ink-brass"
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl console-well border border-desk-border text-xs text-desk-text placeholder:text-desk-muted/60 focus:outline-none focus:border-ink-brass"
                     />
                   </label>
                 )}
@@ -328,7 +300,7 @@ export default function AccountModal() {
                 <label className="block space-y-1">
                   <span className="text-[11px] font-bold text-desk-muted flex items-center gap-1.5">
                     <Mail className="w-3.5 h-3.5" />
-                    {isEn ? 'Email' : 'E-posta'}
+                    {t('acctEmailLabel')}
                   </span>
                   <input
                     type="email"
@@ -336,15 +308,15 @@ export default function AccountModal() {
                     autoComplete="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="sen@ornek.com"
-                    className="w-full px-3 py-2 rounded-xl console-well border border-desk-border text-xs text-desk-text placeholder:text-desk-muted/60 focus:outline-none focus:border-ink-brass"
+                    placeholder={t('acctEmailPlaceholder')}
+                    className="w-full min-h-[44px] px-3 py-2 rounded-xl console-well border border-desk-border text-xs text-desk-text placeholder:text-desk-muted/60 focus:outline-none focus:border-ink-brass"
                   />
                 </label>
 
                 <label className="block space-y-1">
                   <span className="text-[11px] font-bold text-desk-muted flex items-center gap-1.5">
                     <Lock className="w-3.5 h-3.5" />
-                    {isEn ? 'Password (min 8 chars)' : 'Şifre (en az 8 karakter)'}
+                    {t('acctPasswordLabel')}
                   </span>
                   <input
                     type="password"
@@ -354,37 +326,34 @@ export default function AccountModal() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full px-3 py-2 rounded-xl console-well border border-desk-border text-xs text-desk-text placeholder:text-desk-muted/60 focus:outline-none focus:border-ink-brass"
+                    className="w-full min-h-[44px] px-3 py-2 rounded-xl console-well border border-desk-border text-xs text-desk-text placeholder:text-desk-muted/60 focus:outline-none focus:border-ink-brass"
                   />
                 </label>
 
                 {error && (
-                  <div className="rounded-xl bg-ink-vermilion/15 border border-ink-vermilion/50 px-3 py-2 text-xs text-ink-vermilion font-semibold">
-                    {error}
+                  <div
+                    role="alert"
+                    className="rounded-xl bg-ink-vermilion/15 border border-ink-vermilion/50 px-3 py-2 text-xs text-ink-vermilion flex items-start gap-2"
+                  >
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{error}</span>
                   </div>
                 )}
 
                 <button
                   type="submit"
                   disabled={busy}
-                  className="w-full py-2.5 px-4 rounded-xl bg-ink-vermilion hover:brightness-110 disabled:opacity-60 text-white font-extrabold text-xs inline-flex items-center justify-center gap-2 shadow-lg transition-all"
+                  className="w-full min-h-[44px] py-2.5 px-4 rounded-2xl bg-ink-vermilion hover:brightness-110 text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow-md transition-all disabled:opacity-50"
                 >
-                  {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {busy && <Loader2 className="w-4 h-4 animate-spin" />}
                   <span>
-                    {tab === 'register'
-                      ? isEn
-                        ? 'Create My Cloud Vault'
-                        : 'Ücretsiz Hesap Oluştur'
-                      : isEn
-                        ? 'Sign In to Vault'
-                        : 'Hesabıma Giriş Yap'}
+                    {tab === 'register' ? t('acctCreateSubmit') : t('acctSignInSubmit')}
                   </span>
                 </button>
               </form>
             </>
           ) : (
             <>
-              {/* Signed-In User Card */}
               <div className="rounded-2xl console-well border border-desk-border p-3.5 flex items-center gap-3">
                 {cloudUser.avatarUrl ? (
                   <img
@@ -395,141 +364,135 @@ export default function AccountModal() {
                   />
                 ) : (
                   <div className="w-11 h-11 rounded-full bg-ink-brass/20 border border-ink-brass/60 text-ink-brass font-mono text-sm font-extrabold flex items-center justify-center shrink-0">
-                    {(cloudUser.name || 'U').slice(0, 2).toUpperCase()}
+                    {(cloudUser.name || cloudUser.email).slice(0, 2).toUpperCase()}
                   </div>
                 )}
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm font-extrabold text-desk-text truncate">{cloudUser.name}</div>
-                  <div className="font-mono text-[11px] text-desk-muted truncate">{cloudUser.email}</div>
-                  <div className="mt-1 flex items-center gap-2 text-[10px] font-mono">
+                  <div className="text-sm font-extrabold text-desk-text truncate">
+                    {cloudUser.name}
+                  </div>
+                  <div className="font-mono text-[11px] text-desk-muted truncate">
+                    {cloudUser.email}
+                  </div>
+                  <div className="mt-1 flex items-center gap-1.5 font-mono text-[11px]">
                     {cloudSyncStatus === 'synced' ? (
                       <span className="text-ink-emerald inline-flex items-center gap-1">
-                        <CheckCircle2 className="w-3 h-3" />
-                        {isEn ? `Synced · ${lastSyncLabel}` : `Bulutta Güncel · ${lastSyncLabel}`}
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        {tf('acctSyncedAt', { time: lastSyncLabel })}
                       </span>
                     ) : cloudSyncStatus === 'syncing' ? (
                       <span className="text-ink-brass inline-flex items-center gap-1">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        {isEn ? 'Syncing…' : 'Senkronize ediliyor…'}
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        {t('acctStatusSyncing')}
                       </span>
                     ) : (
                       <span className="text-ink-vermilion inline-flex items-center gap-1">
-                        <CloudOff className="w-3 h-3" />
-                        {isEn ? 'Offline — saved locally' : 'Çevrimdışı — yerelde güvende'}
+                        <CloudOff className="w-3.5 h-3.5" />
+                        {t('acctOfflineLocal')}
                       </span>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Vault Stats */}
-              <div className="grid grid-cols-2 gap-2.5 text-xs">
-                <div className="rounded-xl console-well border border-desk-border p-3">
-                  <div className="font-mono text-[10px] uppercase text-desk-muted">
-                    {isEn ? 'Cloud Notebooks' : 'Bulut Defterlerin'}
+              <div className="grid grid-cols-2 gap-2.5">
+                <div className="rounded-2xl console-well border border-desk-border p-3">
+                  <div className="font-mono text-[11px] uppercase text-desk-muted">
+                    {t('acctNotebooksLabel')}
                   </div>
-                  <div className="text-lg font-extrabold text-desk-text mt-0.5">{projects.length}</div>
+                  <div className="text-lg font-extrabold text-desk-text mt-0.5">
+                    {projects.length}
+                  </div>
                 </div>
-                <div className="rounded-xl console-well border border-desk-border p-3">
-                  <div className="font-mono text-[10px] uppercase text-desk-muted">
-                    {isEn ? 'Vault Storage' : 'Bulut Kullanımı'}
+                <div className="rounded-2xl console-well border border-desk-border p-3">
+                  <div className="font-mono text-[11px] uppercase text-desk-muted">
+                    {t('acctStorageLabel')}
                   </div>
                   <div className="text-lg font-extrabold text-desk-text mt-0.5">{usedMb} MB</div>
                 </div>
               </div>
 
-              {/* Optional 1-Click Migration of Guest Notebooks */}
               {guestImportableCount > 0 && (
-                <div className="rounded-2xl bg-ink-brass/12 border border-ink-brass/50 p-3 space-y-2">
+                <div className="rounded-2xl bg-ink-brass/15 border border-ink-brass/55 p-3 space-y-2">
                   <p className="text-xs text-desk-text font-semibold leading-snug">
-                    {isEn
-                      ? `Found ${guestImportableCount} local guest notebook(s) on this device.`
-                      : `Bu cihazda misafir olarak çizdiğin ${guestImportableCount} defter bulundu.`}
+                    {tf('acctGuestFound', { count: guestImportableCount })}
                   </p>
                   <button
                     type="button"
                     disabled={busy}
                     onClick={handleImportGuest}
-                    className="w-full py-2 px-3 rounded-xl bg-ink-brass text-[#151412] font-extrabold text-xs inline-flex items-center justify-center gap-2 hover:brightness-110 transition-all"
+                    className="w-full min-h-[44px] py-2 px-3 rounded-xl bg-ink-brass text-neutral-950 text-xs font-extrabold inline-flex items-center justify-center gap-2 hover:brightness-105 disabled:opacity-50"
                   >
-                    <FolderInput className="w-3.5 h-3.5" />
-                    <span>
-                      {isEn
-                        ? `Import ${guestImportableCount} Notebook(s) to Cloud`
-                        : `${guestImportableCount} Defteri Özel Bulutuma Aktar`}
-                    </span>
+                    <FolderUp className="w-3.5 h-3.5" />
+                    <span>{tf('acctImportGuestBtn', { count: guestImportableCount })}</span>
                   </button>
                 </div>
               )}
 
               {error && (
-                <div className="rounded-xl bg-ink-vermilion/15 border border-ink-vermilion/50 px-3 py-2 text-xs text-ink-vermilion font-semibold">
-                  {error}
+                <div
+                  role="alert"
+                  className="rounded-xl bg-ink-vermilion/15 border border-ink-vermilion/50 px-3 py-2 text-xs text-ink-vermilion flex items-start gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{error}</span>
                 </div>
               )}
 
-              {/* Actions */}
-              <div className="flex flex-col gap-2">
+              <div className="space-y-2 pt-1">
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={handleSync}
-                  className="w-full py-2.5 px-4 rounded-xl bg-desk-panel hover:border-ink-brass border border-desk-border text-desk-text font-bold text-xs inline-flex items-center justify-center gap-2 transition-colors"
+                  onClick={handleManualSync}
+                  className="w-full min-h-[44px] py-2 px-3 rounded-xl console-well border border-desk-border hover:border-ink-brass text-xs font-bold text-desk-text flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 text-ink-brass ${busy ? 'animate-spin' : ''}`} />
-                  <span>{isEn ? 'Sync Now Across Devices' : 'Cihazlar Arası Şimdi Senkronize Et'}</span>
+                  <span>{t('acctSyncNowBtn')}</span>
                 </button>
 
                 <button
                   type="button"
                   disabled={busy}
                   onClick={handleSignOut}
-                  className="w-full py-2.5 px-4 rounded-xl console-well hover:border-desk-muted border border-desk-border text-desk-text font-bold text-xs inline-flex items-center justify-center gap-2 transition-colors"
+                  className="w-full min-h-[44px] py-2 px-3 rounded-xl console-well border border-desk-border hover:border-desk-muted text-xs font-semibold text-desk-muted hover:text-desk-text flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
                 >
-                  <LogOut className="w-3.5 h-3.5 text-desk-muted" />
-                  <span>
-                    {isEn
-                      ? 'Sign Out (Clear Copy From This Device)'
-                      : 'Çıkış Yap (Bu Cihazdaki Kopyayı Temizle)'}
-                  </span>
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>{t('acctSignOutBtn')}</span>
                 </button>
               </div>
 
-              {/* KVKK/GDPR Permanent Account Erasure */}
               <div className="pt-2 border-t border-desk-border">
                 {!confirmDelete ? (
                   <button
                     type="button"
+                    disabled={busy}
                     onClick={() => setConfirmDelete(true)}
-                    className="text-[11px] font-semibold text-desk-muted hover:text-ink-vermilion inline-flex items-center gap-1.5 transition-colors"
+                    className="w-full min-h-[40px] py-1.5 text-[11px] font-mono text-desk-muted hover:text-ink-vermilion inline-flex items-center justify-center gap-1.5 transition-colors"
                   >
-                    <Trash2 className="w-3 h-3" />
-                    <span>
-                      {isEn ? 'Permanently delete account & cloud data' : 'Hesabı ve tüm bulut verilerini kalıcı sil'}
-                    </span>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>{t('acctDeleteBtn')}</span>
                   </button>
                 ) : (
                   <div className="rounded-xl bg-ink-vermilion/10 border border-ink-vermilion/50 p-3 space-y-2">
                     <p className="text-[11px] text-desk-text font-semibold">
-                      {isEn
-                        ? 'This permanently erases your account and all cloud notebooks. This cannot be undone.'
-                        : 'Bu işlem hesabını ve buluttaki tüm defterlerini kalıcı olarak siler. Geri alınamaz.'}
+                      {t('acctDeleteWarn')}
                     </p>
-                    <div className="flex items-center gap-2">
+                    <div className="flex gap-2">
                       <button
                         type="button"
                         disabled={busy}
                         onClick={handleDeleteAccount}
-                        className="px-3 py-1.5 rounded-lg bg-ink-vermilion text-white text-xs font-extrabold"
+                        className="flex-1 min-h-[44px] py-1.5 rounded-lg bg-ink-vermilion text-white text-xs font-extrabold hover:brightness-110"
                       >
-                        {isEn ? 'Yes, Delete Forever' : 'Evet, Kalıcı Sil'}
+                        {t('acctDeleteConfirm')}
                       </button>
                       <button
                         type="button"
+                        disabled={busy}
                         onClick={() => setConfirmDelete(false)}
-                        className="px-3 py-1.5 rounded-lg console-well border border-desk-border text-xs font-bold text-desk-muted"
+                        className="flex-1 min-h-[44px] py-1.5 rounded-lg console-well border border-desk-border text-xs font-semibold text-desk-muted"
                       >
-                        {isEn ? 'Cancel' : 'Vazgeç'}
+                        {t('acctDeleteCancel')}
                       </button>
                     </div>
                   </div>

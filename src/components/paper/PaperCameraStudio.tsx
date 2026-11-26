@@ -22,15 +22,16 @@ import type { QuadCorners } from '../../engine/paperWorker';
 import { generateSampleA4PaperFile } from '../../engine/starterPresets';
 import { canvasToPngBlob, canvasToWebpOrJpegBlob } from '../../engine/db';
 import { soundEngine } from '../../engine/soundEngine';
-import { useT } from '../../i18n/translations';
+import { useT, useTFmt, type TranslationKey } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
 
-const GRID_PRESETS = [
-  { id: '1x1', cols: 1, rows: 1, labelTr: '1 Kare (Tek Sayfa)', labelEn: '1 Frame (Single)' },
-  { id: '2x2', cols: 2, rows: 2, labelTr: '2×2 (4 Kare)', labelEn: '2×2 (4 Frames)' },
-  { id: '3x2', cols: 3, rows: 2, labelTr: '3×2 (6 Kare)', labelEn: '3×2 (6 Frames)' },
-  { id: '4x2', cols: 4, rows: 2, labelTr: '4×2 (8 Kare)', labelEn: '4×2 (8 Frames)' },
-  { id: '3x3', cols: 3, rows: 3, labelTr: '3×3 (9 Kare)', labelEn: '3×3 (9 Frames)' },
-] as const;
+const GRID_PRESETS: ReadonlyArray<{ id: '1x1' | '2x2' | '3x2' | '4x2' | '3x3'; cols: number; rows: number; labelKey: TranslationKey }> = [
+  { id: '1x1', cols: 1, rows: 1, labelKey: 'paperGrid1x1' },
+  { id: '2x2', cols: 2, rows: 2, labelKey: 'paperGrid2x2' },
+  { id: '3x2', cols: 3, rows: 2, labelKey: 'paperGrid3x2' },
+  { id: '4x2', cols: 4, rows: 2, labelKey: 'paperGrid4x2' },
+  { id: '3x3', cols: 3, rows: 3, labelKey: 'paperGrid3x3' },
+];
 
 const DEFAULT_CORNERS: QuadCorners = [
   { x: 0.04, y: 0.04 },
@@ -55,9 +56,9 @@ export default function PaperCameraStudio() {
     addImportedPaperFrames,
     setMode,
     notify,
-    locale,
   } = useStudioStore();
   const t = useT();
+  const tf = useTFmt();
   const project = projects.find((p) => p.id === activeProjectId);
 
   const [tab, setTab] = useState<'camera' | 'scan'>('camera');
@@ -161,7 +162,7 @@ export default function PaperCameraStudio() {
     stopCamera();
     setCameraError(null);
     if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraError('Bu tarayıcıda kamera erişimi desteklenmiyor. Fotoğraf Tarayıcı sekmesini kullanabilirsin.');
+      setCameraError(t('paperErrNoCam'));
       return;
     }
     try {
@@ -180,11 +181,9 @@ export default function PaperCameraStudio() {
       }
       setCameraActive(true);
     } catch {
-      setCameraError(
-        'Kamera bulunamadı veya izin verilmedi. Masaüstünde webcam bağlayabilir ya da "Fotoğraf Tarayıcı" sekmesinden telefonla çektiğin çizimleri yükleyebilirsin.'
-      );
+      setCameraError(t('paperErrCamDenied'));
     }
-  }, [facingMode, stopCamera]);
+  }, [facingMode, stopCamera, t]);
 
   useEffect(() => {
     if (tab === 'camera') {
@@ -281,9 +280,9 @@ export default function PaperCameraStudio() {
         return previewUrl;
       });
       setCaptureCount((c) => c + 1);
-      notify(`Kare yakalandı ve zaman çizelgesine eklendi! (+${captureCount + 1})`);
+      notify(tf('paperFrameCapturedToast', { num: captureCount + 1 }));
     } catch (err) {
-      notify(err instanceof Error ? err.message : 'Kare yakalanamadı', 'error');
+      notify(err instanceof Error ? err.message : t('paperErrCapture'), 'error');
     } finally {
       setCapturing(false);
     }
@@ -384,7 +383,7 @@ export default function PaperCameraStudio() {
         raf = requestAnimationFrame(poll);
       } catch {
         setClapTrigger(false);
-        notify('Alkışla yakalama için mikrofon izni gerekli', 'error');
+        notify(t('paperErrClapMic'), 'error');
       }
     };
 
@@ -593,11 +592,7 @@ export default function PaperCameraStudio() {
       const detected = await runAutoDetectCorners({ width: w, height: h, rgba });
       if (!mountedRef.current) return;
       setCorners(detected);
-      notify(
-        locale === 'en'
-          ? 'Paper corners auto-aligned!'
-          : 'Kağıt kenarları otomatik hizalandı!'
-      );
+      notify(t('paperAutoAlignedToast'));
     } catch {
       // Ignore worker cancellation on tab switch
     } finally {
@@ -668,7 +663,7 @@ export default function PaperCameraStudio() {
       }
     });
     if (closest >= 0) {
-      e.currentTarget.setPointerCapture(e.pointerId);
+      safeSetPointerCapture(e.currentTarget, e.pointerId);
       setDraggingCorner(closest);
     }
   };
@@ -708,11 +703,11 @@ export default function PaperCameraStudio() {
         { x: 0.922, y: 0.922 },
         { x: 0.078, y: 0.922 },
       ]);
-      notify("Örnek 4'lü A4 defter sayfası yüklendi — perdeyi sürükle veya 4 kareyi tek tıkla kes!");
+      notify(t('paperSampleLoadedToast'));
     } catch {
-      notify('Örnek A4 oluşturulamadı', 'error');
+      notify(t('paperErrSampleA4'), 'error');
     }
-  }, [notify]);
+  }, [notify, t]);
 
   useEffect(() => {
     if (pendingSamplePaper) {
@@ -734,7 +729,7 @@ export default function PaperCameraStudio() {
       let refCentroid: { x: number; y: number } | null = null;
 
       for (let i = 0; i < queue.length; i++) {
-        setBatchProgress(`İşleniyor (${i + 1}/${queue.length}) — ${queue[i].name}`);
+        setBatchProgress(tf('paperBatchProgress', { cur: i + 1, total: queue.length, name: queue[i].name }));
         const img = await new Promise<HTMLImageElement>((resolve, reject) => {
           const el = new Image();
           el.onload = () => resolve(el);
@@ -897,10 +892,10 @@ export default function PaperCameraStudio() {
       await addImportedPaperFrames(importedItems);
       queue.forEach((q) => URL.revokeObjectURL(q.previewUrl));
       setQueue([]);
-      notify(`${importedItems.length} kağıt çizimi temiz cel karesi olarak masaya aktarıldı!`);
+      notify(tf('paperImportedCelToast', { count: importedItems.length }));
       setMode('draw');
     } catch (err) {
-      notify(err instanceof Error ? err.message : 'Aktarım başarısız', 'error');
+      notify(err instanceof Error ? err.message : t('paperErrImport'), 'error');
     } finally {
       setProcessingBatch(false);
       setBatchProgress('');
@@ -976,7 +971,7 @@ export default function PaperCameraStudio() {
                   {cameraActive && cameraOnion && lastCapturePreview && (
                     <img
                       src={lastCapturePreview}
-                      alt="Önceki kağıt soğan zarı"
+                      alt={t('paperOnionAlt')}
                       className="absolute inset-0 w-full h-full object-contain pointer-events-none"
                       style={{
                         opacity: cameraOnionOpacity,
@@ -1157,7 +1152,7 @@ export default function PaperCameraStudio() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div>
                         <div className="flex items-center justify-between mb-1.5 gap-2">
-                          <span className="font-mono text-[10px] uppercase tracking-wider text-desk-muted">
+                          <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted">
                             {t('paperStep1Corners')}
                           </span>
                           <div className="flex items-center gap-2">
@@ -1166,7 +1161,7 @@ export default function PaperCameraStudio() {
                               variant="brass"
                               disabled={detectingCorners}
                               onClick={() => void handleAutoDetectPaper()}
-                              className="px-2 py-0.5 text-[10px]"
+                              className="px-2 py-0.5 text-[11px]"
                             >
                               <Scan className="w-3 h-3" />
                               {t('paperAutoFind')}
@@ -1174,7 +1169,7 @@ export default function PaperCameraStudio() {
                             <button
                               type="button"
                               onClick={() => setCorners(DEFAULT_CORNERS)}
-                              className="font-mono text-[10px] text-ink-vermilion hover:underline"
+                              className="font-mono text-[11px] text-ink-vermilion hover:underline"
                             >
                               {t('paperReset')}
                             </button>
@@ -1193,10 +1188,10 @@ export default function PaperCameraStudio() {
 
                       <div>
                         <div className="flex items-center justify-between mb-1.5">
-                          <span className="font-mono text-[10px] uppercase tracking-wider text-desk-muted">
+                          <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted">
                             {t('paperStep2Wipe')}
                           </span>
-                          <span className="font-mono text-[10px] text-ink-brass">
+                          <span className="font-mono text-[11px] text-ink-brass">
                             {splitPct}%
                           </span>
                         </div>
@@ -1248,7 +1243,7 @@ export default function PaperCameraStudio() {
                             alt={item.name}
                             className="w-full h-full object-cover"
                           />
-                          <span className="absolute top-0.5 left-0.5 px-1 rounded bg-black/70 font-mono text-[9px] text-white">
+                          <span className="absolute top-0.5 left-0.5 px-1 rounded bg-black/70 font-mono text-[11px] text-white">
                             {idx + 1}
                           </span>
                           <button
@@ -1269,7 +1264,7 @@ export default function PaperCameraStudio() {
 
                     {/* A4 Multi-Frame Grid-Slice Selector */}
                     <div className="rounded-2xl console-well border border-desk-border p-3 flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-mono text-[10px] uppercase tracking-wider text-ink-blue flex items-center gap-1.5">
+                      <span className="font-mono text-[11px] uppercase tracking-wider text-ink-blue flex items-center gap-1.5">
                         <Grid className="w-3.5 h-3.5" />
                         {t('paperGridTitle')}
                       </span>
@@ -1279,13 +1274,13 @@ export default function PaperCameraStudio() {
                             key={gp.id}
                             type="button"
                             onClick={() => setGridPresetId(gp.id)}
-                            className={`px-2 py-1 rounded-lg font-mono text-[10px] border transition-colors ${
+                            className={`px-2 py-1 rounded-lg font-mono text-[11px] border transition-colors ${
                               gridPresetId === gp.id
                                 ? 'bg-ink-blue/20 border-ink-blue text-desk-text font-bold'
                                 : 'border-desk-border text-desk-muted hover:text-desk-text'
                             }`}
                           >
-                            {locale === 'en' ? gp.labelEn : gp.labelTr}
+                            {t(gp.labelKey)}
                           </button>
                         ))}
                       </div>
@@ -1322,7 +1317,7 @@ export default function PaperCameraStudio() {
               <Sliders className="w-4 h-4 text-ink-brass" />
               <div>
                 <h3 className="text-sm font-bold text-desk-text">{t('paperProfileTitle')}</h3>
-                <p className="font-mono text-[10px] text-desk-muted">{t('paperProfileSub')}</p>
+                <p className="font-mono text-[11px] text-desk-muted">{t('paperProfileSub')}</p>
               </div>
             </div>
 
@@ -1360,7 +1355,7 @@ export default function PaperCameraStudio() {
               className="w-full justify-between"
             >
               <span>{t('paperAutoAlign')}</span>
-              <span className="font-mono text-[10px]">{autoRegister ? t('paperOn') : t('paperOff')}</span>
+              <span className="font-mono text-[11px]">{autoRegister ? t('paperOn') : t('paperOff')}</span>
             </KeycapButton>
 
             {/* 3. Collapsible Fine-Tune Accordion (Collapsed by Default for Calm UX!) */}
@@ -1372,7 +1367,7 @@ export default function PaperCameraStudio() {
                   setShowFineTune((v) => !v);
                 }}
                 aria-expanded={showFineTune}
-                className="w-full px-3.5 py-2.5 flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-desk-muted hover:text-desk-text transition-colors"
+                className="w-full px-3.5 py-2.5 flex items-center justify-between font-mono text-[11px] uppercase tracking-wider text-desk-muted hover:text-desk-text transition-colors"
               >
                 <span className="flex items-center gap-1.5">
                   <Sliders className="w-3.5 h-3.5 text-ink-brass" />
@@ -1430,7 +1425,7 @@ export default function PaperCameraStudio() {
                   </div>
 
                   <div>
-                    <div className="flex justify-between font-mono text-[10px] text-desk-muted mb-1">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-1">
                       <span>{t('paperSensitivity')}</span>
                       <span className="text-desk-text">{sensitivity}%</span>
                     </div>
@@ -1445,7 +1440,7 @@ export default function PaperCameraStudio() {
                   </div>
 
                   <div>
-                    <div className="flex justify-between font-mono text-[10px] text-desk-muted mb-1">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-1">
                       <span>{t('paperInkDarkness')}</span>
                       <span className="text-desk-text">{inkStrength}%</span>
                     </div>

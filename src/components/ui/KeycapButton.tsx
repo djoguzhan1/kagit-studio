@@ -2,41 +2,42 @@ import { useEffect, useRef, useState, type ButtonHTMLAttributes, type CSSPropert
 import { soundEngine } from '../../engine/soundEngine';
 import { getBlobObjectUrl } from '../../engine/db';
 
-export type KeycapVariant = 'graphite' | 'ivory' | 'vermilion' | 'brass' | 'blue';
+export type KeycapVariant = 'graphite' | 'vermilion' | 'brass' | 'ivory' | 'emerald' | 'blue';
 export type KeycapSize = 'sm' | 'md' | 'lg';
-export type LedState = 'off' | 'amber' | 'vermilion' | 'emerald' | 'blue';
+export type KeycapLedTone = 'off' | 'amber' | 'vermilion' | 'emerald' | 'blue';
 
 export interface KeycapButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: KeycapVariant;
   size?: KeycapSize;
-  led?: LedState;
+  led?: KeycapLedTone;
   ledPulse?: boolean;
   pressed?: boolean;
-  /** Enables real-time cursor-tracking 3D gimbal parallax tilt + glare hotspot */
   tilt?: boolean;
-  /** Wraps keycap inside a carved recessed desk socket bezel */
   socket?: boolean;
-  /** Enables subtle staggered anodized studio-lamp sheen & idle icon animation */
   sheenPulse?: boolean;
-  /** Optional animation delay in seconds for staggered console switches */
   sheenDelay?: number;
   sound?: 'click' | 'toggle' | 'flip' | 'shutter' | 'none';
   shortcut?: string;
   children: ReactNode;
 }
 
-const OUTER_CLASS_RE =
-  /^([a-z0-9-]+:)?(w-|min-w-|max-w-|h-|min-h-|flex-1|flex-auto|flex-none|shrink|grow|col-span-|row-span-|order-|hidden|block|inline|mt-|mb-|ml-|mr-|mx-|my-|m-|self-|justify-self-)/;
-
-function splitKeycapClasses(className: string): { outer: string; inner: string } {
-  if (!className.trim()) return { outer: '', inner: '' };
-  const outer: string[] = [];
-  const inner: string[] = [];
-  for (const token of className.trim().split(/\s+/)) {
-    if (OUTER_CLASS_RE.test(token)) outer.push(token);
-    else inner.push(token);
+function splitKeycapClasses(cls: string): { outer: string; inner: string } {
+  if (!cls) return { outer: '', inner: '' };
+  const outerTokens: string[] = [];
+  const innerTokens: string[] = [];
+  for (const tok of cls.trim().split(/\s+/)) {
+    if (!tok) continue;
+    if (
+      /^(w-|min-w-|max-w-|flex$|flex-1$|shrink|grow|col-span-|self-|ml-|mr-|mx-|mt-|mb-|my-|hidden$|(sm|md|lg|xl|2xl):(hidden|inline-flex|flex|w-))/.test(
+        tok
+      )
+    ) {
+      outerTokens.push(tok);
+    } else {
+      innerTokens.push(tok);
+    }
   }
-  return { outer: outer.join(' '), inner: inner.join(' ') };
+  return { outer: outerTokens.join(' '), inner: innerTokens.join(' ') };
 }
 
 export function KeycapButton({
@@ -64,13 +65,14 @@ export function KeycapButton({
   const [ripple, setRipple] = useState<{ id: number; x: number; y: number } | null>(null);
 
   const variantClass = variant === 'graphite' ? '' : `k3d-${variant}`;
-  const sizeOuterClass = size === 'sm' ? 'k3d-sm' : size === 'lg' ? 'k3d-lg' : '';
+  const sizeOuterClass = size === 'sm' ? 'k3d-sm min-w-[44px]' : size === 'lg' ? 'k3d-lg min-w-[44px]' : 'min-w-[44px]';
+  // Raise + cap min-height guarantees >= 44x44 CSS px WCAG 2.2 SC 2.5.5 touch target across all sizes!
   const sizeCapClass =
     size === 'sm'
-      ? 'px-2.5 py-1.5 text-xs'
+      ? 'min-h-[39px] px-2.5 py-1.5 text-xs'
       : size === 'lg'
-        ? 'px-5 py-3.5 text-sm'
-        : 'px-3.5 py-2 text-xs';
+        ? 'min-h-[44px] px-5 py-3 text-sm'
+        : 'min-h-[39px] px-3.5 py-2 text-xs';
 
   const { outer, inner } = splitKeycapClasses(className);
 
@@ -90,7 +92,7 @@ export function KeycapButton({
     const rect = el.getBoundingClientRect();
     const px = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
     const py = Math.max(0, Math.min(1, (e.clientY - rect.top) / Math.max(1, rect.height)));
-    const nx = (px - 0.5) * 2; // -1..1
+    const nx = (px - 0.5) * 2;
     const ny = (py - 0.5) * 2;
     const maxTiltX = size === 'lg' ? 13 : size === 'md' ? 9.5 : 7;
     const maxTiltY = size === 'lg' ? 11 : size === 'md' ? 8.5 : 6.5;
@@ -195,10 +197,8 @@ export function KeycapButton({
     </button>
   );
 
-  if (socket) {
-    return <span className={`keycap-socket ${outer}`}>{buttonEl}</span>;
-  }
-  return buttonEl;
+  if (!socket) return buttonEl;
+  return <span className={`keycap-socket ${outer}`}>{buttonEl}</span>;
 }
 
 /** Memory-safe LRU-backed image preview for IndexedDB blobs */

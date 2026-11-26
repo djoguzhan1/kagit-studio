@@ -1,4 +1,5 @@
 import type { FieldGuideConfig } from '../types/studio';
+import { translate, type StudioLocale } from '../i18n/translations';
 
 /**
  * Renders non-exporting Animator's Underlay Guides directly beneath the active ink
@@ -25,8 +26,9 @@ export function renderUnderlayGuide(
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = 'rgba(229, 77, 46, 0.85)';
-    ctx.font = 'bold 10px "JetBrains Mono", monospace';
-    ctx.fillText('AYNA SİMETRİ', width / 2 + 8, 20);
+    const activeLocale: StudioLocale = typeof document !== 'undefined' && document.documentElement.lang === 'en' ? 'en' : 'tr';
+    ctx.font = 'bold 11px "JetBrains Mono", monospace';
+    ctx.fillText(translate(activeLocale, 'underlayMirrorAxis'), width / 2 + 8, 20);
     ctx.restore();
   }
 
@@ -77,15 +79,16 @@ export function renderUnderlayGuide(
   } else if (kind === 'walk') {
     // Authentic 8-Frame Richard Williams Walk Cycle Pose Guide synced to current frame!
     const phase = activeFrameIndex % 8;
+    const guideLocale: StudioLocale = typeof document !== 'undefined' && document.documentElement.lang === 'en' ? 'en' : 'tr';
     const labels = [
-      '1: TEMAS (Contact)',
-      '2: ÇÖKÜŞ (Down)',
-      '3: GEÇİŞ (Passing)',
-      '4: YÜKSELİŞ (Up)',
-      '5: TEMAS (Ters)',
-      '6: ÇÖKÜŞ (Ters)',
-      '7: GEÇİŞ (Ters)',
-      '8: YÜKSELİŞ (Ters)',
+      translate(guideLocale, 'underlayWalk1'),
+      translate(guideLocale, 'underlayWalk2'),
+      translate(guideLocale, 'underlayWalk3'),
+      translate(guideLocale, 'underlayWalk4'),
+      translate(guideLocale, 'underlayWalk5'),
+      translate(guideLocale, 'underlayWalk6'),
+      translate(guideLocale, 'underlayWalk7'),
+      translate(guideLocale, 'underlayWalk8'),
     ];
     const cx = width * 0.5;
     const groundY = height * 0.82;
@@ -144,7 +147,7 @@ export function renderUnderlayGuide(
     ctx.stroke();
 
     ctx.font = 'bold 13px "JetBrains Mono", monospace';
-    ctx.fillText(`YÜRÜYÜŞ KILAVUZU · ${labels[phase]}`, width * 0.16, height * 0.1);
+    ctx.fillText(`${translate(guideLocale, 'underlayWalkHeader')} · ${labels[phase]}`, width * 0.16, height * 0.1);
   } else if (kind === 'head-turn') {
     // Classic 3/4 -> Front -> 3/4 Head Turn Volume & Eye-Line Arc
     const cx = width * 0.5;

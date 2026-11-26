@@ -23,7 +23,8 @@ import {
   SketchNibIcon,
 } from '../ui/AnimatedStudioIcons';
 import { soundEngine } from '../../engine/soundEngine';
-import { useT } from '../../i18n/translations';
+import { localizeProjectName, useT, useTFmt } from '../../i18n/translations';
+import { useModalA11y } from '../../hooks/useModalA11y';
 
 /** 3D Page-Flipping Physical Flipbook Notebook Card */
 function Flipbook3DCard({
@@ -33,7 +34,7 @@ function Flipbook3DCard({
   project: StudioProject;
   onAfterOpen: () => void;
 }) {
-  const { openProject, deleteProject, notify } = useStudioStore();
+  const { openProject, deleteProject, notify, locale } = useStudioStore();
   const t = useT();
   const [hoverIdx, setHoverIdx] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -108,7 +109,7 @@ function Flipbook3DCard({
           {previewFrame?.thumbKey ? (
             <BlobImage
               blobKey={previewFrame.thumbKey}
-              alt={project.name}
+              alt={localizeProjectName(project.name, locale)}
               className="w-full h-full object-contain pl-3"
             />
           ) : (
@@ -129,7 +130,7 @@ function Flipbook3DCard({
         <div className="p-3 flex-1 flex flex-col justify-between gap-2.5">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <h3 className="font-bold text-sm text-desk-text truncate">{project.name}</h3>
+              <h3 className="font-bold text-sm text-desk-text truncate">{localizeProjectName(project.name, locale)}</h3>
               <p className="font-mono text-[11px] text-desk-muted mt-0.5">
                 {project.width}×{project.height} · {(project.meshRigs?.length ?? 0) + project.rigs.length}{' '}
                 {t('puppetsWord')}
@@ -140,7 +141,7 @@ function Flipbook3DCard({
               onClick={(e) => {
                 e.stopPropagation();
                 soundEngine.click(0.8);
-                if (window.confirm(`"${project.name}" ${t('deleteProjectConfirm')}`)) {
+                if (window.confirm(`"${localizeProjectName(project.name, locale)}" ${t('deleteProjectConfirm')}`)) {
                   void deleteProject(project.id);
                   notify(t('projectDeleted'), 'info');
                 }
@@ -287,6 +288,15 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
     notify,
   } = useStudioStore();
   const t = useT();
+  const tf = useTFmt();
+  const drawerRef = useModalA11y<HTMLElement>({
+    open,
+    onClose: () => {
+      soundEngine.drawerSlide(false);
+      onToggle(false);
+    },
+    modal: true,
+  });
 
   const [shelfFilter, setShelfFilter] = useState<'all' | 'projects' | 'templates'>('all');
   const [flipPreviewOpen, setFlipPreviewOpen] = useState(false);
@@ -317,9 +327,9 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
       const { importPortableBackupZip } = await import('../../engine/exportEngine');
       const restored = await importPortableBackupZip(file);
       importProject(restored);
-      notify(locale === 'en' ? `"${restored.name}" restored!` : `"${restored.name}" geri yüklendi!`);
+      notify(tf('drawerRestoreOk', { name: localizeProjectName(restored.name, locale) }));
     } catch (err) {
-      notify(err instanceof Error ? err.message : 'Yedek okunamadı', 'error');
+      notify(err instanceof Error ? err.message : t('drawerRestoreErr'), 'error');
     } finally {
       if (backupInputRef.current) backupInputRef.current.value = '';
     }
@@ -362,7 +372,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
             <BookOpen className="w-3.5 h-3.5 text-ink-brass shrink-0" />
             <span>{t('drawerHandle')}</span>
             <span className="px-1.5 py-0.5 rounded-md bg-desk-panel border border-desk-border font-mono text-[11px] text-desk-muted">
-              {locale === 'en' ? `${projects.length} Books · 3 Demos` : `${projects.length} Defter · 3 Sahne`}
+              {tf('drawerSummaryBadge', { count: projects.length })}
             </span>
             {open ? (
               <ChevronDown className="w-3.5 h-3.5 text-ink-brass shrink-0" />
@@ -384,7 +394,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
               <span className="font-mono text-[11px] uppercase text-ink-brass font-bold shrink-0">
                 {t('drawerContinue')}:
               </span>
-              <span className="truncate">{latestProject.name}</span>
+              <span className="truncate">{localizeProjectName(latestProject.name, locale)}</span>
               <ArrowRight className="w-3 h-3 text-ink-brass shrink-0" />
             </button>
           ) : (
@@ -400,11 +410,12 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
           className="fixed inset-0 z-50 bg-black/60 backdrop-blur-[2px] flex flex-col justify-end"
         >
           <section
+            ref={drawerRef}
             role="dialog"
             aria-modal="true"
-            aria-label={t('shelfHeading')}
+            aria-labelledby="studio-drawer-heading"
             onClick={(e) => e.stopPropagation()}
-            className="studio-drawer-sheet w-full max-h-[80vh] flex flex-col rounded-t-[28px] border-t-2 border-ink-brass/60 bg-desk-surface shadow-[0_-24px_64px_rgba(0,0,0,0.65)]"
+            className="studio-drawer-sheet w-full max-h-[calc(100dvh-2rem)] flex flex-col rounded-t-[28px] border-t-2 border-ink-brass/60 bg-desk-surface shadow-[0_-24px_64px_rgba(0,0,0,0.65)]"
           >
             {/* Top Brass Handle & Filter Bar */}
             <div className="px-4 sm:px-6 pt-3 pb-3 border-b border-desk-border shrink-0 space-y-2.5">
@@ -412,7 +423,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
                 <button
                   type="button"
                   onClick={() => setOpenWithSound(false)}
-                  aria-label="Çekmeceyi Kapat"
+                  aria-label={t('drawerCloseAria')}
                   className="w-14 h-1.5 rounded-full bg-gradient-to-r from-[#8f671e] via-[#f2c86b] to-[#8f671e] opacity-80 hover:opacity-100 transition-opacity"
                 />
               </div>
@@ -420,7 +431,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
               <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-2.5">
                   <BookOpen className="w-4 h-4 text-ink-brass" />
-                  <h2 className="text-base font-extrabold text-desk-text">{t('shelfHeading')}</h2>
+                  <h2 id="studio-drawer-heading" className="text-base font-extrabold text-desk-text">{t('shelfHeading')}</h2>
 
                   <div className="flex items-center gap-1 p-0.5 rounded-lg console-well border border-desk-border font-mono text-[11px]">
                     {(
@@ -464,7 +475,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
                           : 'border-desk-border bg-desk-well/70 text-ink-brass hover:border-ink-brass'
                       }`}
                     >
-                      <span>{locale === 'en' ? '3D Pocket Flipbook' : '3B Cep Flipbook'}</span>
+                      <span>{t('flip3dTitle')}</span>
                     </button>
                   )}
                   <button
@@ -504,7 +515,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
                     frames={latestProject.frames}
                     fps={latestProject.fps}
                     paperColor={latestProject.paperColor}
-                    projectName={latestProject.name}
+                    projectName={localizeProjectName(latestProject.name, locale)}
                     onClose={() => setFlipPreviewOpen(false)}
                   />
                 </div>

@@ -23,7 +23,9 @@ import {
   X,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
-import { useT } from '../../i18n/translations';
+import { localizeActorName, useT, useTFmt } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
+import { useModalA11y } from '../../hooks/useModalA11y';
 import type { MeshFrameOffsets, MeshPin, MeshWarpRig } from '../../types/studio';
 import type { FilmEmotionId } from '../../types/film';
 import {
@@ -75,6 +77,7 @@ const MAX_UNDO = 25;
 
 export default function MeshWarpStage() {
   const t = useT();
+  const tf = useTFmt();
   const {
     projects,
     activeProjectId,
@@ -145,6 +148,18 @@ export default function MeshWarpStage() {
 
   // Unified Export State
   const [exportingKind, setExportingKind] = useState<null | 'video' | 'gif' | 'draw'>(null);
+  const activeTourMode = useStudioStore((st) => st.activeTourMode);
+  useEffect(() => {
+    if (activeTourMode === 'puppet' && rightTab !== 'motion') {
+      setRightTab('motion');
+    }
+  }, [activeTourMode, rightTab]);
+  const exportDialogRef = useModalA11y<HTMLDivElement>({
+    open: Boolean(puppetExportOpen && activeRig),
+    onClose: () => setPuppetExportOpen(false),
+    closeDisabled: Boolean(exportingKind),
+    modal: true,
+  });
   const [exportPct, setExportPct] = useState(0);
   const [exportLabel, setExportLabel] = useState('');
   const exportAbortRef = useRef(false);
@@ -398,11 +413,7 @@ export default function MeshWarpStage() {
           setLiveRecording(false);
           setPlaying(true);
           soundEngine.clapperSnap();
-          notify(
-            locale === 'en'
-              ? 'Live puppet performance recorded & smoothed!'
-              : 'Canlı kukla performansın kaydedildi ve yumuşatıldı!'
-          );
+          notify(t('puppetPerfSavedToast'));
           return;
         }
 
@@ -506,19 +517,21 @@ export default function MeshWarpStage() {
       soundEngine.clapperSnap();
       const cleanedNotes: string[] = [];
       if (opts?.isolatedPrimary || prepared.isolatedPrimary) {
-        cleanedNotes.push(locale === 'en' ? 'corners cleaned' : 'kenar imzaları ayıklandı');
+        cleanedNotes.push(t('puppetCleanCorners'));
       }
       if ((opts?.cleanedPockets ?? prepared.cleanedPockets) > 0) {
-        cleanedNotes.push(locale === 'en' ? 'inner gaps cleared' : 'kapalı boşluklar temizlendi');
+        cleanedNotes.push(t('puppetCleanGaps'));
       }
       if (opts?.boostedPencil || prepared.boostedPencil) {
-        cleanedNotes.push(locale === 'en' ? 'ink sharpened' : 'çizgiler netleştirildi');
+        cleanedNotes.push(t('puppetCleanSharp'));
       }
       const extraNote = cleanedNotes.length > 0 ? ` (${cleanedNotes.join(', ')})` : '';
       notify(
-        locale === 'en'
-          ? `"${name}" rigged with ${pins.length} anatomical joints${extraNote} — drag any pin or pick a move!`
-          : `"${name}" ${pins.length} otomatik eklemle canlandırıldı${extraNote} — pimleri sürükle veya hareket seç!`
+        tf('puppetRiggedSummaryToast', {
+          name: localizeActorName(name, locale),
+          count: pins.length,
+          extra: extraNote,
+        })
       );
     },
     [locale, notify, t, upsertMeshRig]
@@ -527,7 +540,7 @@ export default function MeshWarpStage() {
   const importImageFile = useCallback(
     async (file: File) => {
       if (!file.type.startsWith('image/')) {
-        notify(locale === 'en' ? 'Please pick an image file (PNG/JPG/WebP)' : 'Lütfen bir görsel dosyası seç (PNG/JPG/WebP)', 'error');
+        notify(t('puppetErrPickImage'), 'error');
         return;
       }
       const url = URL.createObjectURL(file);
@@ -546,7 +559,7 @@ export default function MeshWarpStage() {
         }
         await createRigFromCanvas(
           prepared.canvas,
-          file.name.replace(/\.[^.]+$/, '').slice(0, 26) || 'Kukla',
+          file.name.replace(/\.[^.]+$/, '').slice(0, 26) || localizeActorName('Kukla', locale),
           {
             stripPaper: false,
             boostedPencil: prepared.boostedPencil,
@@ -556,7 +569,7 @@ export default function MeshWarpStage() {
           }
         );
       } catch {
-        notify(locale === 'en' ? 'Could not read image file' : 'Görsel dosyası okunamadı', 'error');
+        notify(t('puppetErrReadImage'), 'error');
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -568,12 +581,7 @@ export default function MeshWarpStage() {
     if (!project) return;
     const frame = project.frames[activeFrameIndex] ?? project.frames[0];
     if (!frame || frame.layers.every((l) => !l.blobKey)) {
-      notify(
-        locale === 'en'
-          ? 'Your active drawing frame is blank — draw something first or pick Sample Hero!'
-          : 'Aktif çizim karesi boş — önce çizim yap ya da Örnek Karakteri dene!',
-        'info'
-      );
+      notify(t('puppetBlankFrameInfo'), 'info');
       return;
     }
     const c = await renderFrameComposite(project, frame, {
@@ -582,7 +590,7 @@ export default function MeshWarpStage() {
     });
     await createRigFromCanvas(
       c,
-      locale === 'en' ? `My Drawing #${activeFrameIndex + 1}` : `Çizimim #${activeFrameIndex + 1}`,
+      tf('puppetMyDrawingName', { num: activeFrameIndex + 1 }),
       { stripPaper: false }
     );
   };
@@ -626,11 +634,7 @@ export default function MeshWarpStage() {
     setRigFrame(0);
     setPlaying(true);
     soundEngine.clapperSnap();
-    notify(
-      locale === 'en'
-        ? 'Horned Baron ready — bend pins, bounce, or make it talk!'
-        : 'Şapkalı Baron sahnede — bük, zıplat veya konuştur!'
-    );
+    notify(t('puppetSampleReadyToast'));
   };
 
   const applyTemplate = async (tpl: PinTemplateId) => {
@@ -659,10 +663,7 @@ export default function MeshWarpStage() {
     const rig = activeRigRef.current;
     if (!rig || !selectedPinId) return;
     if (rig.pins.length <= 2) {
-      notify(
-        locale === 'en' ? 'At least 2 pins are required' : 'En az 2 eklem pimi kalmalı',
-        'info'
-      );
+      notify(t('puppetMinTwoPinsInfo'), 'info');
       return;
     }
     const nextPins = rig.pins.filter((p) => p.id !== selectedPinId);
@@ -717,9 +718,7 @@ export default function MeshWarpStage() {
       setLiveRecording(false);
       setPlaying(true);
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en' ? 'Live take saved!' : 'Canlı kayıt tamamlandı!'
-      );
+      notify(t('puppetLiveTakeSaved'));
       return;
     }
 
@@ -761,7 +760,7 @@ export default function MeshWarpStage() {
       if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
       const newPin: MeshPin = {
         id: makeId('pin'),
-        label: `${locale === 'en' ? 'Pin' : 'Pim'} ${activeRig.pins.length + 1}`,
+        label: `${t('puppetPinPrefix')} ${activeRig.pins.length + 1}`,
         role: 'custom',
         x: Number(nx.toFixed(3)),
         y: Number(ny.toFixed(3)),
@@ -785,7 +784,7 @@ export default function MeshWarpStage() {
       });
       setToolMode('drag');
       soundEngine.click(1.2);
-      notify(locale === 'en' ? 'Mouth position updated!' : 'Ağız konumu güncellendi!');
+      notify(t('puppetMouthUpdated'));
       return;
     }
 
@@ -809,22 +808,14 @@ export default function MeshWarpStage() {
           ny * (work.height - 1)
         );
         if (cleared < 8) {
-          notify(
-            locale === 'en'
-              ? 'Click inside an enclosed white gap to clear it.'
-              : 'Temizlemek için kapalı bir beyaz boşluğun içine tıkla.'
-          );
+          notify(t('puppetClickGapInfo'));
           return;
         }
         wctx.putImageData(im, 0, 0);
         const newKey = await saveBlob(await canvasToPngBlob(work));
         commitRig({ ...targetRig, sourceBlobKey: newKey });
         soundEngine.click(1.22);
-        notify(
-          locale === 'en'
-            ? 'Pocket cleared! Click another gap or press Esc when done.'
-            : 'Boşluk temizlendi! Başka alan varsa tıkla veya Esc ile çık.'
-        );
+        notify(t('puppetGapClearedInfo'));
       })();
       return;
     }
@@ -846,7 +837,7 @@ export default function MeshWarpStage() {
 
     if (bestPin) {
       setSelectedPinId(bestPin.id);
-      e.currentTarget.setPointerCapture(e.pointerId);
+      safeSetPointerCapture(e.currentTarget, e.pointerId);
       const off = curOffsets[bestPin.id] ?? { dx: 0, dy: 0 };
       dragRef.current = {
         pinId: bestPin.id,
@@ -902,7 +893,7 @@ export default function MeshWarpStage() {
   // =========================================================================
   const handleTypeAndSpeak = async () => {
     if (!project || synthesizing) return;
-    const text = speechText.trim() || (locale === 'en' ? 'Hello, I am alive!' : 'Merhaba, ben canlandım!');
+    const text = speechText.trim() || t('puppetDefaultHello');
     setSynthesizing(true);
     try {
       const synth = synthesizeCartoonDialogueWav(text, 'happy', voiceTone);
@@ -911,13 +902,9 @@ export default function MeshWarpStage() {
       setAudioTrack(track);
       setPlaying(true);
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en'
-          ? `Puppet voice ready (${track.durationSec.toFixed(1)}s)!`
-          : `Kukla konuşmaya hazır (${track.durationSec.toFixed(1)}s)!`
-      );
+      notify(tf('puppetVoiceReadySec', { sec: track.durationSec.toFixed(1) }));
     } catch {
-      notify(locale === 'en' ? 'Could not synthesize voice' : 'Ses oluşturulamadı', 'error');
+      notify(t('puppetErrVoiceSynth'), 'error');
     } finally {
       setSynthesizing(false);
     }
@@ -931,16 +918,12 @@ export default function MeshWarpStage() {
         setMicRecording(false);
         const track = await analyzeAndStoreAudio(
           blob,
-          locale === 'en' ? 'Live Voice' : 'Canlı Seslendirme',
+          t('puppetLiveVoiceLabel'),
           project.fps
         );
         setAudioTrack(track);
         setPlaying(true);
-        notify(
-          locale === 'en'
-            ? 'Voice recorded — your puppet is speaking!'
-            : 'Sesin yüklendi — kuklan şimdi konuşuyor!'
-        );
+        notify(t('puppetVoiceRecordedToast'));
       } catch {
         setMicRecording(false);
         recorderRef.current?.cleanup();
@@ -952,12 +935,9 @@ export default function MeshWarpStage() {
       await rec.start();
       recorderRef.current = rec;
       setMicRecording(true);
-      notify(
-        locale === 'en' ? 'Speak now — click again to stop' : 'Konuşmaya başla — bitirmek için tekrar bas',
-        'info'
-      );
+      notify(t('puppetSpeakNowInfo'), 'info');
     } catch {
-      notify(locale === 'en' ? 'Microphone permission denied' : 'Mikrofon izni alınamadı', 'error');
+      notify(t('puppetMicDeniedErr'), 'error');
     }
   };
 
@@ -1017,7 +997,7 @@ export default function MeshWarpStage() {
           const safeName = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
           triggerDownload(mp4Blob, `${safeName}.mp4`);
           soundEngine.clapperSnap();
-          notify(locale === 'en' ? 'Puppet MP4 downloaded!' : 'Kukla videosu (.mp4) indirildi!');
+          notify(t('puppetMp4Downloaded'));
           setPuppetExportOpen(false);
           return;
         }
@@ -1084,7 +1064,7 @@ export default function MeshWarpStage() {
       await stopped;
 
       if (exportAbortRef.current) {
-        notify(locale === 'en' ? 'Export cancelled' : 'İndirme iptal edildi', 'info');
+        notify(t('filmExportCancelled'), 'info');
         return;
       }
 
@@ -1092,10 +1072,10 @@ export default function MeshWarpStage() {
       const safe = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
       triggerDownload(new Blob(chunks, { type: mime }), `${safe}.${ext}`);
       soundEngine.clapperSnap();
-      notify(locale === 'en' ? 'Puppet video downloaded!' : 'Kukla videosu indirildi!');
+      notify(t('puppetVideoDownloaded'));
       setPuppetExportOpen(false);
     } catch {
-      notify(locale === 'en' ? 'Video export failed' : 'Video oluşturulamadı', 'error');
+      notify(t('puppetErrVideoExport'), 'error');
     } finally {
       exportPlayer.dispose();
       setExportingKind(null);
@@ -1146,10 +1126,10 @@ export default function MeshWarpStage() {
       const safe = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
       triggerDownload(gifBlob, `${safe}.gif`);
       soundEngine.clapperSnap();
-      notify(locale === 'en' ? 'Puppet GIF downloaded!' : 'Animasyonlu GIF indirildi!');
+      notify(t('puppetGifDownloaded'));
       setPuppetExportOpen(false);
     } catch {
-      notify(locale === 'en' ? 'GIF export failed' : 'GIF oluşturulamadı', 'error');
+      notify(t('puppetErrGifExport'), 'error');
     } finally {
       setExportingKind(null);
       setExportPct(0);
@@ -1173,7 +1153,7 @@ export default function MeshWarpStage() {
     const safe = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
     triggerDownload(blob, `${safe}_kare${rigFrame + 1}.png`);
     soundEngine.shutter();
-    notify(locale === 'en' ? 'HD PNG frame downloaded!' : 'HD kukla karesi indirildi!');
+    notify(t('puppetPngDownloaded'));
   };
 
   // FAST, NON-BLOCKING SEND TO DRAW (< 2.5s via reusable canvas + WebP!)
@@ -1208,9 +1188,9 @@ export default function MeshWarpStage() {
         },
         {
           replace: false,
-          notePrefix: locale === 'en' ? 'Puppet' : 'Kukla',
-          layerName: locale === 'en' ? 'Puppet Layer' : 'Kukla Sahnesi',
-          topLayerName: locale === 'en' ? 'Top Ink (Effects)' : 'Üst Çizim (Efekt)',
+          notePrefix: t('puppetNotePrefix'),
+          layerName: t('puppetLayerSceneName'),
+          topLayerName: t('filmLayerTopEffects'),
           onProgress: (done, total) => {
             setExportPct(45 + Math.round((done / total) * 55));
             setExportLabel(`${t('puppetSendingToDraw')}… ${done}/${total}`);
@@ -1220,11 +1200,7 @@ export default function MeshWarpStage() {
       preRendered.forEach((b) => b.close());
       setPuppetExportOpen(false);
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en'
-          ? `${added} puppet frames sent to Draw Desk!`
-          : `${added} kukla karesi Çizim Masası'na aktarıldı!`
-      );
+      notify(tf('puppetFramesSentDraw', { count: added }));
     } finally {
       setExportingKind(null);
       setExportPct(0);
@@ -1257,11 +1233,7 @@ export default function MeshWarpStage() {
       },
     });
     setMode('film');
-    notify(
-      locale === 'en'
-        ? `"${activeRig.name}" is now starring in Short Film!`
-        : `"${activeRig.name}" Mini Film sahnesinde başrole alındı!`
-    );
+    notify(tf('puppetStarringInFilm', { name: localizeActorName(activeRig.name, locale) }));
   };
 
   // Keyboard Shortcuts (Space, Left/Right, Ctrl+Z/Y, Delete, Escape)
@@ -1363,8 +1335,8 @@ export default function MeshWarpStage() {
           <span className="font-mono text-sm font-bold text-ink-brass">{t('puppetDropHint')}</span>
         </div>
       )}
-      {/* MAIN INTERACTIVE FLEX PUPPET STAGE */}
-      <div className="flex-1 flex flex-col min-h-0 p-3 gap-2.5 overflow-hidden">
+      {/* MAIN INTERACTIVE FLEX PUPPET STAGE — Guaranteed visible height on mobile/tablet! */}
+      <div className="shrink-0 min-h-[272px] sm:min-h-[344px] md:min-h-[420px] lg:shrink lg:min-h-0 lg:flex-1 flex flex-col p-2.5 sm:p-3 gap-2 overflow-hidden">
         {!activeRig ? (
           <div className="flex-1 rounded-3xl console-well border border-dashed border-desk-border flex flex-col items-center justify-center p-8 text-center gap-4">
             <Sparkles className="w-10 h-10 text-ink-brass" />
@@ -1405,22 +1377,22 @@ export default function MeshWarpStage() {
                   >
                     {meshRigs.map((r) => (
                       <option key={r.id} value={r.id}>
-                        {r.name}
+                        {localizeActorName(r.name, locale)}
                       </option>
                     ))}
                   </select>
                 ) : (
                   <span className="font-mono text-xs font-bold text-desk-text truncate max-w-[220px]">
-                    {activeRig.name}
+                    {localizeActorName(activeRig.name, locale)}
                   </span>
                 )}
                 {toolMode === 'mouth' && (
-                  <span className="px-2 py-0.5 rounded-full bg-ink-brass/20 border border-ink-brass font-mono text-[10px] font-bold text-ink-brass">
+                  <span className="px-2 py-0.5 rounded-full bg-ink-brass/20 border border-ink-brass font-mono text-[11px] font-bold text-ink-brass">
                     {t('puppetMouthPosHint')}
                   </span>
                 )}
                 {toolMode === 'erase-pocket' && (
-                  <span className="px-2 py-0.5 rounded-full bg-ink-emerald/20 border border-ink-emerald font-mono text-[10px] font-bold text-ink-emerald">
+                  <span className="px-2 py-0.5 rounded-full bg-ink-emerald/20 border border-ink-emerald font-mono text-[11px] font-bold text-ink-emerald">
                     {t('puppetErasePocketHint')}
                   </span>
                 )}
@@ -1462,7 +1434,7 @@ export default function MeshWarpStage() {
                   <Redo2 className="w-3.5 h-3.5" />
                 </button>
 
-                <div className="flex items-center gap-0.5 p-0.5 rounded-lg console-well border border-desk-border font-mono text-[10px]">
+                <div className="flex items-center gap-0.5 p-0.5 rounded-lg console-well border border-desk-border font-mono text-[11px]">
                   {([0.5, 1, 1.5] as const).map((sp) => (
                     <button
                       key={sp}
@@ -1482,9 +1454,9 @@ export default function MeshWarpStage() {
             </div>
 
             {/* Live 16:9 Stage Canvas */}
-            <div className="flex-1 min-h-0 flex items-center justify-center relative">
+            <div className="flex-1 min-h-[164px] flex items-center justify-center relative">
               <div
-                className={`relative max-w-full max-h-full aspect-video rounded-2xl overflow-hidden border border-black/30 shadow-2xl ${
+                className={`relative w-full max-w-[760px] max-h-full min-h-[164px] aspect-video rounded-2xl overflow-hidden border border-black/30 shadow-2xl ${
                   backdrop === 'transparent' ? 'bg-neutral-900/40' : ''
                 }`}
               >
@@ -1538,7 +1510,7 @@ export default function MeshWarpStage() {
                   <button
                     type="button"
                     onClick={() => setPuppetAngleDeg(0)}
-                    className="text-[10px] font-bold text-desk-muted hover:text-ink-brass"
+                    className="text-[11px] font-bold text-desk-muted hover:text-ink-brass"
                   >
                     0°
                   </button>
@@ -1617,7 +1589,7 @@ export default function MeshWarpStage() {
       </div>
 
       {/* RIGHT CLEAN 3-TAB CONTROL DECK (ZERO VERTICAL OVERFLOW AT 1280x800!) */}
-      <aside className="w-full lg:w-[316px] shrink-0 border-t lg:border-t-0 lg:border-l border-desk-border bg-desk-surface flex flex-col lg:overflow-hidden">
+      <aside className="w-full flex-1 min-h-0 overflow-y-auto lg:w-[316px] lg:flex-none lg:shrink-0 border-t lg:border-t-0 lg:border-l border-desk-border bg-desk-surface flex flex-col lg:overflow-hidden">
         <div className="p-2 border-b border-desk-border flex items-center gap-1 shrink-0">
           {(
             [
@@ -1654,7 +1626,7 @@ export default function MeshWarpStage() {
             <>
               <div className="rounded-2xl console-well border border-desk-border p-3 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted">
                     {t('puppetSourceTitle')}
                   </span>
                   {activeRig && !confirmDelete && (
@@ -1668,7 +1640,7 @@ export default function MeshWarpStage() {
                     </button>
                   )}
                   {activeRig && confirmDelete && (
-                    <div className="flex items-center gap-1 font-mono text-[9.5px]">
+                    <div className="flex items-center gap-1 font-mono text-[11px]">
                       <span className="text-ink-vermilion">{t('puppetDeleteConfirm')}</span>
                       <button
                         type="button"
@@ -1696,14 +1668,14 @@ export default function MeshWarpStage() {
                   <button
                     type="button"
                     onClick={() => void handleLoadSampleCharacter()}
-                    className="py-1.5 px-2 rounded-lg bg-desk-surface border border-desk-border hover:border-ink-brass text-[10.5px] font-bold text-desk-text"
+                    className="py-1.5 px-2 rounded-lg bg-desk-surface border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-text"
                   >
                     {t('puppetBtnSample')}
                   </button>
                   <button
                     type="button"
                     onClick={() => void handleLoadFromActiveFrame()}
-                    className={`py-1.5 px-2 rounded-lg border text-[10.5px] font-bold ${
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-bold ${
                       hasDrawnCel
                         ? 'bg-ink-brass/15 border-ink-brass text-desk-text'
                         : 'bg-desk-surface border-desk-border hover:border-desk-muted text-desk-text'
@@ -1714,7 +1686,7 @@ export default function MeshWarpStage() {
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    className="py-1.5 px-2 rounded-lg bg-desk-surface border border-desk-border hover:border-desk-muted text-[10.5px] font-bold text-desk-text"
+                    className="py-1.5 px-2 rounded-lg bg-desk-surface border border-desk-border hover:border-desk-muted text-[11px] font-bold text-desk-text"
                   >
                     {t('puppetBtnUpload')}
                   </button>
@@ -1735,7 +1707,7 @@ export default function MeshWarpStage() {
                     data-tour="puppet-moves"
                     className="rounded-2xl console-well border border-desk-border p-3 space-y-2"
                   >
-                    <div className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
+                    <div className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
                       <Wand2 className="w-3.5 h-3.5" />
                       {t('puppetMovesTitle')}
                     </div>
@@ -1763,7 +1735,7 @@ export default function MeshWarpStage() {
 
                   {/* 6 Expressive Cartoon Facial Emotions (Works on BOTH 2-Bone IK & Elastic Creatures!) */}
                   <div className="rounded-2xl console-well border border-desk-border p-3 space-y-2">
-                    <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                    <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                       {t('puppetEmotionTitle')}
                     </span>
                     <div className="grid grid-cols-3 gap-1">
@@ -1777,7 +1749,7 @@ export default function MeshWarpStage() {
                               commitRig({ ...activeRig, emotion: em.id });
                               soundEngine.click(1.06);
                             }}
-                            className={`py-1.5 px-1 rounded-lg border text-[10px] font-bold transition-colors ${
+                            className={`py-1.5 px-1 rounded-lg border text-[11px] font-bold transition-colors ${
                               active
                                 ? 'bg-desk-panel border-ink-brass text-desk-text shadow-sm'
                                 : 'bg-desk-surface border-desk-border text-desk-muted hover:text-desk-text'
@@ -1792,10 +1764,10 @@ export default function MeshWarpStage() {
 
                   {/* Stage Backdrop Selector */}
                   <div className="rounded-2xl console-well border border-desk-border p-3 space-y-2">
-                    <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                    <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                       {t('puppetBackdropTitle')}
                     </span>
-                    <div className="grid grid-cols-4 gap-1">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                       {(
                         [
                           { id: 'paper', label: t('puppetBgPaper') },
@@ -1808,7 +1780,7 @@ export default function MeshWarpStage() {
                           key={bg.id}
                           type="button"
                           onClick={() => setBackdrop(bg.id)}
-                          className={`py-1.5 px-1 rounded-lg border text-[10px] font-bold transition-colors ${
+                          className={`py-1.5 px-1 rounded-lg border text-[11px] font-bold transition-colors ${
                             backdrop === bg.id
                               ? 'bg-desk-panel border-ink-brass text-desk-text'
                               : 'bg-desk-surface border-desk-border text-desk-muted hover:text-desk-text'
@@ -1822,7 +1794,7 @@ export default function MeshWarpStage() {
 
                   {/* Clean Bridge to Short Film Studio (Zero "2.5D" jargon, extracts real StyleDNA!) */}
                   <div className="rounded-2xl console-well border border-ink-brass/35 p-3 space-y-2">
-                    <div className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
+                    <div className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
                       <Clapperboard className="w-3.5 h-3.5" />
                       {t('puppetFilmBridgeTitle')}
                     </div>
@@ -1846,7 +1818,7 @@ export default function MeshWarpStage() {
             <>
               {/* 100% $0 Offline Type & Speak */}
               <div className="rounded-2xl console-well border border-desk-border p-3 space-y-2">
-                <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
+                <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5" />
                   {t('puppetVoiceTitle')}
                 </span>
@@ -1915,7 +1887,7 @@ export default function MeshWarpStage() {
                       const track = await analyzeAndStoreAudio(f, f.name, project.fps);
                       setAudioTrack(track);
                       setPlaying(true);
-                      notify(locale === 'en' ? 'Audio loaded!' : 'Ses yüklendi!');
+                      notify(t('puppetAudioLoaded'));
                     }}
                   />
                 </div>
@@ -1923,7 +1895,7 @@ export default function MeshWarpStage() {
                 {/* Active Audio Waveform + Mute + Remove */}
                 {project.audio && (
                   <div className="p-2 rounded-xl bg-desk-surface/80 border border-ink-emerald/40 space-y-1.5">
-                    <div className="flex items-center justify-between gap-1 font-mono text-[9.5px]">
+                    <div className="flex items-center justify-between gap-1 font-mono text-[11px]">
                       <span className="text-ink-emerald font-bold truncate flex items-center gap-1">
                         <AudioLines className="w-3 h-3 shrink-0" />
                         {project.audio.name} ({project.audio.durationSec.toFixed(1)}s)
@@ -1959,7 +1931,7 @@ export default function MeshWarpStage() {
 
                     {/* Real Web Audio Cartoon Voice FX (Live Playback + MP4 Export!) */}
                     <div className="pt-1.5 border-t border-desk-border/70 space-y-1">
-                      <span className="font-mono text-[9.5px] font-bold uppercase tracking-wider text-desk-muted block">
+                      <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                         {t('puppetVoiceFxTitle')}
                       </span>
                       <div className="grid grid-cols-4 gap-1">
@@ -1973,7 +1945,7 @@ export default function MeshWarpStage() {
                                 updateAudioTrack({ voiceEffect: fx.id });
                                 soundEngine.click(1.08);
                               }}
-                              className={`py-1 px-1 rounded-md border text-[10px] font-bold transition-colors ${
+                              className={`py-1 px-1 rounded-md border text-[11px] font-bold transition-colors ${
                                 active
                                   ? 'bg-desk-panel border-ink-brass text-ink-brass'
                                   : 'bg-desk-surface border-desk-border text-desk-muted hover:text-desk-text'
@@ -2005,7 +1977,7 @@ export default function MeshWarpStage() {
 
                 {activeRig.mouthPos && (
                   <div>
-                    <div className="flex justify-between font-mono text-[10px] text-desk-muted mb-0.5">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
                       <span>{t('puppetMouthSize')}</span>
                       <span className="text-desk-text font-bold">
                         {Math.round(activeRig.mouthPos.scale * 100)}%
@@ -2032,7 +2004,7 @@ export default function MeshWarpStage() {
                 )}
 
                 <div className="pt-1.5 border-t border-desk-border flex items-center justify-between">
-                  <span className="font-mono text-[10px] font-bold text-desk-text">
+                  <span className="font-mono text-[11px] font-bold text-desk-text">
                     {t('puppetAutoBlink')}
                   </span>
                   <ToggleLeverSwitch
@@ -2049,7 +2021,7 @@ export default function MeshWarpStage() {
             <>
               <div className="rounded-2xl console-well border border-desk-border p-3 space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted">
                     {t('puppetPinsTitle')} ({activeRig.pins.length})
                   </span>
                   <button
@@ -2061,7 +2033,7 @@ export default function MeshWarpStage() {
                       });
                       setActivePreset(null);
                     }}
-                    className="font-mono text-[10px] text-desk-muted hover:text-desk-text inline-flex items-center gap-1"
+                    className="font-mono text-[11px] text-desk-muted hover:text-desk-text inline-flex items-center gap-1"
                   >
                     <RotateCcw className="w-3 h-3" />
                     {t('puppetResetPose')}
@@ -2080,7 +2052,7 @@ export default function MeshWarpStage() {
                       key={tpl.id}
                       type="button"
                       onClick={() => void applyTemplate(tpl.id)}
-                      className="py-1.5 rounded-lg border border-desk-border bg-desk-surface text-[10px] font-mono text-desk-muted hover:text-desk-text"
+                      className="py-1.5 rounded-lg border border-desk-border bg-desk-surface text-[11px] font-mono text-desk-muted hover:text-desk-text"
                     >
                       {tpl.label}
                     </button>
@@ -2129,14 +2101,14 @@ export default function MeshWarpStage() {
 
                 {/* Drag Scope: Full Loop vs Single Frame */}
                 <div className="pt-2 border-t border-desk-border space-y-1">
-                  <span className="font-mono text-[9.5px] text-desk-muted block">
+                  <span className="font-mono text-[11px] text-desk-muted block">
                     {t('puppetEditScope')}
                   </span>
                   <div className="grid grid-cols-2 gap-1">
                     <button
                       type="button"
                       onClick={() => setEditScope('all')}
-                      className={`py-1 rounded-lg text-[10.5px] font-bold border ${
+                      className={`py-1 rounded-lg text-[11px] font-bold border ${
                         editScope === 'all'
                           ? 'bg-desk-panel border-ink-brass text-desk-text'
                           : 'bg-desk-surface border-desk-border text-desk-muted'
@@ -2147,7 +2119,7 @@ export default function MeshWarpStage() {
                     <button
                       type="button"
                       onClick={() => setEditScope('single')}
-                      className={`py-1 rounded-lg text-[10.5px] font-bold border ${
+                      className={`py-1 rounded-lg text-[11px] font-bold border ${
                         editScope === 'single'
                           ? 'bg-desk-panel border-ink-brass text-desk-text'
                           : 'bg-desk-surface border-desk-border text-desk-muted'
@@ -2162,7 +2134,7 @@ export default function MeshWarpStage() {
               {/* Hand-Drawn Wobble + Mesh Lines + Loop Length */}
               <div className="rounded-2xl console-well border border-desk-border p-3 space-y-2.5">
                 <div>
-                  <div className="flex justify-between font-mono text-[10px] text-desk-muted mb-0.5">
+                  <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
                     <span>{t('puppetWobbleLabel')}</span>
                     <span className="text-desk-text font-bold">
                       {Math.round(activeRig.lineBoil * 100)}%
@@ -2182,7 +2154,7 @@ export default function MeshWarpStage() {
                 </div>
 
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px] text-desk-muted flex items-center gap-1.5">
+                  <span className="font-mono text-[11px] text-desk-muted flex items-center gap-1.5">
                     <Grid className="w-3.5 h-3.5" />
                     {t('puppetGridToggle')}
                   </span>
@@ -2190,7 +2162,7 @@ export default function MeshWarpStage() {
                 </div>
 
                 <div className="pt-1.5 border-t border-desk-border space-y-1">
-                  <span className="font-mono text-[9.5px] text-desk-muted block">
+                  <span className="font-mono text-[11px] text-desk-muted block">
                     {t('puppetLoopFrames')}
                   </span>
                   <div className="grid grid-cols-3 gap-1">
@@ -2199,7 +2171,7 @@ export default function MeshWarpStage() {
                         key={cnt}
                         type="button"
                         onClick={() => handleChangeLoopLength(cnt)}
-                        className={`py-1 rounded-lg font-mono text-[10.5px] font-bold border ${
+                        className={`py-1 rounded-lg font-mono text-[11px] font-bold border ${
                           activeRig.totalFrames === cnt
                             ? 'bg-desk-panel border-ink-brass text-desk-text'
                             : 'bg-desk-surface border-desk-border text-desk-muted'
@@ -2223,23 +2195,26 @@ export default function MeshWarpStage() {
           className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
         >
           <div
+            ref={exportDialogRef}
             role="dialog"
             aria-modal="true"
+            aria-labelledby="mesh-puppet-export-title"
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-2xl rounded-3xl bg-desk-surface border border-desk-border shadow-2xl overflow-hidden"
+            className="w-full max-w-2xl max-h-[calc(100dvh-1.5rem)] flex flex-col overflow-y-auto rounded-3xl bg-desk-surface border border-desk-border shadow-2xl"
           >
-            <div className="px-5 py-4 border-b border-desk-border flex items-center justify-between">
+            <div className="px-5 py-4 border-b border-desk-border flex items-center justify-between shrink-0">
               <div>
-                <h2 className="text-base font-extrabold text-desk-text">{t('puppetExportTitle')}</h2>
-                <p className="font-mono text-[10.5px] text-desk-muted mt-0.5">
-                  {activeRig.name} · {activeRig.pins.length} · {activeRig.totalFrames} · {t('puppetExportSub')}
+                <h2 id="mesh-puppet-export-title" className="text-base font-extrabold text-desk-text">{t('puppetExportTitle')}</h2>
+                <p className="font-mono text-[11px] text-desk-muted mt-0.5">
+                  {localizeActorName(activeRig.name, locale)} · {activeRig.pins.length} · {activeRig.totalFrames} · {t('puppetExportSub')}
                 </p>
               </div>
               <button
                 type="button"
+                aria-label={t('exportCloseAria')}
                 disabled={Boolean(exportingKind)}
                 onClick={() => setPuppetExportOpen(false)}
-                className="p-2 rounded-xl console-well border border-desk-border text-desk-muted hover:text-desk-text disabled:opacity-40"
+                className="min-w-[44px] min-h-[44px] p-2 rounded-xl inline-flex items-center justify-center console-well border border-desk-border text-desk-muted hover:text-desk-text disabled:opacity-40"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -2264,7 +2239,7 @@ export default function MeshWarpStage() {
                       onClick={() => {
                         exportAbortRef.current = true;
                       }}
-                      className="px-3 py-1 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-vermilion font-mono text-[10.5px] font-bold text-ink-vermilion"
+                      className="px-3 py-1 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-vermilion font-mono text-[11px] font-bold text-ink-vermilion"
                     >
                       {t('filmExportCancel')}
                     </button>
@@ -2368,12 +2343,7 @@ export default function MeshWarpStage() {
               puppetMasterCacheRef.current.syncRig(saved);
             }
             const vc = countRigViews(saved);
-            notify(
-              locale === 'en'
-                ? `Saved ${vc}/4 2.5D angles for "${saved.name}"`
-                : `"${saved.name}" için ${vc}/4 2.5D açı kaydedildi`,
-              'ok'
-            );
+            notify(tf('puppetAnglesSavedToast', { name: localizeActorName(saved.name, locale), count: vc }), 'ok');
           }}
         />
       )}

@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { Home, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
+import { translate } from '../../i18n/translations';
 
 interface Props {
   children: ReactNode;
@@ -13,7 +14,7 @@ interface State {
 
 /**
  * Top-level Studio Error Boundary — prevents white/black screens of death for real users.
- * Projects stored in IndexedDB stay 100% intact; users can jump back to Desk or reload safely.
+ * Resets open modal flags so faulty modal state never re-triggers an infinite crash loop.
  */
 export class StudioErrorBoundary extends Component<Props, State> {
   state: State = { hasError: false, errorMessage: '' };
@@ -26,13 +27,20 @@ export class StudioErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    // Keep lightweight console diagnostic for debugging without sending data to any external server
     console.error('[INKTROPE Studio Recovery]', error, info.componentStack);
   }
 
   private handleReturnToDesk = () => {
     try {
-      useStudioStore.getState().stopTour();
+      useStudioStore.setState({
+        activeTourMode: null,
+        exportOpen: false,
+        filmExportOpen: false,
+        puppetExportOpen: false,
+        accountModalOpen: false,
+        legalOpen: false,
+        overviewShowOpen: false,
+      });
       useStudioStore.getState().setMode('desk');
     } catch {
       // fall through to reload if store itself threw
@@ -51,10 +59,9 @@ export class StudioErrorBoundary extends Component<Props, State> {
       try {
         return useStudioStore.getState().locale;
       } catch {
-        return 'tr';
+        return 'tr' as const;
       }
     })();
-    const isEn = locale === 'en';
 
     return (
       <div className="min-h-screen desk-workbench-mat flex items-center justify-center p-6 text-desk-text">
@@ -65,12 +72,10 @@ export class StudioErrorBoundary extends Component<Props, State> {
 
           <div className="space-y-1.5">
             <h1 className="text-lg font-extrabold text-desk-text">
-              {isEn ? 'A small studio hiccup occurred' : 'Stüdyoda küçük bir aksaklık oldu'}
+              {translate(locale, 'errBoundaryTitle')}
             </h1>
             <p className="text-xs text-desk-muted leading-relaxed">
-              {isEn
-                ? 'Good news: your drawings and notebooks are safely saved on your device. Return to the main desk or refresh to continue right where you left off.'
-                : 'İyi haber: tüm çizimlerin ve defterlerin cihazında güvenle kayıtlı. Ana masaya dönerek veya sayfayı yenileyerek kaldığın yerden devam edebilirsin.'}
+              {translate(locale, 'errBoundaryDesc')}
             </p>
           </div>
 
@@ -78,19 +83,19 @@ export class StudioErrorBoundary extends Component<Props, State> {
             <button
               type="button"
               onClick={this.handleReturnToDesk}
-              className="px-4 py-2 rounded-xl bg-ink-vermilion text-white text-xs font-extrabold inline-flex items-center gap-1.5 hover:brightness-110 shadow"
+              className="min-h-[44px] px-4 py-2 rounded-xl bg-ink-vermilion text-white text-xs font-extrabold inline-flex items-center gap-1.5 hover:brightness-110 shadow"
             >
-              <Home className="w-3.5 h-3.5" />
-              {isEn ? 'Back to Main Desk' : 'Ana Masaya Dön'}
+              <Home className="w-4 h-4" />
+              {translate(locale, 'errBoundaryHome')}
             </button>
 
             <button
               type="button"
               onClick={this.handleReload}
-              className="px-4 py-2 rounded-xl console-well border border-desk-border hover:border-ink-brass text-xs font-bold text-desk-text inline-flex items-center gap-1.5"
+              className="min-h-[44px] px-4 py-2 rounded-xl console-well border border-desk-border hover:border-ink-brass text-xs font-bold text-desk-text inline-flex items-center gap-1.5"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
-              {isEn ? 'Refresh Page' : 'Sayfayı Yenile'}
+              <RefreshCw className="w-4 h-4" />
+              {translate(locale, 'errBoundaryReload')}
             </button>
           </div>
         </div>

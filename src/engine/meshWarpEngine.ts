@@ -1,5 +1,6 @@
 import type { AudioTrackData, MeshFrameOffsets, MeshPin, MeshWarpRig } from '../types/studio';
 import { getBlobBitmap, makeId } from './db';
+import { localizePinOrPartLabel, type StudioLocale } from '../i18n/translations';
 import { getVoiceEffectRate, rmsToMouthViseme, type MouthViseme } from './audioEngine';
 import {
   drawCartoonMouth,
@@ -1015,14 +1016,16 @@ export async function renderMeshWarpFrame(
       ctx.stroke();
 
       ctx.font = 'bold 11px "JetBrains Mono", monospace';
-      const labelW = ctx.measureText(pin.label).width + 10;
+      const activeLocale: StudioLocale = typeof document !== 'undefined' && document.documentElement.lang === 'en' ? 'en' : 'tr';
+      const dispPinLabel = localizePinOrPartLabel(pin.label, activeLocale);
+      const labelW = ctx.measureText(dispPinLabel).width + 10;
       ctx.fillStyle = 'rgba(22, 21, 19, 0.84)';
       ctx.beginPath();
       ctx.roundRect(px - labelW / 2, py + 13, labelW, 18, 5);
       ctx.fill();
       ctx.fillStyle = '#F7F3E9';
       ctx.textAlign = 'center';
-      ctx.fillText(pin.label, px, py + 26);
+      ctx.fillText(dispPinLabel, px, py + 26);
       ctx.restore();
     }
   }

@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import {
   Brush,
+  ChevronDown,
+  ChevronUp,
   Circle,
+  Compass,
   Eraser,
   Feather,
   FlipHorizontal2,
@@ -17,18 +20,26 @@ import {
   Pipette,
   Redo2,
   Shapes,
-  Sliders,
   Square,
   Trash2,
   Undo2,
+  X,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
 import type { BrushToolId, ShapeKind } from '../../types/studio';
-import { KeycapButton } from '../ui/KeycapButton';
 import { StudioToolSlot, ToggleLeverSwitch } from '../ui/Studio3DControls';
 import { SketchNibIcon } from '../ui/AnimatedStudioIcons';
 import ColorWheelPopover, { getContrastTextColor } from './ColorWheelPopover';
 import { useT, type TranslationKey } from '../../i18n/translations';
+
+const CORE_TOOL_IDS: ReadonlySet<BrushToolId> = new Set([
+  'gpen',
+  'pencil',
+  'blue-rough',
+  'bucket',
+  'lasso',
+  'eraser',
+]);
 
 const TOOLS: {
   id: BrushToolId;
@@ -40,14 +51,14 @@ const TOOLS: {
   { id: 'gpen', labelKey: 'toolGpen', shortcut: 'B', icon: 'nib', accent: 'amber' },
   { id: 'pencil', labelKey: 'toolPencil', shortcut: 'P', icon: Pencil, accent: 'amber' },
   { id: 'blue-rough', labelKey: 'toolBlueRough', shortcut: 'M', icon: Feather, accent: 'blue' },
+  { id: 'bucket', labelKey: 'toolBucket', shortcut: 'G', icon: PaintBucket, accent: 'amber' },
+  { id: 'lasso', labelKey: 'toolLasso', shortcut: 'L', icon: Lasso, accent: 'vermilion' },
+  { id: 'eraser', labelKey: 'toolEraser', shortcut: 'E', icon: Eraser, accent: 'vermilion' },
   { id: 'marker', labelKey: 'toolMarker', shortcut: 'K', icon: Highlighter, accent: 'amber' },
   { id: 'dry-brush', labelKey: 'toolDryBrush', shortcut: 'D', icon: Brush, accent: 'amber' },
   { id: 'screentone', labelKey: 'toolScreentone', shortcut: 'T', icon: Grid, accent: 'amber' },
   { id: 'shape', labelKey: 'toolShape', shortcut: 'S', icon: Shapes, accent: 'amber' },
-  { id: 'bucket', labelKey: 'toolBucket', shortcut: 'G', icon: PaintBucket, accent: 'amber' },
-  { id: 'lasso', labelKey: 'toolLasso', shortcut: 'L', icon: Lasso, accent: 'vermilion' },
   { id: 'eyedropper', labelKey: 'toolEyedropper', shortcut: 'I', icon: Pipette, accent: 'blue' },
-  { id: 'eraser', labelKey: 'toolEraser', shortcut: 'E', icon: Eraser, accent: 'vermilion' },
 ];
 
 interface ToolDeckProps {
@@ -57,6 +68,7 @@ interface ToolDeckProps {
   onRedo: () => void;
   onClearLayer: () => void;
   onToggleMobileLayers?: () => void;
+  onOpenQuickWheel?: () => void;
 }
 
 export default function ToolDeck({
@@ -66,21 +78,27 @@ export default function ToolDeck({
   onRedo,
   onClearLayer,
   onToggleMobileLayers,
+  onOpenQuickWheel,
 }: ToolDeckProps) {
   const { projects, activeProjectId, brush, updateBrush, updateProjectSettings, notify } =
     useStudioStore();
   const t = useT();
   const [mobileBrushOpen, setMobileBrushOpen] = useState(false);
+  const [mobileColorOpen, setMobileColorOpen] = useState(false);
   const [colorWheelOpen, setColorWheelOpen] = useState(false);
+  const [showMoreBrushes, setShowMoreBrushes] = useState(false);
 
   useEffect(() => {
-    if (!mobileBrushOpen) return;
+    if (!mobileBrushOpen && !mobileColorOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMobileBrushOpen(false);
+      if (e.key === 'Escape') {
+        setMobileBrushOpen(false);
+        setMobileColorOpen(false);
+      }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [mobileBrushOpen]);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [mobileBrushOpen, mobileColorOpen]);
 
   const project = projects.find((p) => p.id === activeProjectId);
   const palette = project?.palette ?? [
@@ -93,6 +111,11 @@ export default function ToolDeck({
     '#EFE6D5',
   ];
 
+  const activeToolDef = TOOLS.find((tl) => tl.id === brush.tool) ?? TOOLS[0];
+  const isExtraToolActive = !CORE_TOOL_IDS.has(brush.tool);
+  const visibleDesktopTools =
+    showMoreBrushes || isExtraToolActive ? TOOLS : TOOLS.filter((tl) => CORE_TOOL_IDS.has(tl.id));
+
   const handleAddSwatch = () => {
     if (!project) return;
     if (palette.includes(brush.color)) return;
@@ -101,9 +124,9 @@ export default function ToolDeck({
   };
 
   const renderFaders = () => (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <div>
-        <div className="flex justify-between font-mono text-[9.5px] text-desk-muted mb-0.5">
+        <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
           <span className="uppercase">{t('sliderSize')}</span>
           <span className="text-desk-text">{brush.size} px</span>
         </div>
@@ -113,12 +136,13 @@ export default function ToolDeck({
           max={48}
           value={brush.size}
           onChange={(e) => updateBrush({ size: Number(e.target.value) })}
+          aria-label={t('sliderSize')}
           className="studio-fader w-full"
         />
       </div>
 
       <div>
-        <div className="flex justify-between font-mono text-[9.5px] text-desk-muted mb-0.5">
+        <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
           <span className="uppercase">{t('sliderOpacity')}</span>
           <span className="text-desk-text">{Math.round(brush.opacity * 100)}%</span>
         </div>
@@ -129,12 +153,13 @@ export default function ToolDeck({
           step={0.05}
           value={brush.opacity}
           onChange={(e) => updateBrush({ opacity: Number(e.target.value) })}
+          aria-label={t('sliderOpacity')}
           className="studio-fader w-full"
         />
       </div>
 
       <div>
-        <div className="flex justify-between font-mono text-[9.5px] text-desk-muted mb-0.5">
+        <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
           <span className="uppercase">{t('sliderStabilizer')}</span>
           <span className="text-desk-text">{Math.round(brush.stabilizer * 100)}%</span>
         </div>
@@ -145,6 +170,7 @@ export default function ToolDeck({
           step={0.05}
           value={brush.stabilizer}
           onChange={(e) => updateBrush({ stabilizer: Number(e.target.value) })}
+          aria-label={t('sliderStabilizer')}
           className="studio-fader w-full"
         />
       </div>
@@ -154,27 +180,321 @@ export default function ToolDeck({
   return (
     <aside
       data-tour="draw-tools"
-      className={`relative w-full lg:w-[232px] shrink-0 border-b lg:border-b-0 lg:border-r border-desk-border bg-desk-surface p-1.5 flex lg:flex-col gap-1.5 overflow-x-auto lg:overflow-hidden select-none ${
-        mobileBrushOpen || colorWheelOpen ? 'z-50' : 'z-30 lg:z-20'
+      className={`relative w-full lg:w-[254px] shrink-0 border-b lg:border-b-0 lg:border-r border-desk-border bg-desk-surface px-2 py-1.5 lg:p-2 flex flex-col gap-1.5 overflow-x-hidden lg:overflow-hidden select-none ${
+        mobileBrushOpen || mobileColorOpen || colorWheelOpen ? 'z-50' : 'z-30 lg:z-20'
       }`}
     >
-      {/* Top Scrollable Region on Desktop: Compact Tools + Faders so Symmetry & Bottom Dock NEVER clip at 1280x800! */}
-      <div className="flex lg:flex-col gap-1.5 lg:flex-1 lg:min-h-0 lg:overflow-y-auto lg:pr-0.5 shrink-0 lg:shrink">
-        {/* Carved Pen-Tray Tool Slots (Clean 11-Tool Artist Deck) */}
-        <div className="shrink-0">
-          <div className="hidden lg:flex items-center justify-between mb-1 px-1">
-            <span className="font-mono text-[9.5px] uppercase tracking-widest text-desk-muted">
+      {/* MOBILE / TABLET (<1024px): Pinned Zero-Scroll 6-Slot Ergonomic Dock (Every button >= 44x44px!) */}
+      <div className="grid grid-cols-6 gap-1.5 items-center lg:hidden">
+        {/* 1. Active Pen / All Brushes Drawer */}
+        <button
+          type="button"
+          onClick={() => {
+            setMobileColorOpen(false);
+            setMobileBrushOpen((v) => !v);
+          }}
+          aria-expanded={mobileBrushOpen}
+          aria-label={`${t(activeToolDef.labelKey)} — ${t('mobileBrushDrawerTitle')}`}
+          title={t(activeToolDef.labelKey)}
+          className={`min-w-[44px] min-h-[44px] px-1.5 rounded-xl border text-[11px] font-bold flex items-center justify-center gap-1 transition-colors ${
+            mobileBrushOpen || brush.tool !== 'eraser'
+              ? 'bg-desk-panel border-ink-brass text-desk-text shadow-sm'
+              : 'console-well border-desk-border text-desk-muted'
+          }`}
+        >
+          {activeToolDef.icon === 'nib' ? (
+            <SketchNibIcon className="w-4 h-4 shrink-0" />
+          ) : (
+            <activeToolDef.icon className="w-4 h-4 shrink-0" />
+          )}
+          <ChevronDown className="w-3 h-3 opacity-75 shrink-0" />
+        </button>
+
+        {/* 2. Pinned 1-Tap Eraser */}
+        <button
+          type="button"
+          onClick={() => updateBrush({ tool: 'eraser' })}
+          aria-label={t('toolEraser')}
+          title={`${t('toolEraser')} (E)`}
+          className={`min-w-[44px] min-h-[44px] rounded-xl border flex items-center justify-center transition-colors ${
+            brush.tool === 'eraser'
+              ? 'bg-ink-vermilion text-white border-ink-vermilion shadow-sm'
+              : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
+          }`}
+        >
+          <Eraser className="w-4 h-4" />
+        </button>
+
+        {/* 3. Pinned Color Swatch + Brush Size Popover */}
+        <button
+          type="button"
+          onClick={() => {
+            setMobileBrushOpen(false);
+            setMobileColorOpen((v) => !v);
+          }}
+          aria-expanded={mobileColorOpen}
+          aria-label={`${t('paletteHeading')} · ${brush.size}px`}
+          title={`${t('paletteHeading')} (${brush.size}px)`}
+          className={`min-w-[44px] min-h-[44px] px-1.5 rounded-xl border font-mono text-[11px] font-bold flex items-center justify-center gap-1 transition-colors ${
+            mobileColorOpen
+              ? 'bg-ink-brass/20 border-ink-brass text-desk-text'
+              : 'console-well border-desk-border text-desk-text'
+          }`}
+        >
+          <span
+            className="w-4 h-4 rounded-full border border-white/60 shrink-0"
+            style={{ backgroundColor: brush.color }}
+          />
+          <span>{brush.size}</span>
+        </button>
+
+        {/* 4. Pinned 1-Tap Undo */}
+        <button
+          type="button"
+          onClick={onUndo}
+          disabled={!canUndo}
+          aria-label={t('undoTitle')}
+          title={t('undoTitle')}
+          className="min-w-[44px] min-h-[44px] rounded-xl console-well border border-desk-border text-desk-text disabled:opacity-35 flex items-center justify-center transition-colors"
+        >
+          <Undo2 className="w-4 h-4" />
+        </button>
+
+        {/* 5. Pinned 1-Tap Radial Quick Wheel Trigger (Solves 0 Mobile Access + Discoverability!) */}
+        <button
+          type="button"
+          data-quick-wheel-trigger="true"
+          onClick={() => {
+            setMobileBrushOpen(false);
+            setMobileColorOpen(false);
+            onOpenQuickWheel?.();
+          }}
+          aria-label={t('quickWheelTitle')}
+          title={t('quickWheelTitle')}
+          className="min-w-[44px] min-h-[44px] rounded-xl console-well border border-ink-brass/50 text-ink-brass hover:bg-ink-brass/15 flex items-center justify-center transition-colors"
+        >
+          <Compass className="w-4 h-4" />
+        </button>
+
+        {/* 6. Pinned Mobile Layers & Guides Sheet */}
+        <button
+          type="button"
+          onClick={() => {
+            setMobileBrushOpen(false);
+            setMobileColorOpen(false);
+            onToggleMobileLayers?.();
+          }}
+          aria-label={t('mobileLayersTitle')}
+          title={t('mobileLayersTitle')}
+          className="min-w-[44px] min-h-[44px] rounded-xl bg-desk-panel border border-desk-border text-desk-text flex items-center justify-center transition-colors"
+        >
+          <Layers className="w-4 h-4 text-ink-brass" />
+        </button>
+      </div>
+
+      {/* Mobile Brush Picker + Stylus / Redo / Clear Drawer */}
+      {mobileBrushOpen && (
+        <>
+          <div
+            onClick={() => setMobileBrushOpen(false)}
+            className="fixed inset-0 z-40 bg-black/45 lg:hidden"
+          />
+          <div className="fixed left-3 right-3 top-[116px] max-h-[calc(100dvh-132px)] overflow-y-auto overscroll-contain z-50 lg:hidden rounded-2xl bg-desk-surface border border-desk-border p-3.5 shadow-2xl space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass">
+                {t('mobileBrushDrawerTitle')}
+              </span>
+              <button
+                type="button"
+                onClick={() => setMobileBrushOpen(false)}
+                aria-label={t('radialClose')}
+                className="min-w-[44px] min-h-[44px] -my-2 -mr-2 rounded-xl inline-flex items-center justify-center text-desk-muted hover:text-desk-text"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+              {TOOLS.map((tool) => {
+                const active = brush.tool === tool.id;
+                const label = t(tool.labelKey);
+                return (
+                  <button
+                    key={tool.id}
+                    type="button"
+                    onClick={() => {
+                      updateBrush({ tool: tool.id });
+                      if (tool.id !== 'shape' && tool.id !== 'bucket') {
+                        setMobileBrushOpen(false);
+                      }
+                    }}
+                    className={`min-h-[44px] px-2.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-2 transition-colors ${
+                      active
+                        ? 'bg-desk-panel border-ink-brass text-desk-text shadow-sm'
+                        : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
+                    }`}
+                  >
+                    {tool.icon === 'nib' ? (
+                      <SketchNibIcon className="w-4 h-4 shrink-0" />
+                    ) : (
+                      <tool.icon className="w-4 h-4 shrink-0" />
+                    )}
+                    <span className="truncate">{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {brush.tool === 'shape' && (
+              <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl console-well border border-desk-border">
+                {(
+                  [
+                    { id: 'line', label: t('shapeLine'), Icon: Minus },
+                    { id: 'ellipse', label: t('shapeEllipse'), Icon: Circle },
+                    { id: 'rect', label: t('shapeRect'), Icon: Square },
+                  ] as { id: ShapeKind; label: string; Icon: typeof Minus }[]
+                ).map(({ id, label, Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => updateBrush({ shapeKind: id })}
+                    className={`min-h-[44px] px-2 rounded-lg font-mono text-[11px] flex items-center justify-center gap-1.5 border ${
+                      brush.shapeKind === id
+                        ? 'bg-desk-panel border-ink-brass text-desk-text font-bold'
+                        : 'border-transparent text-desk-muted'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between pt-1 border-t border-desk-border">
+              <span className="font-mono text-[11px] uppercase text-desk-muted flex items-center gap-1.5">
+                <FlipHorizontal2 className="w-4 h-4 text-ink-vermilion" />
+                {t('symmetryLabel')}
+              </span>
+              <ToggleLeverSwitch
+                checked={brush.symmetryX}
+                onChange={(v) => updateBrush({ symmetryX: v })}
+                title={t('symmetryTitle')}
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={onRedo}
+                disabled={!canRedo}
+                className="min-h-[44px] px-3 rounded-xl console-well border border-desk-border text-xs font-bold text-desk-text disabled:opacity-35 flex items-center justify-center gap-1.5"
+              >
+                <Redo2 className="w-4 h-4" />
+                <span>{t('redoTitle')}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onClearLayer();
+                  setMobileBrushOpen(false);
+                }}
+                className="min-h-[44px] px-3 rounded-xl console-well border border-desk-border text-xs font-bold text-ink-vermilion flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>{t('clearLayerTitle')}</span>
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Mobile Color + Brush Size & Opacity Popover */}
+      {mobileColorOpen && (
+        <>
+          <div
+            onClick={() => setMobileColorOpen(false)}
+            className="fixed inset-0 z-40 bg-black/45 lg:hidden"
+          />
+          <div className="fixed left-3 right-3 top-[116px] max-h-[calc(100dvh-132px)] overflow-y-auto overscroll-contain z-50 lg:hidden rounded-2xl bg-desk-surface border border-desk-border p-3.5 shadow-2xl space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass">
+                {t('paletteHeading')}
+              </span>
+              <button
+                type="button"
+                onClick={() => setMobileColorOpen(false)}
+                aria-label={t('radialClose')}
+                className="min-w-[44px] min-h-[44px] -my-2 -mr-2 rounded-xl inline-flex items-center justify-center text-desk-muted hover:text-desk-text"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-4 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileColorOpen(false);
+                  setColorWheelOpen(true);
+                }}
+                style={{
+                  backgroundColor: brush.color,
+                  color: getContrastTextColor(brush.color),
+                }}
+                title={t('colorWheelOpenTitle')}
+                aria-label={t('colorWheelBtn')}
+                className="min-h-[44px] rounded-xl border-2 border-ink-brass flex items-center justify-center shadow-inner"
+              >
+                <Palette className="w-4 h-4" />
+              </button>
+              {palette.slice(0, 7).map((hex) => {
+                const selected = brush.color.toLowerCase() === hex.toLowerCase();
+                return (
+                  <button
+                    key={hex}
+                    type="button"
+                    onClick={() => updateBrush({ color: hex })}
+                    style={{ backgroundColor: hex }}
+                    aria-label={`${t('paletteHeading')} ${hex}`}
+                    className={`min-h-[44px] rounded-xl border transition-transform ${
+                      selected
+                        ? 'border-ink-vermilion ring-2 ring-ink-vermilion/45 scale-95'
+                        : 'border-desk-border'
+                    }`}
+                  />
+                );
+              })}
+            </div>
+
+            {renderFaders()}
+          </div>
+        </>
+      )}
+
+      {/* DESKTOP (>=1024px): Focused Core Artist Deck + Expandable Specialist Brushes */}
+      <div className="hidden lg:flex lg:flex-col gap-2 lg:flex-1 lg:min-h-0 lg:overflow-y-auto lg:pr-0.5">
+        <div className="shrink-0 space-y-1.5">
+          <div className="flex items-center justify-between px-1">
+            <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted font-bold">
               {t('toolTrayHeading')}
             </span>
-            <span className="font-mono text-[8px] uppercase text-desk-muted">
-              {t('toolBrushesCount')}
-            </span>
+            <button
+              type="button"
+              data-quick-wheel-trigger="true"
+          onClick={onOpenQuickWheel}
+              title={t('quickWheelTitle')}
+              aria-label={t('quickWheelTitle')}
+              className="min-h-[28px] px-2 py-0.5 rounded-lg console-well border border-ink-brass/50 font-mono text-[11px] font-bold text-ink-brass hover:bg-ink-brass/15 inline-flex items-center gap-1 transition-colors"
+            >
+              <Compass className="w-3 h-3" />
+              <span>{t('quickWheelBtn')}</span>
+            </button>
           </div>
 
-          <div className="flex lg:grid lg:grid-cols-2 gap-1">
-            {TOOLS.map((tool) => {
+          <div className="grid grid-cols-2 gap-1.5">
+            {visibleDesktopTools.map((tool) => {
               const active = brush.tool === tool.id;
-              const isWideBar = tool.id === 'eraser';
               const label = t(tool.labelKey);
               return (
                 <StudioToolSlot
@@ -182,7 +502,7 @@ export default function ToolDeck({
                   active={active}
                   accent={tool.accent}
                   onClick={() => updateBrush({ tool: tool.id })}
-                  className={`whitespace-nowrap lg:!py-0.5 lg:!px-1.5 lg:!text-[10.5px] ${isWideBar ? 'lg:col-span-2 lg:justify-center' : ''}`}
+                  className="whitespace-nowrap !min-h-[36px] !py-1.5 !px-2 !text-[11px]"
                   title={`${label} (${tool.shortcut})`}
                 >
                   {tool.icon === 'nib' ? (
@@ -196,9 +516,21 @@ export default function ToolDeck({
             })}
           </div>
 
-          {/* Shape Sub-Selector */}
+          <button
+            type="button"
+            onClick={() => setShowMoreBrushes((v) => !v)}
+            className="w-full min-h-[32px] px-2.5 py-1 rounded-xl console-well border border-desk-border hover:border-ink-brass/60 font-mono text-[11px] font-semibold text-desk-muted hover:text-desk-text flex items-center justify-between transition-colors"
+          >
+            <span>{showMoreBrushes ? t('lessBrushesBtn') : t('moreBrushesBtn')}</span>
+            {showMoreBrushes ? (
+              <ChevronUp className="w-3.5 h-3.5 text-ink-brass" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 text-ink-brass" />
+            )}
+          </button>
+
           {brush.tool === 'shape' && (
-            <div className="mt-1.5 p-1 rounded-xl console-well border border-desk-border flex gap-1">
+            <div className="p-1 rounded-xl console-well border border-desk-border flex gap-1">
               {(
                 [
                   { id: 'line', label: t('shapeLine'), Icon: Minus },
@@ -210,7 +542,7 @@ export default function ToolDeck({
                   key={id}
                   type="button"
                   onClick={() => updateBrush({ shapeKind: id })}
-                  className={`flex-1 py-1 px-1 rounded-lg font-mono text-[9.5px] flex items-center justify-center gap-1 border ${
+                  className={`flex-1 min-h-[32px] py-1 px-1 rounded-lg font-mono text-[11px] flex items-center justify-center gap-1 border ${
                     brush.shapeKind === id
                       ? 'bg-desk-panel border-ink-brass text-desk-text font-bold'
                       : 'border-transparent text-desk-muted hover:text-desk-text'
@@ -218,17 +550,16 @@ export default function ToolDeck({
                   title={label}
                 >
                   <Icon className="w-3 h-3" />
-                  <span className="hidden lg:inline">{label}</span>
+                  <span>{label}</span>
                 </button>
               ))}
             </div>
           )}
 
-          {/* Smart Reference-Aware Gap-Closing Bucket Options */}
           {brush.tool === 'bucket' && (
-            <div className="hidden lg:block mt-1.5 p-2 rounded-xl console-well border border-desk-border space-y-1.5">
+            <div className="p-2 rounded-xl console-well border border-desk-border space-y-1.5">
               <div className="flex items-center justify-between gap-1">
-                <span className="font-mono text-[8.5px] uppercase text-desk-muted">
+                <span className="font-mono text-[11px] text-desk-muted">
                   {t('bucketRefInk')}
                 </span>
                 <ToggleLeverSwitch
@@ -238,8 +569,8 @@ export default function ToolDeck({
                 />
               </div>
               <div>
-                <div className="flex justify-between font-mono text-[8.5px] text-desk-muted mb-0.5">
-                  <span className="uppercase">{t('bucketGapClose')}</span>
+                <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
+                  <span>{t('bucketGapClose')}</span>
                   <span className="text-desk-text">{brush.bucketGapClose} px</span>
                 </div>
                 <input
@@ -257,108 +588,65 @@ export default function ToolDeck({
         </div>
 
         {/* Desktop Brush Faders */}
-        <div className="hidden lg:block rounded-2xl console-well border border-desk-border p-2 space-y-1.5 shrink-0">
+        <div className="rounded-2xl console-well border border-desk-border p-2.5 space-y-2 shrink-0">
           {renderFaders()}
-          <div className="pt-1 border-t border-desk-border flex items-center justify-between">
-            <span className="font-mono text-[9px] uppercase text-desk-muted flex items-center gap-1.5">
-              <FlipHorizontal2 className="w-3.5 h-3.5 text-ink-vermilion" />
-              {t('symmetryLabel')}
-            </span>
-            <ToggleLeverSwitch
-              checked={brush.symmetryX}
-              onChange={(v) => updateBrush({ symmetryX: v })}
-              title={t('symmetryTitle')}
-            />
-          </div>
+          {showMoreBrushes && (
+            <>
+              <div className="pt-1.5 border-t border-desk-border flex items-center justify-between">
+                <span className="font-mono text-[11px] text-desk-muted flex items-center gap-1.5">
+                  <FlipHorizontal2 className="w-3.5 h-3.5 text-ink-vermilion" />
+                  {t('symmetryLabel')}
+                </span>
+                <ToggleLeverSwitch
+                  checked={brush.symmetryX}
+                  onChange={(v) => updateBrush({ symmetryX: v })}
+                  title={t('symmetryTitle')}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-1 pt-1">
+                <StudioToolSlot
+                  active={brush.pressureEnabled}
+                  onClick={() => updateBrush({ pressureEnabled: !brush.pressureEnabled })}
+                  title={t('pressureTitle')}
+                  className="!min-h-[32px] !text-[11px]"
+                >
+                  <span>{t('pressureShort')}</span>
+                </StudioToolSlot>
+                <StudioToolSlot
+                  active={brush.palmRejection}
+                  onClick={() => updateBrush({ palmRejection: !brush.palmRejection })}
+                  title={t('palmTitle')}
+                  className="!min-h-[32px] !text-[11px]"
+                >
+                  <Hand className="w-3 h-3" />
+                  <span>{t('palmShort')}</span>
+                </StudioToolSlot>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Mobile / Tablet Brush Settings Toggle Button */}
-      <div className="flex lg:hidden items-center shrink-0">
-        <button
-          type="button"
-          onClick={() => setMobileBrushOpen((v) => !v)}
-          className={`px-2.5 py-1.5 rounded-lg border font-mono text-[10px] flex items-center gap-1.5 ${
-            mobileBrushOpen
-              ? 'bg-ink-brass/20 border-ink-brass text-desk-text font-bold'
-              : 'console-well border-desk-border text-desk-muted'
-          }`}
-          title={t('sliderSize')}
-        >
-          <Sliders className="w-3.5 h-3.5" />
-          <span>{brush.size}px</span>
-        </button>
-      </div>
-
-      {/* Mobile Floating Brush Popover */}
-      {mobileBrushOpen && (
-        <>
-          <div
-            onClick={() => setMobileBrushOpen(false)}
-            className="fixed inset-0 z-40 bg-black/45 lg:hidden"
-          />
-          <div className="fixed left-3 right-3 top-[116px] z-50 lg:hidden rounded-2xl bg-desk-surface border border-desk-border p-4 shadow-2xl space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-[10px] uppercase tracking-wider text-desk-muted">
-                {t('toolTrayHeading')}
-              </span>
-              <button
-                type="button"
-                onClick={() => setMobileBrushOpen(false)}
-                className="font-mono text-[11px] text-ink-vermilion font-bold px-2 py-0.5 rounded hover:bg-desk-panel"
-              >
-                {t('radialClose')}
-              </button>
-            </div>
-            {renderFaders()}
-            <div className="flex items-center justify-between pt-1">
-              <span className="font-mono text-[10px] uppercase text-desk-muted">
-                {t('symmetryLabel')}
-              </span>
-              <ToggleLeverSwitch
-                checked={brush.symmetryX}
-                onChange={(v) => updateBrush({ symmetryX: v })}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              <StudioToolSlot
-                active={brush.pressureEnabled}
-                onClick={() => updateBrush({ pressureEnabled: !brush.pressureEnabled })}
-              >
-                {t('pressureFull')}
-              </StudioToolSlot>
-              <StudioToolSlot
-                active={brush.palmRejection}
-                onClick={() => updateBrush({ palmRejection: !brush.palmRejection })}
-              >
-                <Hand className="w-3.5 h-3.5" />
-                {t('palmFull')}
-              </StudioToolSlot>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* Always-Visible Pinned Bottom Dock: Ink Swatches + Stylus Ergonomics + Undo/Redo */}
-      <div className="flex lg:flex-col items-center lg:items-stretch gap-1.5 lg:pt-1.5 lg:border-t lg:border-desk-border shrink-0">
-        <div className="hidden lg:flex items-center justify-between px-1">
-          <span className="font-mono text-[9.5px] uppercase tracking-widest text-desk-muted">
+      {/* Desktop Pinned Bottom Color Swatches + Undo/Redo/Clear */}
+      <div className="hidden lg:flex lg:flex-col gap-2 pt-1.5 border-t border-desk-border shrink-0">
+        <div className="flex items-center justify-between px-1">
+          <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted">
             {t('paletteHeading')}
           </span>
           <button
             type="button"
             onClick={() => setColorWheelOpen((v) => !v)}
-            className="font-mono text-[9.5px] text-ink-brass hover:underline"
+            className="font-mono text-[11px] text-ink-brass hover:underline min-h-[24px]"
           >
             {t('colorWheelBtn')}
           </button>
         </div>
 
-        <div className="flex lg:grid lg:grid-cols-4 gap-1 items-center">
+        <div className="grid grid-cols-4 gap-1.5 items-center">
           <button
             type="button"
             onClick={() => setColorWheelOpen((v) => !v)}
-            className="w-7 h-7 lg:w-full lg:h-5 rounded-lg border border-ink-brass/90 cursor-pointer overflow-hidden shadow-inner shrink-0 relative flex items-center justify-center"
+            className="w-full min-h-[28px] rounded-lg border border-ink-brass/90 cursor-pointer overflow-hidden shadow-inner relative flex items-center justify-center"
             style={{
               backgroundColor: brush.color,
               color: getContrastTextColor(brush.color),
@@ -366,7 +654,7 @@ export default function ToolDeck({
             title={t('colorWheelOpenTitle')}
             aria-label={t('colorWheelBtn')}
           >
-            <Palette className="w-3 h-3 opacity-90" />
+            <Palette className="w-3.5 h-3.5 opacity-90" />
           </button>
           {palette.slice(0, 7).map((hex) => {
             const selected = brush.color.toLowerCase() === hex.toLowerCase();
@@ -376,7 +664,7 @@ export default function ToolDeck({
                 type="button"
                 onClick={() => updateBrush({ color: hex })}
                 style={{ backgroundColor: hex }}
-                className={`w-7 h-7 lg:w-full lg:h-5 rounded-lg border transition-transform shrink-0 ${
+                className={`w-full min-h-[28px] rounded-lg border transition-transform ${
                   selected
                     ? 'border-ink-vermilion ring-2 ring-ink-vermilion/45 scale-95'
                     : 'border-desk-border hover:scale-105'
@@ -386,6 +674,38 @@ export default function ToolDeck({
               />
             );
           })}
+        </div>
+
+        <div className="grid grid-cols-3 gap-1.5">
+          <button
+            type="button"
+            onClick={onUndo}
+            disabled={!canUndo}
+            aria-label={t('undoTitle')}
+            title={t('undoTitle')}
+            className="min-h-[38px] rounded-xl console-well border border-desk-border text-desk-text disabled:opacity-35 hover:border-desk-muted flex items-center justify-center transition-colors"
+          >
+            <Undo2 className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={onRedo}
+            disabled={!canRedo}
+            aria-label={t('redoTitle')}
+            title={t('redoTitle')}
+            className="min-h-[38px] rounded-xl console-well border border-desk-border text-desk-text disabled:opacity-35 hover:border-desk-muted flex items-center justify-center transition-colors"
+          >
+            <Redo2 className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={onClearLayer}
+            aria-label={t('clearLayerTitle')}
+            title={t('clearLayerTitle')}
+            className="min-h-[38px] rounded-xl console-well border border-desk-border text-ink-vermilion hover:border-ink-vermilion flex items-center justify-center transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
         </div>
       </div>
 
@@ -398,67 +718,6 @@ export default function ToolDeck({
           onClose={() => setColorWheelOpen(false)}
         />
       )}
-
-      {/* Stylus Ergonomics + Clean Minimal Undo/Redo */}
-      <div className="flex lg:flex-col gap-1.5 shrink-0">
-        <div className="hidden lg:grid grid-cols-2 gap-1">
-          <StudioToolSlot
-            active={brush.pressureEnabled}
-            onClick={() => updateBrush({ pressureEnabled: !brush.pressureEnabled })}
-            title={t('pressureTitle')}
-          >
-            <span className="text-[10px]">{t('pressureShort')}</span>
-          </StudioToolSlot>
-          <StudioToolSlot
-            active={brush.palmRejection}
-            onClick={() => updateBrush({ palmRejection: !brush.palmRejection })}
-            title={t('palmTitle')}
-          >
-            <Hand className="w-3 h-3" />
-            <span className="text-[10px]">{t('palmShort')}</span>
-          </StudioToolSlot>
-        </div>
-
-        <div className="flex gap-1.5">
-          <button
-            type="button"
-            onClick={onUndo}
-            disabled={!canUndo}
-            className="flex-1 py-1.5 px-2 rounded-lg console-well border border-desk-border text-desk-text disabled:opacity-35 hover:border-desk-muted flex items-center justify-center transition-colors"
-            title={t('undoTitle')}
-          >
-            <Undo2 className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={onRedo}
-            disabled={!canRedo}
-            className="flex-1 py-1.5 px-2 rounded-lg console-well border border-desk-border text-desk-text disabled:opacity-35 hover:border-desk-muted flex items-center justify-center transition-colors"
-            title={t('redoTitle')}
-          >
-            <Redo2 className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={onClearLayer}
-            className="py-1.5 px-2.5 rounded-lg console-well border border-desk-border text-ink-vermilion hover:border-ink-vermilion flex items-center justify-center transition-colors"
-            title={t('clearLayerTitle')}
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-          {onToggleMobileLayers && (
-            <KeycapButton
-              size="sm"
-              variant="ivory"
-              onClick={onToggleMobileLayers}
-              className="lg:hidden"
-              title={t('mobileLayersTitle')}
-            >
-              <Layers className="w-3.5 h-3.5" />
-            </KeycapButton>
-          )}
-        </div>
-      </div>
     </aside>
   );
 }

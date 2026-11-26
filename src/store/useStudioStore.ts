@@ -54,6 +54,7 @@ import {
 } from '../engine/cloudSync';
 import { createBounceExerciseProject, createStarterFlipbookProject, createStarterFlipbookShellProject, hydrateStarterFlipbookProject } from '../engine/starterFlipbook';
 import { soundEngine } from '../engine/soundEngine';
+import { applyDocumentLocale, translate, translateFmt } from '../i18n/translations';
 import { timelapseRecorder } from '../engine/timelapseRecorder';
 import { loadTourProgress, saveTourProgress } from '../engine/tourConfig';
 import {
@@ -63,6 +64,7 @@ import {
 } from '../engine/deviceTierEngine';
 
 let registeredCanvasFlusher: (() => Promise<void>) | null = null;
+let inFlightCanvasFlush: Promise<void> | null = null;
 
 /** Registers active DrawWorkspace canvas flusher so frame/scene/play/export actions NEVER lose the last stroke */
 export function registerCanvasFlusher(fn: (() => Promise<void>) | null): void {
@@ -70,7 +72,23 @@ export function registerCanvasFlusher(fn: (() => Promise<void>) | null): void {
 }
 
 export function flushActiveCanvasNow(): Promise<void> {
-  return registeredCanvasFlusher ? registeredCanvasFlusher() : Promise.resolve();
+  if (!registeredCanvasFlusher) {
+    return inFlightCanvasFlush ?? Promise.resolve();
+  }
+  const currentFlush = registeredCanvasFlusher();
+  const chained = (inFlightCanvasFlush ? inFlightCanvasFlush.then(() => currentFlush) : currentFlush).finally(() => {
+    if (inFlightCanvasFlush === chained) {
+      inFlightCanvasFlush = null;
+    }
+  });
+  inFlightCanvasFlush = chained;
+  return chained;
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => {
+    void flushActiveCanvasNow();
+  });
 }
 
 /** Pure helpers to keep 2D camera keyframe indices synced when frames are inserted, deleted, or reordered */
@@ -137,7 +155,7 @@ function loadUiPrefs(): UiPrefs {
       const p = JSON.parse(raw) as Partial<UiPrefs>;
       return {
         theme: p.theme === 'day' ? 'day' : 'night',
-        locale: p.locale === 'en' ? 'en' : 'tr',
+        locale: p.locale === 'tr' ? 'tr' : p.locale ? 'en' : 'tr',
         soundEnabled: p.soundEnabled ?? true,
         lightboxDim: typeof p.lightboxDim === 'number' ? p.lightboxDim : 1,
       };
@@ -513,7 +531,7 @@ const initialTour = loadTourProgress();
 soundEngine.setEnabled(initialPrefs.soundEnabled);
 if (typeof document !== 'undefined') {
   document.documentElement.setAttribute('data-theme', initialPrefs.theme);
-  document.documentElement.setAttribute('lang', initialPrefs.locale);
+  applyDocumentLocale(initialPrefs.locale);
 }
 
 let starterHydrationPromise: Promise<void> | null = null;
@@ -676,6 +694,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (createdShell && initialMode !== 'desk') {
       void get().ensureStarterProjectHydrated();
     }
+    if (initialMode === 'puppet') {
+      const hasRig = (first?.meshRigs?.length ?? 0) > 0 || (first?.rigs?.length ?? 0) > 0;
+      if (!hasRig) void get().openSampleMeshPuppetDemo();
+    } else if (initialMode === 'film') {
+      if (!first?.filmGraph) void get().openFilmDirectorDemo();
+    }
 
     // Non-blocking first-party cloud session check (zero delay for guests or offline devices)
 
@@ -685,25 +709,19 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         cloudApiAvailable: res.apiAvailable,
       });
       if (authErrorParam) {
-        const isEn = get().locale === 'en';
+        const loc = get().locale;
         const msgMap: Record<string, string> = {
-          google_not_configured: isEn
-            ? 'Google Sign-In is almost ready — use Email & Password for now.'
-            : 'Google ile giriş anahtarları bekleniyor — şimdilik e-posta/şifre ile girebilirsin.',
-          google_cancelled: isEn ? 'Google sign-in was cancelled.' : 'Google girişi iptal edildi.',
-          google_state_invalid: isEn ? 'Sign-in session expired, please try again.' : 'Giriş oturumu zaman aşımına uğradı, tekrar dene.',
+          google_not_configured: translate(loc, 'storeGooglePendingErr'),
+          google_cancelled: translate(loc, 'storeGoogleCancelledErr'),
+          google_state_invalid: translate(loc, 'storeGoogleExpiredErr'),
         };
-        get().notify(
-          msgMap[authErrorParam] || (isEn ? 'Could not complete Google sign-in.' : 'Google girişi tamamlanamadı, tekrar dene.'),
-          'error'
-        );
+        get().notify(msgMap[authErrorParam] || translate(loc, 'storeGoogleFailedErr'), 'error');
       }
       if (res.user) {
         await get().completeCloudSignIn(res.user, res.googleEnabled);
         if (authStatusParam === 'ok') {
-          const isEn = get().locale === 'en';
           get().notify(
-            isEn ? `Signed in with Google (${res.user.email})` : `Google ile giriş yapıldı (${res.user.email})`,
+            translateFmt(get().locale, 'storeGoogleSignedInToast', { email: res.user.email }),
             'ok'
           );
         }
@@ -715,7 +733,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   closeAccountModal: () => set({ accountModalOpen: false }),
 
   completeCloudSignIn: async (user, googleEnabled) => {
-    void flushActiveCanvasNow();
+    await flushActiveCanvasNow();
     if (cloudSyncTimer) {
       clearTimeout(cloudSyncTimer);
       cloudSyncTimer = null;
@@ -810,22 +828,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         cloudBlobBytes: totalBlobBytes,
       });
       if (!silent) {
-        get().notify(
-          get().locale === 'en' ? 'Cloud vault synced!' : 'Bulut kasası senkronize edildi!',
-          'ok'
-        );
+        get().notify(translate(get().locale, 'storeVaultSyncedToast'), 'ok');
       }
     } catch {
       set({
         cloudSyncStatus: typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'error',
       });
       if (!silent) {
-        get().notify(
-          get().locale === 'en'
-            ? 'Sync failed — your drawings remain safely saved locally.'
-            : 'Senkronizasyon başarısız — çizimlerin yerelde güvende.',
-          'error'
-        );
+        get().notify(translate(get().locale, 'storeVaultSyncFailedToast'), 'error');
       }
     }
   },
@@ -867,12 +877,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       set({ guestImportableCount: 0 });
     }
 
-    get().notify(
-      get().locale === 'en'
-        ? `${toAdd.length} local notebook(s) imported into your cloud vault!`
-        : `${toAdd.length} misafir defteri özel bulut kasana aktarıldı!`,
-      'ok'
-    );
+    get().notify(translateFmt(get().locale, 'storeGuestImportedToast', { count: toAdd.length }), 'ok');
     return toAdd.length;
   },
 
@@ -919,12 +924,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       playbackFrameIndex: null,
     });
 
-    get().notify(
-      get().locale === 'en'
-        ? 'Signed out — account cache cleared from this device.'
-        : 'Çıkış yapıldı — bu cihazdaki hesap önbelleği temizlendi.',
-      'info'
-    );
+    get().notify(translate(get().locale, 'storeSignedOutToast'), 'info');
   },
 
   permanentlyDeleteAccount: async () => {
@@ -962,12 +962,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       playbackFrameIndex: null,
     });
 
-    get().notify(
-      get().locale === 'en'
-        ? 'Account and all cloud backups permanently deleted.'
-        : 'Hesabın ve tüm bulut yedeklerin kalıcı olarak silindi.',
-      'info'
-    );
+    get().notify(translate(get().locale, 'storeDeletedAccountToast'), 'info');
   },
 
   notify: (message, tone = 'ok') => {
@@ -988,7 +983,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   },
 
   setLocale: (locale) => {
-    document.documentElement.setAttribute('lang', locale);
+    applyDocumentLocale(locale);
     const { theme, soundEnabled, lightboxDim } = get();
     saveUiPrefs({ theme, locale, soundEnabled, lightboxDim });
     set({ locale });
@@ -1018,24 +1013,39 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (get().mode === 'draw' && mode !== 'draw') {
       void flushActiveCanvasNow();
     }
-    if (mode !== 'desk') {
-      const active = get().projects.find((p) => p.id === get().activeProjectId);
-      if (active?.starterPendingHydration) {
-        void get().ensureStarterProjectHydrated();
-      }
+    const active = get().projects.find((p) => p.id === get().activeProjectId) ?? get().projects[0];
+    if (mode !== 'desk' && active?.starterPendingHydration) {
+      void get().ensureStarterProjectHydrated();
     }
     set({
       mode,
+      activeProjectId: active?.id ?? get().activeProjectId,
       isPlaying: false,
       playbackFrameIndex: null,
       filmExportOpen: false,
       puppetExportOpen: false,
       zenMode: mode === 'draw' ? get().zenMode : false,
     });
+    if (mode === 'puppet') {
+      const hasAnyRig = (active?.meshRigs?.length ?? 0) > 0 || (active?.rigs?.length ?? 0) > 0;
+      if (!hasAnyRig) {
+        void get().openSampleMeshPuppetDemo();
+      }
+    } else if (mode === 'film') {
+      if (!active?.filmGraph) {
+        void get().openFilmDirectorDemo();
+      }
+    }
   },
   setExportOpen: (open) => {
     if (open) {
-      void flushActiveCanvasNow();
+      set({ isPlaying: false, playbackFrameIndex: null });
+      if (registeredCanvasFlusher) {
+        void Promise.all([flushActiveCanvasNow(), get().ensureStarterProjectHydrated()]).then(() => {
+          set({ exportOpen: true });
+        });
+        return;
+      }
       void get().ensureStarterProjectHydrated();
     }
     set({ exportOpen: open, isPlaying: false, playbackFrameIndex: null });
@@ -1044,11 +1054,21 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     set({ filmExportOpen: open });
   },
   setPuppetExportOpen: (open) => {
+    if (open) {
+      const active = get().projects.find((p) => p.id === get().activeProjectId);
+      const hasAnyRig = (active?.meshRigs?.length ?? 0) > 0 || (active?.rigs?.length ?? 0) > 0;
+      if (!hasAnyRig) {
+        get().notify(translate(get().locale, 'puppetNeedRigBeforeExport'), 'info');
+        set({ puppetExportOpen: false });
+        return;
+      }
+    }
     set({ puppetExportOpen: open });
   },
   clearPendingSamplePaper: () => set({ pendingSamplePaper: false }),
 
   startTour: async (targetMode) => {
+    await flushActiveCanvasNow();
     const dest = targetMode ?? get().mode;
     const prev = get();
     saveTourProgress({ completed: prev.completedTours, guideSeen: true });
@@ -1059,27 +1079,34 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       exportOpen: false,
       filmExportOpen: false,
       puppetExportOpen: false,
+      zenMode: false,
+      isPlaying: false,
+      playbackFrameIndex: null,
       toast: null,
     });
 
-    if (dest !== get().mode) {
-      if (dest === 'desk') {
-        get().setMode('desk');
-      } else if (dest === 'puppet') {
-        await get().openSampleMeshPuppetDemo();
-      } else if (dest === 'film') {
-        await get().openFilmDirectorDemo();
-      } else if (dest === 'paper') {
-        const cur = get().projects.find((p) => p.id === get().activeProjectId) ?? get().projects[0];
-        if (cur) get().openProject(cur.id, 'paper');
-        else get().openSamplePaperDemo();
-      } else if (dest === 'draw') {
-        const cur = get().projects.find((p) => p.id === get().activeProjectId) ?? get().projects[0];
-        if (cur) get().openProject(cur.id, 'draw');
-        else get().openOrCreateBlankProject('', '16:9', 12);
+    if (dest === 'desk') {
+      if (get().mode !== 'desk') get().setMode('desk');
+    } else if (dest === 'puppet') {
+      await get().openSampleMeshPuppetDemo();
+    } else if (dest === 'film') {
+      await get().openFilmDirectorDemo();
+    } else if (dest === 'paper') {
+      const cur = get().projects.find((p) => p.id === get().activeProjectId) ?? get().projects[0];
+      if (cur) {
+        if (get().mode !== 'paper') get().openProject(cur.id, 'paper');
+      } else {
+        get().openSamplePaperDemo();
+      }
+    } else if (dest === 'draw') {
+      const cur = get().projects.find((p) => p.id === get().activeProjectId) ?? get().projects[0];
+      if (cur) {
+        if (get().mode !== 'draw') get().openProject(cur.id, 'draw');
+      } else {
+        get().openOrCreateBlankProject('', '16:9', 12);
       }
     }
-    set({ activeTourMode: dest });
+    set({ activeTourMode: dest, zenMode: false, toast: null });
   },
 
   stopTour: () => set({ activeTourMode: null }),
@@ -1147,10 +1174,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               fromId: cur.autoSwitchedLayer?.fromId ?? curLayer.id,
               toId: rough.id,
             };
-            autoToast =
-              cur.locale === 'en'
-                ? 'Switched to Rough (Blue) layer — hide in one tap on export'
-                : 'Eskiz (Mavi) katmanına geçildi — dışa aktarmada tek tuşla gizlenebilir';
+            autoToast = translate(cur.locale, 'storeSwitchedRoughToast');
           }
         } else if (
           patch.tool === 'bucket' &&
@@ -1164,10 +1188,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               fromId: cur.autoSwitchedLayer?.fromId ?? curLayer.id,
               toId: colorLayer.id,
             };
-            autoToast =
-              cur.locale === 'en'
-                ? 'Switched to Color layer — fills cleanly underneath your ink lines'
-                : 'Boya katmanına geçildi — çizgilerinin altı tertemiz boyanır';
+            autoToast = translate(cur.locale, 'storeSwitchedColorToast');
           }
         } else if (
           (patch.tool === 'gpen' ||
@@ -1247,7 +1268,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       cameraKeyframes: [],
       atmosphere: 'none',
     };
-    const defaultTitle = get().locale === 'en' ? 'New Animation' : 'Yeni Çizgi Film';
+    const defaultTitle = translate(get().locale, 'deskNewAnimationName');
     const project: StudioProject = {
       id: makeId('prj'),
       name: name.trim() || defaultTitle,
@@ -1422,7 +1443,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   openSamplePaperDemo: () => {
     let target = get().projects.find((p) => p.id === get().activeProjectId) ?? get().projects[0];
     if (!target) {
-      target = get().createProject('Örnek Kağıt Tarama', '16:9', 12);
+      target = get().createProject(translate(get().locale, 'storeSamplePaperName'), '16:9', 12);
     }
     set({
       activeProjectId: target.id,
@@ -1433,9 +1454,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   },
 
   openSampleMeshPuppetDemo: async () => {
+    await flushActiveCanvasNow();
     let target = get().projects.find((p) => p.id === get().activeProjectId) ?? get().projects[0];
     if (!target) {
-      const title = get().locale === 'en' ? 'My Live Puppet' : 'Canlı Kuklam';
+      const title = translate(get().locale, 'storeMyLivePuppetName');
       target = get().createProject(title, '16:9', 12);
     }
     const hasAnyRig = (target.meshRigs?.length ?? 0) > 0;
@@ -1458,11 +1480,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         mode: 'puppet',
         isPlaying: false,
       });
-      get().notify(
-        get().locale === 'en'
-          ? 'Live puppet ready — drag any pin, pick a move, or make it talk!'
-          : 'Canlı kukla hazır — pimleri sürükle, hareket seç veya konuştur!'
-      );
+      get().notify(translate(get().locale, 'storeLivePuppetReadyToast'));
     } else {
       set({ activeProjectId: target.id, mode: 'puppet', isPlaying: false });
     }
@@ -1470,8 +1488,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
   openBounceExerciseTemplate: async () => {
     const locale = get().locale;
-    const title =
-      locale === 'en' ? '12-Frame Bouncing Ball Drill' : '12 Kare Zıplayan Top Egzersizi';
+    const title = translate(locale, 'storeBounceDrillName');
     const existing = get().projects.find((p) => p.name === title);
     if (existing) {
       const ink =
@@ -1501,17 +1518,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       isPlaying: false,
       guides: { ...s.guides, enabled: true, underlay: 'bounce' },
     }));
-    get().notify(
-      locale === 'en'
-        ? '12-Frame Bounce guide enabled — trace each numbered oval!'
-        : '12 Kare Zıplama kılavuzu açıldı — numaralı daireleri takip ederek çiz!'
-    );
+    get().notify(translate(locale, 'storeBounceGuideToast'));
   },
 
   openFilmDirectorDemo: async () => {
+    await flushActiveCanvasNow();
     let target = get().projects.find((p) => p.id === get().activeProjectId) ?? get().projects[0];
     if (!target) {
-      const title = get().locale === 'en' ? 'My Short Film' : 'Mini Filmim';
+      const title = translate(get().locale, 'storeMyShortFilmName');
       target = get().createProject(title, '16:9', 12);
     }
     if (!target.filmGraph) {
@@ -1540,7 +1554,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   commitDeskSketchToProject: async (sketchCanvas, frameIndex) => {
     let target = get().projects[0];
     if (!target) {
-      target = get().createProject('İlk Çizimim', '16:9', 12);
+      target = get().createProject(translate(get().locale, 'storeFirstSketchName'), '16:9', 12);
     }
     const safeIdx = Math.max(0, Math.min(target.frames.length - 1, frameIndex));
     const frame = target.frames[safeIdx];
@@ -1613,18 +1627,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       isPlaying: false,
     });
     const locale = get().locale;
-    get().notify(
-      locale === 'en'
-        ? `Your sketch was inked onto Frame #${safeIdx + 1} — keep animating!`
-        : `Çizimin Kare #${safeIdx + 1} mürekkep katmanına işlendi — devam edebilirsin!`
-    );
+    get().notify(translateFmt(locale, 'storeInkedFrameToast', { num: safeIdx + 1 }));
   },
 
   commitDeskSketchToStudio: async (sketchCanvas, destination, title) => {
     const locale = get().locale;
-    const defaultTitle =
-      title?.trim() ||
-      (locale === 'en' ? 'My Live Sketch' : 'Canlı Çizimim');
+    const defaultTitle = title?.trim() || translate(locale, 'storeMyLiveSketchName');
 
     // Crop sketch tightly around drawn pixels with generous margin for puppet/film actors
     if (destination === 'draw') {
@@ -1673,11 +1681,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         mode: 'draw',
         isPlaying: false,
       });
-      get().notify(
-        locale === 'en'
-          ? 'Your sketch opened on the drawing desk!'
-          : 'Çizimin çizim masasına açıldı — devam edebilirsin!'
-      );
+      get().notify(translate(locale, 'storeOpenedDrawToast'));
       return;
     }
 
@@ -1729,11 +1733,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         mode: 'puppet',
         isPlaying: false,
       });
-      get().notify(
-        locale === 'en'
-          ? 'Your sketch is live with anatomical 2-bone joints!'
-          : 'Çizimin otomatik eklemlerle canlı kukla olarak hazır!'
-      );
+      get().notify(translate(locale, 'storeOpenedPuppetToast'));
       return;
     }
 
@@ -1766,11 +1766,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       mode: 'film',
       isPlaying: false,
     });
-    get().notify(
-      locale === 'en'
-        ? 'Your sketch is starring in the rainy mini film!'
-        : 'Çizimin yağmurlu mini filmin başrolünde — oynat veya yönet!'
-    );
+    get().notify(translate(locale, 'storeOpenedFilmToast'));
   },
 
   addScene: (name) => {
@@ -1781,7 +1777,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     const norm = normalizeProject(p);
     const scList = norm.scenes ?? [];
     const newFrame = createBlankFrame();
-    const prefix = get().locale === 'en' ? 'Scene' : 'Sahne';
+    const prefix = translate(get().locale, 'storeSceneWord');
     const newSc: StudioScene = {
       id: makeId('scn'),
       name: name?.trim() || `${prefix} ${scList.length + 1}`,
@@ -2086,7 +2082,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     const pid = get().activeProjectId;
     let targetProject = get().projects.find((x) => x.id === pid);
     if (!targetProject) {
-      targetProject = get().createProject('Kağıt Animasyonu', '16:9', 12);
+      targetProject = get().createProject(translate(get().locale, 'storePaperAnimName'), '16:9', 12);
     }
 
     const newFrames: CelFrame[] = [];
@@ -2497,10 +2493,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     const locale = get().locale;
     const replace = options?.replace ?? false;
-    const notePrefix = options?.notePrefix ?? (locale === 'en' ? 'Film Shot' : 'Film Planı');
-    const layerName = options?.layerName ?? (locale === 'en' ? 'Film Scene' : 'Film Sahnesi');
+    const notePrefix = options?.notePrefix ?? translate(locale, 'storeFilmShotNotePrefix');
+    const layerName = options?.layerName ?? translate(locale, 'filmLayerSceneName');
     const topLayerName =
-      options?.topLayerName ?? (locale === 'en' ? 'Top Ink (Effects)' : 'Üst Çizim (Efekt)');
+      options?.topLayerName ?? translate(locale, 'filmLayerTopEffects');
 
     // Reuse 1 single main canvas + 1 thumbnail canvas (zero 132 MB RAM spike!)
     const workCanvas = document.createElement('canvas');

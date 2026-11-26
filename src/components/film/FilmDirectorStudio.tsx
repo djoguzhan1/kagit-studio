@@ -33,7 +33,9 @@ import {
   X,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
-import { useT } from '../../i18n/translations';
+import { localizeActorName, localizeProjectName, localizeSceneOrNote, useT, useTFmt, type TranslationKey } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
+import { useModalA11y } from '../../hooks/useModalA11y';
 import type {
   CinemaLookId,
   FilmActionId,
@@ -81,7 +83,6 @@ import CharacterMasterModal from '../rig/CharacterMasterModal';
 import { FilmFoleyEngine } from '../../engine/filmFoleyEngine';
 import {
   onSampleHeroReady,
-  SAMPLE_HERO_NAME_EN,
   SAMPLE_HERO_NAME_TR,
 } from '../../engine/sampleHeroAsset';
 import {
@@ -138,6 +139,7 @@ const MAX_UNDO_HISTORY = 30;
 
 export default function FilmDirectorStudio() {
   const t = useT();
+  const tf = useTFmt();
   const {
     projects,
     activeProjectId,
@@ -257,7 +259,7 @@ export default function FilmDirectorStudio() {
   );
 
   // Core Director UI State
-  const [promptDraft, setPromptDraft] = useState(graph.prompt);
+  const [promptDraft, setPromptDraft] = useState(() => localizeSceneOrNote(graph.prompt, locale));
   const [revisionDraft, setRevisionDraft] = useState('');
   const [selectedShotIdx, setSelectedShotIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -266,7 +268,7 @@ export default function FilmDirectorStudio() {
   const [showGizmos, setShowGizmos] = useState(false);
   const [soundOn, setSoundOn] = useState(graph.foleyEnabled);
   const [musicOn, setMusicOn] = useState(graph.musicBedEnabled);
-  const [leftTab, setLeftTab] = useState<'story' | 'stage' | 'look'>('story');
+  const [leftTab, setLeftTab] = useState<'story' | 'stage' | 'look' | 'inspector'>('story');
   const [rightTab, setRightTab] = useState<'acting' | 'camera'>('acting');
   const [cameraFineOpen, setCameraFineOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -278,6 +280,21 @@ export default function FilmDirectorStudio() {
 
   // Export & Baking State
   const [exportingKind, setExportingKind] = useState<null | 'video' | 'gif' | 'draw'>(null);
+  const activeTourMode = useStudioStore((st) => st.activeTourMode);
+  useEffect(() => {
+    if (activeTourMode === 'film' && leftTab !== 'story') {
+      setLeftTab('story');
+    }
+  }, [activeTourMode, leftTab]);
+  useEffect(() => {
+    setPromptDraft((cur) => localizeSceneOrNote(cur, locale));
+  }, [locale]);
+  const filmExportDialogRef = useModalA11y<HTMLDivElement>({
+    open: filmExportOpen,
+    onClose: () => setFilmExportOpen(false),
+    closeDisabled: Boolean(exportingKind),
+    modal: true,
+  });
   const [exportPct, setExportPct] = useState(0);
   const [exportLabel, setExportLabel] = useState('');
   const exportAbortRef = useRef(false);
@@ -386,8 +403,8 @@ export default function FilmDirectorStudio() {
 
   // Sync promptDraft when active project or prompt changes externally
   useEffect(() => {
-    setPromptDraft(graph.prompt);
-  }, [project?.id, graph.prompt]);
+    setPromptDraft(localizeSceneOrNote(graph.prompt, locale));
+  }, [project?.id, graph.prompt, locale]);
 
   // Persist initial default filmGraph if project opened straight into film mode
   useEffect(() => {
@@ -725,7 +742,7 @@ export default function FilmDirectorStudio() {
       const lp = projectWorldToScreen(activeShot.lookAt.x, activeShot.lookAt.y, cam, canvas.width, canvas.height);
       if (Math.hypot(sx - lp.x, sy - lp.y) < hitRadius) {
         dragTargetRef.current = { kind: 'lookAt' };
-        e.currentTarget.setPointerCapture(e.pointerId);
+        safeSetPointerCapture(e.currentTarget, e.pointerId);
         return;
       }
     }
@@ -740,7 +757,7 @@ export default function FilmDirectorStudio() {
       );
       if (Math.hypot(sx - sp.x, sy - sp.y) < hitRadius) {
         dragTargetRef.current = { kind: 'waypoint', idx: i };
-        e.currentTarget.setPointerCapture(e.pointerId);
+        safeSetPointerCapture(e.currentTarget, e.pointerId);
         return;
       }
     }
@@ -814,7 +831,7 @@ export default function FilmDirectorStudio() {
       if (!forcePresetWorld) {
         const aiRes = await requestAiDirectedFilm({
           prompt: text,
-          locale: locale === 'en' ? 'en' : 'tr',
+          locale,
           actors: cast.map((a) => ({
             id: a.id,
             name: a.name,
@@ -834,13 +851,9 @@ export default function FilmDirectorStudio() {
       setGlobalSec(0);
       soundEngine.clapperSnap();
       notify(
-        locale === 'en'
-          ? directedViaAi
-            ? `AI Director staged ${next.shots.length} shots for ${cast.length} actor(s)!`
-            : `Story directed into ${next.shots.length} shots!`
-          : directedViaAi
-            ? `Yönetmen ${cast.length} oyuncu için ${next.shots.length} planlık film kurguladı!`
-            : `Hikâyen ${next.shots.length} planlık filme çevrildi!`
+        directedViaAi
+          ? tf('filmStagedMultiToast', { shots: next.shots.length, actors: cast.length })
+          : tf('filmStagedSingleToast', { shots: next.shots.length })
       );
     } finally {
       setCompilingRemote(false);
@@ -854,11 +867,7 @@ export default function FilmDirectorStudio() {
     patchActiveShot((sh) => patchShotFromRevisionPrompt(sh, clean));
     if (!instructionText) setRevisionDraft('');
     soundEngine.click(1.12);
-    notify(
-      locale === 'en'
-        ? `Shot #${safeShotIdx + 1} updated!`
-        : `Plan #${safeShotIdx + 1} tarifine göre güncellendi!`
-    );
+    notify(tf('filmShotUpdatedToast', { num: safeShotIdx + 1 }));
   };
 
   // --- V4 1..6 Cast Helpers (Multi-File Batch Add!) & 2.5D Master Modal ---
@@ -913,7 +922,7 @@ export default function FilmDirectorStudio() {
         }
       }
       if (added.length === 0) {
-        notify(locale === 'en' ? 'Could not read drawing' : 'Çizim okunamadı', 'error');
+        notify(t('filmErrReadDrawing'), 'error');
         return;
       }
       const nextCast = [...cast, ...added];
@@ -922,15 +931,11 @@ export default function FilmDirectorStudio() {
       soundEngine.clapperSnap();
       notify(
         added.length === 1
-          ? locale === 'en'
-            ? `"${added[0].name}" joined the cast (${nextCast.length}/6)!`
-            : `"${added[0].name}" oyuncu kadrosuna katıldı (${nextCast.length}/6)!`
-          : locale === 'en'
-            ? `${added.length} actors joined the cast (${nextCast.length}/6)!`
-            : `${added.length} oyuncu kadroya katıldı (${nextCast.length}/6)!`
+          ? tf('filmActorJoinedOne', { name: localizeActorName(added[0].name, locale), total: nextCast.length })
+          : tf('filmActorJoinedMany', { count: added.length, total: nextCast.length })
       );
     } catch {
-      notify(locale === 'en' ? 'Could not read drawing' : 'Çizim okunamadı', 'error');
+      notify(t('filmErrReadDrawing'), 'error');
     }
   };
 
@@ -990,11 +995,7 @@ export default function FilmDirectorStudio() {
     setMasterModalInitialRig(saved);
     setAssetVersion((v) => v + 1);
     const vc = countRigViews(saved);
-    notify(
-      locale === 'en'
-        ? `"${selectedActor.name}" updated (${vc}/4 2.5D angles)`
-        : `"${selectedActor.name}" güncellendi (${vc}/4 2.5D açı)`
-    );
+    notify(tf('filmActorAnglesUpdated', { name: localizeActorName(selectedActor.name, locale), count: vc }));
   };
 
   const patchSelectedActorInShot = (patch: {
@@ -1076,18 +1077,10 @@ export default function FilmDirectorStudio() {
       });
       soundEngine.shutter();
       const extraClean =
-        prepared.isolatedPrimary || prepared.cleanedPockets > 0
-          ? locale === 'en'
-            ? ' (shadows, corners & gaps auto-cleaned!)'
-            : ' (gölge, imza ve kapalı boşluklar otomatik temizlendi!)'
-          : '';
-      notify(
-        locale === 'en'
-          ? `Drawing extracted & rigged on stage${extraClean}`
-          : `Çizimin kağıttan ayıklanıp hareketli oyuncu olarak sahneye alındı${extraClean}`
-      );
+        prepared.isolatedPrimary || prepared.cleanedPockets > 0 ? t('filmCleanExtraNote') : '';
+      notify(tf('filmExtractedOnStage', { extra: extraClean }));
     } catch {
-      notify(locale === 'en' ? 'Could not read image' : 'Görsel okunamadı', 'error');
+      notify(t('filmErrReadImage'), 'error');
     } finally {
       if (actorFileRef.current) actorFileRef.current.value = '';
     }
@@ -1110,7 +1103,7 @@ export default function FilmDirectorStudio() {
       ...graph,
       actor: {
         ...graph.actor,
-        name: `${project.name} #${activeFrameIndex + 1}`,
+        name: `${localizeProjectName(project.name, locale)} #${activeFrameIndex + 1}`,
         sourceBlobKey: key,
         sourceW: prepared.width,
         sourceH: prepared.height,
@@ -1121,11 +1114,7 @@ export default function FilmDirectorStudio() {
       },
     });
     soundEngine.clapperSnap();
-    notify(
-      locale === 'en'
-        ? 'Active drawing cropped & rigged onto the film stage!'
-        : 'Aktif çizimin kırpılıp hareketli oyuncu olarak sahneye getirildi!'
-    );
+    notify(t('filmActiveCroppedToast'));
   };
 
   const handleRestoreDefaultHero = () => {
@@ -1134,7 +1123,7 @@ export default function FilmDirectorStudio() {
       ...graph,
       actor: {
         ...graph.actor,
-        name: locale === 'en' ? SAMPLE_HERO_NAME_EN : SAMPLE_HERO_NAME_TR,
+        name: localizeActorName(SAMPLE_HERO_NAME_TR, locale),
         sourceBlobKey: null,
         sourceW: hero.width,
         sourceH: hero.height,
@@ -1163,16 +1152,9 @@ export default function FilmDirectorStudio() {
         },
       });
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en'
-          ? `Character split into ${rig.parts.length} movable limbs!`
-          : `Karakterin ${rig.parts.length} hareketli parçaya ayrıldı!`
-      );
+      notify(tf('filmLimbsSplitToast', { count: rig.parts.length }));
     } catch {
-      notify(
-        locale === 'en' ? 'Could not split limbs' : 'Karakter parçalara ayrılamadı',
-        'error'
-      );
+      notify(t('filmErrSplitLimbs'), 'error');
     } finally {
       setDecomposingActor(false);
     }
@@ -1206,13 +1188,9 @@ export default function FilmDirectorStudio() {
         },
       });
       soundEngine.shutter();
-      notify(
-        locale === 'en'
-          ? 'Custom background sliced into 5 depth layers!'
-          : 'Arka planın 5 derinlik katmanına ayrıldı!'
-      );
+      notify(t('filmBgSlicedToast'));
     } catch {
-      notify(locale === 'en' ? 'Background upload failed' : 'Arka plan yüklenemedi', 'error');
+      notify(t('filmErrBgUpload'), 'error');
     } finally {
       setDecomposingBg(false);
       if (bgFileRef.current) bgFileRef.current.value = '';
@@ -1282,14 +1260,9 @@ export default function FilmDirectorStudio() {
       setCloudStatus(status);
       if (status.online) {
         soundEngine.toggle(true);
-        notify(locale === 'en' ? 'Local accelerator connected!' : 'Yerel hızlandırıcı bağlandı!');
+        notify(t('filmLocalAccelOk'));
       } else {
-        notify(
-          locale === 'en'
-            ? 'No local server detected — free browser mode works great!'
-            : 'Yerel sunucu bulunamadı — ücretsiz tarayıcı modu tam güç çalışıyor!',
-          'info'
-        );
+        notify(t('filmLocalAccelNone'), 'info');
       }
     } finally {
       setPingingCloud(false);
@@ -1300,9 +1273,9 @@ export default function FilmDirectorStudio() {
     try {
       const fname = await exportKagit25dPackage(graph, project?.name || 'inktrope_film');
       soundEngine.click(1.1);
-      notify(locale === 'en' ? `Film package saved: ${fname}` : `Film paketi indirildi: ${fname}`);
+      notify(tf('filmPkgSavedToast', { name: fname }));
     } catch {
-      notify(locale === 'en' ? 'Package export failed' : 'Paket oluşturulamadı', 'error');
+      notify(t('filmErrPkgExport'), 'error');
     }
   };
 
@@ -1316,9 +1289,9 @@ export default function FilmDirectorStudio() {
       setSelectedShotIdx(0);
       setGlobalSec(0);
       soundEngine.clapperSnap();
-      notify(locale === 'en' ? 'Film package loaded!' : 'Film paketi yüklendi!');
+      notify(t('filmPkgLoadedToast'));
     } catch (err) {
-      notify(err instanceof Error ? err.message : 'Paket okunamadı', 'error');
+      notify(err instanceof Error ? err.message : t('filmErrPkgRead'), 'error');
     } finally {
       if (pkgImportRef.current) pkgImportRef.current.value = '';
     }
@@ -1370,14 +1343,10 @@ export default function FilmDirectorStudio() {
           durationSec: Math.max(sh.durationSec, Math.min(6.5, track.durationSec)),
         }));
         soundEngine.clapperSnap();
-        notify(
-          locale === 'en'
-            ? `Voice lip-sync ready (${track.durationSec}s)!`
-            : `Sesli dudak senkronu hazır (${track.durationSec}s)!`
-        );
+        notify(tf('filmVoiceLipReady', { sec: track.durationSec }));
       }
     } catch {
-      notify(locale === 'en' ? 'Could not analyze recording' : 'Ses kaydı işlenemedi', 'error');
+      notify(t('filmErrVoiceAnalyze'), 'error');
     } finally {
       voiceRecRef.current = null;
       setAnalyzingVoice(false);
@@ -1391,12 +1360,7 @@ export default function FilmDirectorStudio() {
     }
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      notify(
-        locale === 'en'
-          ? 'Microphone unavailable — use Upload Voice or Speak Line.'
-          : 'Mikrofon desteklenmiyor — Ses Yükle veya Karakteri Konuştur kullanabilirsin.',
-        'info'
-      );
+      notify(t('filmMicUnavailableInfo'), 'info');
       return;
     }
 
@@ -1452,10 +1416,7 @@ export default function FilmDirectorStudio() {
       voiceRafRef.current = requestAnimationFrame(monitor);
     } catch {
       stopMicVoiceResources();
-      notify(
-        locale === 'en' ? 'Microphone permission denied' : 'Mikrofon izni verilmedi',
-        'error'
-      );
+      notify(t('filmMicDeniedErr'), 'error');
     }
   };
 
@@ -1477,13 +1438,9 @@ export default function FilmDirectorStudio() {
         durationSec: Math.max(sh.durationSec, Math.min(6.5, track.durationSec)),
       }));
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en'
-          ? `Audio lip-sync ready (${track.durationSec}s)!`
-          : `Ses yüklendi ve dudak senkronu hazır (${track.durationSec}s)!`
-      );
+      notify(tf('filmAudioLipReady', { sec: track.durationSec }));
     } catch {
-      notify(locale === 'en' ? 'Audio file could not be read' : 'Ses dosyası okunamadı', 'error');
+      notify(t('filmErrAudioRead'), 'error');
     } finally {
       setAnalyzingVoice(false);
       if (voiceFileRef.current) voiceFileRef.current.value = '';
@@ -1495,12 +1452,7 @@ export default function FilmDirectorStudio() {
     if (synthesizingVoice) return;
     const text = activeShot.dialogue.trim();
     if (!text) {
-      notify(
-        locale === 'en'
-          ? 'Type a dialogue line for your character first'
-          : 'Önce karakterin söyleyeceği repliği yaz',
-        'info'
-      );
+      notify(t('filmTypeLineFirst'), 'info');
       return;
     }
     setSynthesizingVoice(true);
@@ -1549,13 +1501,9 @@ export default function FilmDirectorStudio() {
         durationSec: Math.max(sh.durationSec, Math.min(6.5, track.durationSec + 0.25)),
       }));
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en'
-          ? `Character voice & lip-sync ready (${track.durationSec}s)!`
-          : `Karakter sesi ve dudak senkronu hazır (${track.durationSec}s)!`
-      );
+      notify(tf('filmSynthReadyToast', { sec: track.durationSec }));
     } catch {
-      notify(locale === 'en' ? 'Could not create voice' : 'Seslendirme oluşturulamadı', 'error');
+      notify(t('filmErrSynthVoice'), 'error');
     } finally {
       setSynthesizingVoice(false);
     }
@@ -1636,13 +1584,13 @@ export default function FilmDirectorStudio() {
           },
         });
         if (exportAbortRef.current) {
-          notify(locale === 'en' ? 'Export cancelled' : 'İndirme iptal edildi', 'info');
+          notify(t('filmExportCancelled'), 'info');
           return;
         }
         if (mp4Blob) {
           triggerDownload(mp4Blob, `${safeName}_film.mp4`);
           soundEngine.clapperSnap();
-          notify(locale === 'en' ? 'HD MP4 film downloaded!' : 'HD MP4 film indirildi!');
+          notify(t('filmMp4Downloaded'));
           setFilmExportOpen(false);
           return;
         }
@@ -1746,7 +1694,7 @@ export default function FilmDirectorStudio() {
       await stopped;
 
       if (exportAbortRef.current) {
-        notify(locale === 'en' ? 'Export cancelled' : 'İndirme iptal edildi', 'info');
+        notify(t('filmExportCancelled'), 'info');
         return;
       }
 
@@ -1759,7 +1707,7 @@ export default function FilmDirectorStudio() {
           const mp4Blob = await transcodeBroadcastMp4Remote(cloudStatus.url, rawBlob, ext);
           triggerDownload(mp4Blob, `${safeName}_film.mp4`);
           soundEngine.clapperSnap();
-          notify(locale === 'en' ? 'HD MP4 film downloaded!' : 'HD MP4 film indirildi!');
+          notify(t('filmMp4Downloaded'));
           setFilmExportOpen(false);
           return;
         } catch {
@@ -1769,10 +1717,10 @@ export default function FilmDirectorStudio() {
 
       triggerDownload(rawBlob, `${safeName}_film.${ext}`);
       soundEngine.clapperSnap();
-      notify(locale === 'en' ? 'Short film video downloaded!' : 'Sesli mini filmin indirildi!');
+      notify(t('filmVideoDownloaded'));
       setFilmExportOpen(false);
     } catch {
-      notify(locale === 'en' ? 'Video export failed' : 'Film dışa aktarılamadı', 'error');
+      notify(t('filmErrVideoExport'), 'error');
     } finally {
       exportFoley?.dispose();
       setExportingKind(null);
@@ -1821,7 +1769,7 @@ export default function FilmDirectorStudio() {
 
       if (exportAbortRef.current) return;
       setExportPct(78);
-      setExportLabel(locale === 'en' ? 'Packing GIF…' : 'GIF paketleniyor…');
+      setExportLabel(t('filmPackingGif'));
       const gifBlob = await runGifEncode({
         width: W,
         height: H,
@@ -1831,10 +1779,10 @@ export default function FilmDirectorStudio() {
       const safeName = (project?.name || 'inktrope_film').replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_');
       triggerDownload(gifBlob, `${safeName}_film.gif`);
       soundEngine.clapperSnap();
-      notify(locale === 'en' ? 'Animated GIF downloaded!' : 'Animasyonlu GIF indirildi!');
+      notify(t('filmGifDownloaded'));
       setFilmExportOpen(false);
     } catch {
-      notify(locale === 'en' ? 'GIF export failed' : 'GIF oluşturulamadı', 'error');
+      notify(t('filmErrGifExport'), 'error');
     } finally {
       setExportingKind(null);
       setExportPct(0);
@@ -1864,7 +1812,7 @@ export default function FilmDirectorStudio() {
       if (!blob) return;
       triggerDownload(blob, `${safeName}_plan${safeShotIdx + 1}.png`);
       soundEngine.shutter();
-      notify(locale === 'en' ? 'HD PNG frame downloaded!' : 'HD film karesi indirildi!');
+      notify(t('filmPngDownloaded'));
     }, 'image/png');
   };
 
@@ -1895,8 +1843,8 @@ export default function FilmDirectorStudio() {
         {
           replace: false,
           notePrefix: `${t('filmShotWord')} ${safeShotIdx + 1}`,
-          layerName: locale === 'en' ? 'Film Scene' : 'Film Sahnesi',
-          topLayerName: locale === 'en' ? 'Top Ink (Effects)' : 'Üst Çizim (Efekt)',
+          layerName: t('filmLayerSceneName'),
+          topLayerName: t('filmLayerTopEffects'),
           onProgress: (done, total) => {
             setExportPct(Math.round((done / total) * 100));
             setExportLabel(`${t('filmSendingToDraw')}… ${done}/${total}`);
@@ -1904,13 +1852,9 @@ export default function FilmDirectorStudio() {
         }
       );
       soundEngine.clapperSnap();
-      notify(
-        locale === 'en'
-          ? `${added} film frames sent to the Draw Desk!`
-          : `${added} film karesi Çizim Masası'na aktarıldı!`
-      );
+      notify(tf('filmFramesSentDraw', { count: added }));
     } catch {
-      notify(locale === 'en' ? 'Could not transfer frames' : 'Kareler aktarılamadı', 'error');
+      notify(t('filmErrTransferFrames'), 'error');
     } finally {
       setExportingKind(null);
       setExportPct(0);
@@ -2084,15 +2028,16 @@ export default function FilmDirectorStudio() {
   return (
     <div className="flex-1 flex flex-col min-h-0 desk-surface-mat overflow-hidden">
       {/* Main 3-Column Director Console (Stage first on mobile/tablet via order!) */}
-      <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-y-auto lg:overflow-hidden">
-        {/* LEFT RAIL: 3 Actionable Zero-Dead-End Tabs (1. Story | 2. Cast & Set | 3. Cinema Look) */}
-        <aside className="order-2 lg:order-1 relative z-10 w-full lg:w-[292px] shrink-0 border-b lg:border-b-0 lg:border-r border-desk-border bg-desk-surface flex flex-col lg:overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden">
+        {/* LEFT RAIL: 3 Desktop Tabs + 4th Mobile Inspector Tab */}
+        <aside className={`order-2 lg:order-1 relative z-10 w-full lg:w-[292px] ${leftTab === 'inspector' ? 'shrink-0 lg:flex-none' : 'flex-1 min-h-0 overflow-y-auto lg:flex-none'} lg:shrink-0 border-b lg:border-b-0 lg:border-r border-desk-border bg-desk-surface flex flex-col lg:overflow-hidden`}>
           <div className="p-2 border-b border-desk-border flex items-center gap-1 shrink-0">
             {(
               [
-                { id: 'story', label: t('filmTabStory') },
-                { id: 'stage', label: t('filmTabStage') },
-                { id: 'look', label: t('filmTabLook') },
+                { id: 'story', label: t('filmTabStory'), mobileOnly: false },
+                { id: 'stage', label: t('filmTabStage'), mobileOnly: false },
+                { id: 'look', label: t('filmTabLook'), mobileOnly: false },
+                { id: 'inspector', label: t('filmTabInspectorMobile'), mobileOnly: true },
               ] as const
             ).map((tabItem) => (
               <button
@@ -2103,7 +2048,7 @@ export default function FilmDirectorStudio() {
                   soundEngine.click(1.04);
                   setLeftTab(tabItem.id);
                 }}
-                className={`flex-1 py-1.5 px-1.5 rounded-lg text-[11px] font-bold border transition-colors flex items-center justify-center gap-1 whitespace-nowrap ${
+                className={`${tabItem.mobileOnly ? 'lg:hidden ' : ''}flex-1 py-1.5 px-1.5 rounded-lg text-[11px] font-bold border transition-colors flex items-center justify-center gap-1 whitespace-nowrap ${
                   leftTab === tabItem.id
                     ? 'bg-desk-panel border-ink-brass text-desk-text shadow-sm'
                     : 'border-transparent text-desk-muted hover:text-desk-text'
@@ -2120,7 +2065,7 @@ export default function FilmDirectorStudio() {
           {/* Always-Visible Ultra-Clean Cast & 2.5D Quick Bar (Zero Tab Hunting!) */}
           <div className="px-2.5 py-2 border-b border-desk-border bg-desk-panel/45 space-y-1.5 shrink-0">
             <div className="flex items-center justify-between gap-1">
-              <span className="font-mono text-[9.5px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1">
+              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1">
                 <Palette className="w-3 h-3 shrink-0" />
                 {t('filmCastTitle')} ({castActors.length}/6)
               </span>
@@ -2129,12 +2074,8 @@ export default function FilmDirectorStudio() {
                   <button
                     type="button"
                     onClick={() => extraActorFileRef.current?.click()}
-                    title={
-                      locale === 'en'
-                        ? 'Select 1 or more character drawings at once'
-                        : '1 veya birden fazla karakter çizimini seç'
-                    }
-                    className="px-2 py-0.5 rounded-full bg-desk-surface hover:bg-desk-panel border border-desk-border hover:border-ink-brass text-[10px] font-bold text-desk-text transition-colors whitespace-nowrap"
+                    title={t('filmPickMultiDrawingsTitle')}
+                    className="px-2 py-0.5 rounded-full bg-desk-surface hover:bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-text transition-colors whitespace-nowrap"
                   >
                     {t('filmAddActorBtn')}
                   </button>
@@ -2142,7 +2083,7 @@ export default function FilmDirectorStudio() {
                 <button
                   type="button"
                   onClick={() => void handleOpenActorMasterModal()}
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold inline-flex items-center gap-1 border transition-colors whitespace-nowrap ${
+                  className={`px-2 py-0.5 rounded-full text-[11px] font-bold inline-flex items-center gap-1 border transition-colors whitespace-nowrap ${
                     countRigViews(selectedActor.masterRig) >= 3
                       ? 'bg-emerald-950/70 border-emerald-400/50 text-emerald-200'
                       : 'bg-ink-brass/15 hover:bg-ink-brass/25 border-ink-brass/50 text-ink-brass'
@@ -2172,7 +2113,7 @@ export default function FilmDirectorStudio() {
                 return (
                   <div
                     key={act.id}
-                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-bold border transition-colors shrink-0 ${
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border transition-colors shrink-0 ${
                       active
                         ? 'bg-ink-brass text-neutral-950 border-ink-brass'
                         : 'bg-desk-surface/80 border-desk-border text-desk-muted hover:text-desk-text'
@@ -2183,7 +2124,7 @@ export default function FilmDirectorStudio() {
                       onClick={() => setSelectedActorId(act.id)}
                       className="truncate max-w-[92px]"
                     >
-                      {act.name}
+                      {localizeActorName(act.name, locale)}
                       {vc >= 2 ? ` · ${vc}/4` : ''}
                     </button>
                     {act.id !== graph.actor.id && (
@@ -2191,7 +2132,7 @@ export default function FilmDirectorStudio() {
                         type="button"
                         onClick={() => handleRemoveCastActor(act.id)}
                         className="opacity-70 hover:opacity-100"
-                        aria-label="Remove"
+                        aria-label={t('v4BtnRemove')}
                       >
                         <X className="w-2.5 h-2.5" />
                       </button>
@@ -2202,17 +2143,17 @@ export default function FilmDirectorStudio() {
             </div>
           </div>
 
-          <div className="p-3 lg:flex-1 lg:overflow-y-auto space-y-3">
+          <div className={`${leftTab === 'inspector' ? 'hidden lg:block ' : ''}p-3 lg:flex-1 lg:overflow-y-auto space-y-3`}>
             {/* TAB 1: STORY & QUICK DIRECTOR REVISIONS */}
             {leftTab === 'story' && (
               <>
                 <div data-tour="film-story" className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
+                    <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
                       <Clapperboard className="w-3.5 h-3.5" />
                       {t('filmScriptHeader')}
                     </span>
-                    <span className="font-mono text-[9px] text-desk-muted">TR / EN</span>
+                    <span className="font-mono text-[11px] text-desk-muted">TR / EN</span>
                   </div>
                   <textarea
                     value={promptDraft}
@@ -2231,31 +2172,40 @@ export default function FilmDirectorStudio() {
                     <Wand2 className="w-3.5 h-3.5" />
                     {compilingRemote ? t('filmCompiling') : t('filmCompileBtn')}
                   </KeycapButton>
-                  <div className="text-[10px] text-desk-muted text-center font-medium">
+                  <div className="text-[11px] text-desk-muted text-center font-medium">
                     ✦ {t('filmDirectAiBadge')}
                   </div>
 
                   {/* 4 Ready Director Stories */}
                   <div className="pt-1 space-y-1">
-                    <span className="font-mono text-[9px] uppercase tracking-wider text-desk-muted">
+                    <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted">
                       {t('filmPresetsLabel')}
                     </span>
-                    {DIRECTOR_PRESETS.map((pr) => (
-                      <button
-                        key={pr.id}
-                        type="button"
-                        onClick={() => void handleCompilePrompt(pr.prompt, true)}
-                        className="w-full text-left px-2.5 py-1.5 rounded-lg bg-desk-panel/70 hover:bg-desk-panel border border-desk-border text-[11px] font-semibold text-desk-muted hover:text-desk-text transition-colors truncate"
-                      >
-                        ✦ {locale === 'en' ? pr.labelEn : pr.labelTr}
-                      </button>
-                    ))}
+                    {DIRECTOR_PRESETS.map((pr) => {
+                      const presetKeyMap: Record<string, TranslationKey> = {
+                        'rainy-letter': 'filmPresetRainy',
+                        'golden-hill': 'filmPresetGolden',
+                        'moonlit-forest': 'filmPresetMoonlit',
+                        'snowy-lantern': 'filmPresetSnowy',
+                      };
+                      const localizedPrompt = localizeSceneOrNote(pr.prompt, locale);
+                      return (
+                        <button
+                          key={pr.id}
+                          type="button"
+                          onClick={() => void handleCompilePrompt(localizedPrompt, true)}
+                          className="w-full text-left px-2.5 py-2 rounded-lg bg-desk-panel/70 hover:bg-desk-panel border border-desk-border text-[11px] font-semibold leading-snug text-desk-muted hover:text-desk-text transition-colors whitespace-normal"
+                        >
+                          ✦ {t(presetKeyMap[pr.id] ?? 'filmPresetRainy')}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
                 {/* 1-Sentence Surgical Shot Revision + 1-Tap Chips */}
                 <div className="pt-2.5 border-t border-desk-border space-y-2">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                     {t('filmReviseLabel')} (#{safeShotIdx + 1})
                   </span>
                   <div className="flex flex-wrap gap-1">
@@ -2272,7 +2222,7 @@ export default function FilmDirectorStudio() {
                         key={chip.cmd}
                         type="button"
                         onClick={() => handleApplyRevision(chip.cmd)}
-                        className="px-2 py-1 rounded-full bg-desk-panel/80 hover:bg-desk-panel border border-desk-border hover:border-ink-brass text-[10px] font-semibold text-desk-muted hover:text-desk-text transition-colors"
+                        className="px-2 py-1 rounded-full bg-desk-panel/80 hover:bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-semibold text-desk-muted hover:text-desk-text transition-colors"
                       >
                         + {chip.label}
                       </button>
@@ -2316,7 +2266,7 @@ export default function FilmDirectorStudio() {
                         />
                       ))}
                     </div>
-                    <span className="font-mono text-[9px] text-desk-muted ml-auto">
+                    <span className="font-mono text-[11px] text-desk-muted ml-auto">
                       {graph.actor.decomposed ? t('filmPartsReady') : t('filmSinglePiece')}
                     </span>
                   </div>
@@ -2325,7 +2275,7 @@ export default function FilmDirectorStudio() {
                     <button
                       type="button"
                       onClick={() => actorFileRef.current?.click()}
-                      className="py-1.5 px-1.5 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-vermilion text-[10px] font-bold text-desk-text inline-flex items-center justify-center gap-1"
+                      className="py-1.5 px-1.5 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-vermilion text-[11px] font-bold text-desk-text inline-flex items-center justify-center gap-1"
                     >
                       <Upload className="w-3 h-3 shrink-0" />
                       <span className="truncate">{t('filmUploadDrawing')}</span>
@@ -2333,7 +2283,7 @@ export default function FilmDirectorStudio() {
                     <button
                       type="button"
                       onClick={() => void handleUseActiveDrawingAsActor()}
-                      className={`py-1.5 px-1.5 rounded-lg border text-[10px] font-bold inline-flex items-center justify-center gap-1 ${
+                      className={`py-1.5 px-1.5 rounded-lg border text-[11px] font-bold inline-flex items-center justify-center gap-1 ${
                         hasDrawnCel
                           ? 'bg-ink-brass/15 border-ink-brass text-desk-text'
                           : 'bg-desk-panel border-desk-border hover:border-ink-brass text-desk-text'
@@ -2345,7 +2295,7 @@ export default function FilmDirectorStudio() {
                     <button
                       type="button"
                       onClick={handleRestoreDefaultHero}
-                      className="py-1.5 px-1.5 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[10px] font-bold text-desk-muted hover:text-desk-text truncate"
+                      className="py-1.5 px-1.5 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-muted hover:text-desk-text truncate"
                     >
                       {t('filmDefaultHero')}
                     </button>
@@ -2364,7 +2314,7 @@ export default function FilmDirectorStudio() {
                       type="button"
                       disabled={decomposingActor}
                       onClick={() => void handleDecomposeActor()}
-                      className="flex-1 py-1.5 px-2.5 rounded-lg bg-desk-panel border border-ink-brass/60 hover:border-ink-brass text-[10.5px] font-bold text-desk-text inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      className="flex-1 py-1.5 px-2.5 rounded-lg bg-desk-panel border border-ink-brass/60 hover:border-ink-brass text-[11px] font-bold text-desk-text inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
                     >
                       <Scissors className="w-3.5 h-3.5 text-ink-brass" />
                       {decomposingActor
@@ -2379,7 +2329,7 @@ export default function FilmDirectorStudio() {
                         onClick={() =>
                           commitGraph({ ...graph, actor: { ...graph.actor, decomposed: null } })
                         }
-                        className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border text-[10px] font-bold text-desk-muted hover:text-ink-vermilion"
+                        className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border text-[11px] font-bold text-desk-muted hover:text-ink-vermilion"
                       >
                         {t('filmSinglePiece')}
                       </button>
@@ -2388,7 +2338,7 @@ export default function FilmDirectorStudio() {
 
                   {graph.actor.decomposed && (
                     <div className="p-2 rounded-xl console-well border border-ink-emerald/40 space-y-1.5">
-                      <div className="flex items-center justify-between font-mono text-[9px] text-ink-emerald">
+                      <div className="flex items-center justify-between font-mono text-[11px] text-ink-emerald">
                         <span>● {t('filmPartsReady')}</span>
                       </div>
                       <div className="grid grid-cols-6 gap-1">
@@ -2411,7 +2361,7 @@ export default function FilmDirectorStudio() {
 
                   {/* Character Size Slider */}
                   <div className="space-y-1">
-                    <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                       <span>{t('filmActorScale')}</span>
                       <span className="text-desk-text font-bold">
                         {Math.round((graph.actor.scale ?? 1) * 100)}%
@@ -2444,7 +2394,7 @@ export default function FilmDirectorStudio() {
 
                 {/* World & Atmosphere */}
                 <div className="pt-2.5 border-t border-desk-border space-y-2">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted flex items-center gap-1.5">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted flex items-center gap-1.5">
                     <Layers className="w-3.5 h-3.5" />
                     {t('filmWorldTitle')}
                   </span>
@@ -2475,7 +2425,7 @@ export default function FilmDirectorStudio() {
                             },
                           })
                         }
-                        className={`py-1.5 px-1.5 rounded-lg text-[10.5px] font-bold border transition-colors ${
+                        className={`py-1.5 px-1.5 rounded-lg text-[11px] font-bold border transition-colors ${
                           graph.world.setId === s.id
                             ? 'bg-desk-panel border-ink-brass text-desk-text'
                             : 'bg-desk-surface/60 border-desk-border text-desk-muted hover:text-desk-text'
@@ -2491,7 +2441,7 @@ export default function FilmDirectorStudio() {
                       type="button"
                       disabled={decomposingBg}
                       onClick={() => bgFileRef.current?.click()}
-                      className="flex-1 py-1.5 px-2.5 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[10.5px] font-bold text-desk-text inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      className="flex-1 py-1.5 px-2.5 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-text inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
                     >
                       <ImageIcon className="w-3.5 h-3.5" />
                       {decomposingBg ? '…' : t('filmUploadBg')}
@@ -2504,7 +2454,7 @@ export default function FilmDirectorStudio() {
                             onClick={() =>
                               commitGraph({ ...graph, world: { ...graph.world, setId: 'custom' } })
                             }
-                            className="py-1.5 px-2 rounded-lg bg-ink-brass/20 border border-ink-brass text-[10px] font-bold text-desk-text"
+                            className="py-1.5 px-2 rounded-lg bg-ink-brass/20 border border-ink-brass text-[11px] font-bold text-desk-text"
                           >
                             {t('filmWorldCustom')}
                           </button>
@@ -2522,7 +2472,7 @@ export default function FilmDirectorStudio() {
                               },
                             })
                           }
-                          className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border text-[10px] font-bold text-ink-vermilion"
+                          className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border text-[11px] font-bold text-ink-vermilion"
                         >
                           {t('filmClearBg')}
                         </button>
@@ -2539,7 +2489,7 @@ export default function FilmDirectorStudio() {
 
                   {/* Weather Chips */}
                   <div className="space-y-1">
-                    <span className="font-mono text-[9.5px] text-desk-muted block">
+                    <span className="font-mono text-[11px] text-desk-muted block">
                       {t('filmWeatherLabel')}
                     </span>
                     <div className="flex flex-wrap gap-1">
@@ -2558,7 +2508,7 @@ export default function FilmDirectorStudio() {
                               },
                             })
                           }
-                          className={`flex-1 min-w-[30%] px-1.5 py-1 rounded-md text-[10px] font-bold border text-center whitespace-nowrap ${
+                          className={`flex-1 min-w-[30%] px-1.5 py-1 rounded-md text-[11px] font-bold border text-center whitespace-nowrap ${
                             graph.world.weather === w.id
                               ? 'bg-desk-panel border-ink-vermilion text-desk-text'
                               : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -2573,7 +2523,7 @@ export default function FilmDirectorStudio() {
                   {/* Horizon + Weather Intensity + Wind */}
                   <div className="space-y-1.5 pt-0.5">
                     <div className="space-y-0.5">
-                      <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                      <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                         <span>{t('filmHorizonDepth')}</span>
                         <span className="text-desk-text font-bold">
                           {Math.round(graph.world.horizonY * 100)}%
@@ -2597,7 +2547,7 @@ export default function FilmDirectorStudio() {
 
                     {graph.world.weather !== 'none' && (
                       <div className="space-y-0.5">
-                        <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                        <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                           <span>{t('filmWeatherIntensity')}</span>
                           <span className="text-desk-text font-bold">
                             {Math.round(graph.world.weatherIntensity * 100)}%
@@ -2627,7 +2577,7 @@ export default function FilmDirectorStudio() {
                     )}
 
                     <div className="space-y-0.5">
-                      <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                      <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                         <span>{t('filmWindSpeed')}</span>
                         <span className="text-desk-text font-bold">
                           {Math.round(graph.world.windStrength * 100)}%
@@ -2661,11 +2611,11 @@ export default function FilmDirectorStudio() {
               <>
                 <div className="space-y-1.5">
                   <div>
-                    <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
+                    <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass flex items-center gap-1.5">
                       <Sparkles className="w-3.5 h-3.5" />
                       {t('filmLookTitle')}
                     </span>
-                    <p className="text-[10px] text-desk-muted mt-0.5 leading-snug">
+                    <p className="text-[11px] text-desk-muted mt-0.5 leading-snug">
                       {t('filmLookSubtitle')}
                     </p>
                   </div>
@@ -2699,10 +2649,10 @@ export default function FilmDirectorStudio() {
                             className={`w-6 h-6 rounded-md shrink-0 bg-gradient-to-br ${CINEMA_LOOK_SWATCHES[lk.id]} border border-white/15 shadow-inner`}
                           />
                           <div className="min-w-0 flex-1">
-                            <div className="text-[10.5px] font-bold text-desk-text truncate leading-tight">
+                            <div className="text-[11px] font-bold text-desk-text truncate leading-tight">
                               {lk.label}
                             </div>
-                            <div className="text-[9px] text-desk-muted truncate leading-tight">
+                            <div className="text-[11px] text-desk-muted truncate leading-tight">
                               {lk.desc}
                             </div>
                           </div>
@@ -2715,7 +2665,7 @@ export default function FilmDirectorStudio() {
                   {/* Live Bokeh DOF + Grain + Cinema Bars */}
                   <div className="pt-1.5 border-t border-desk-border space-y-1.5">
                     <div className="space-y-0.5">
-                      <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                      <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                         <span>{t('filmDofLabel')}</span>
                         <span className="text-desk-text font-bold">
                           {Math.round(activeShot.camera.dofStrength * 100)}%
@@ -2741,7 +2691,7 @@ export default function FilmDirectorStudio() {
                     </div>
 
                     <div className="space-y-0.5">
-                      <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                      <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                         <span>{t('filmGrainLabel')}</span>
                         <span className="text-desk-text font-bold">
                           {Math.round(activeGrain * 100)}%
@@ -2792,7 +2742,7 @@ export default function FilmDirectorStudio() {
                     <button
                       type="button"
                       onClick={handleDownloadPosterPng}
-                      className="w-full py-1.5 px-2.5 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[10.5px] font-bold text-desk-text inline-flex items-center justify-center gap-1.5"
+                      className="w-full py-1.5 px-2.5 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-text inline-flex items-center justify-center gap-1.5"
                     >
                       <ImageIcon className="w-3.5 h-3.5" />
                       {t('filmDownloadStill')}
@@ -2806,7 +2756,7 @@ export default function FilmDirectorStudio() {
                     <button
                       type="button"
                       onClick={() => void handleExportPackage()}
-                      className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[10px] font-bold text-desk-text inline-flex items-center justify-center gap-1"
+                      className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-text inline-flex items-center justify-center gap-1"
                     >
                       <Package className="w-3 h-3" />
                       {t('filmExportPackage')}
@@ -2814,7 +2764,7 @@ export default function FilmDirectorStudio() {
                     <button
                       type="button"
                       onClick={() => pkgImportRef.current?.click()}
-                      className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[10px] font-bold text-desk-text inline-flex items-center justify-center gap-1"
+                      className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-text inline-flex items-center justify-center gap-1"
                     >
                       <Upload className="w-3 h-3" />
                       {t('filmImportPackage')}
@@ -2835,7 +2785,7 @@ export default function FilmDirectorStudio() {
                       <button
                         type="button"
                         onClick={() => setAdvancedOpen((v) => !v)}
-                        className="w-full flex items-center justify-between text-[10px] font-mono text-desk-muted hover:text-desk-text"
+                        className="w-full flex items-center justify-between text-[11px] font-mono text-desk-muted hover:text-desk-text"
                       >
                         <span>{t('filmAdvancedServerTitle')}</span>
                         {advancedOpen ? (
@@ -2847,7 +2797,7 @@ export default function FilmDirectorStudio() {
 
                       {advancedOpen && (
                         <div className="space-y-2 pt-1">
-                          <div className="flex items-center justify-between font-mono text-[9.5px] px-2 py-1.5 rounded-lg console-well border border-desk-border">
+                          <div className="flex items-center justify-between font-mono text-[11px] px-2 py-1.5 rounded-lg console-well border border-desk-border">
                             <span className={cloudStatus.online ? 'text-ink-emerald' : 'text-desk-muted'}>
                               ● {cloudStatus.online ? t('filmServerConnected') : t('filmServerOffline')}
                             </span>
@@ -2857,13 +2807,13 @@ export default function FilmDirectorStudio() {
                               type="text"
                               value={cloudUrl}
                               onChange={(e) => setCloudUrl(e.target.value)}
-                              className="flex-1 min-w-0 rounded-lg console-well border border-desk-border px-2 py-1 font-mono text-[10px] text-desk-text"
+                              className="flex-1 min-w-0 rounded-lg console-well border border-desk-border px-2 py-1 font-mono text-[11px] text-desk-text"
                             />
                             <button
                               type="button"
                               disabled={pingingCloud}
                               onClick={() => void handlePingCloud()}
-                              className="px-2 py-1 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[10px] font-bold text-desk-text shrink-0"
+                              className="px-2 py-1 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-text shrink-0"
                             >
                               {pingingCloud ? '…' : t('filmServerConnect')}
                             </button>
@@ -2879,22 +2829,22 @@ export default function FilmDirectorStudio() {
         </aside>
 
         {/* CENTER STAGE: Live 16:9 Cinema Monitor + Projected Rota & Bakış + Canlı Performans */}
-        <main className="order-1 lg:order-2 flex-1 min-w-0 flex flex-col items-center justify-center p-2.5 lg:p-3 overflow-hidden relative">
+        <main className="order-1 lg:order-2 shrink-0 min-h-[248px] sm:min-h-[340px] md:min-h-[432px] lg:shrink lg:min-h-0 lg:flex-1 min-w-0 flex flex-col items-center justify-center p-2 sm:p-2.5 lg:p-3 overflow-hidden relative">
           {/* Compact Cinema Header Strip */}
           <div className="w-full max-w-[780px] flex flex-wrap items-center justify-between gap-2 mb-2 shrink-0">
             <div className="flex items-center gap-1.5 min-w-0">
               <span className="hardware-led" data-on={playing ? 'vermilion' : 'emerald'} />
-              <span className="font-mono text-[10.5px] font-bold text-desk-text truncate">
+              <span className="font-mono text-[11px] font-bold text-desk-text truncate">
                 {t('filmShotWord')} {safeShotIdx + 1} · {framingLabelMap[activeShot.framing]} ·{' '}
                 {activeShot.durationSec.toFixed(1)}s
               </span>
               {activeShot.voiceTrack && (
-                <span className="px-1.5 py-0.5 rounded bg-ink-emerald/15 border border-ink-emerald/40 font-mono text-[9px] font-bold text-ink-emerald">
+                <span className="px-1.5 py-0.5 rounded bg-ink-emerald/15 border border-ink-emerald/40 font-mono text-[11px] font-bold text-ink-emerald">
                   🎙️
                 </span>
               )}
               {activeShot.mocapTrack && (
-                <span className="px-1.5 py-0.5 rounded bg-ink-brass/15 border border-ink-brass/40 font-mono text-[9px] font-bold text-ink-brass">
+                <span className="px-1.5 py-0.5 rounded bg-ink-brass/15 border border-ink-brass/40 font-mono text-[11px] font-bold text-ink-brass">
                   🎭
                 </span>
               )}
@@ -2931,7 +2881,7 @@ export default function FilmDirectorStudio() {
                     return !v;
                   });
                 }}
-                className={`px-2.5 py-1 rounded-lg border font-mono text-[10px] font-bold inline-flex items-center gap-1.5 transition-colors ${
+                className={`px-2.5 py-1 rounded-lg border font-mono text-[11px] font-bold inline-flex items-center gap-1.5 transition-colors ${
                   mocapDeckOpen
                     ? 'bg-ink-vermilion text-white border-ink-vermilion shadow'
                     : 'bg-desk-surface border-desk-border text-desk-text hover:border-ink-vermilion'
@@ -2947,7 +2897,7 @@ export default function FilmDirectorStudio() {
                   soundEngine.click(1.04);
                   setShowGizmos((v) => !v);
                 }}
-                className={`px-2.5 py-1 rounded-lg border font-mono text-[10px] font-bold inline-flex items-center gap-1.5 transition-colors ${
+                className={`px-2.5 py-1 rounded-lg border font-mono text-[11px] font-bold inline-flex items-center gap-1.5 transition-colors ${
                   showGizmos
                     ? 'bg-ink-brass/20 border-ink-brass text-desk-text'
                     : 'bg-desk-surface border-desk-border text-desk-muted hover:text-desk-text'
@@ -2994,20 +2944,20 @@ export default function FilmDirectorStudio() {
                   className="absolute top-0 bottom-0 w-0.5 bg-ink-brass shadow-lg pointer-events-none"
                   style={{ left: `${compareSplitPct}%` }}
                 >
-                  <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-ink-brass text-neutral-950 font-mono text-[10px] font-black flex items-center justify-center shadow-xl border-2 border-white">
+                  <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-ink-brass text-neutral-950 font-mono text-[11px] font-black flex items-center justify-center shadow-xl border-2 border-white">
                     ↔
                   </div>
                 </div>
 
-                <div className="absolute top-2.5 left-3 px-2 py-0.5 rounded-md bg-black/75 font-mono text-[9.5px] font-bold text-white/90">
+                <div className="absolute top-2.5 left-3 px-2 py-0.5 rounded-md bg-black/75 font-mono text-[11px] font-bold text-white/90">
                   {t('filmOriginalScene')}
                 </div>
-                <div className="absolute top-2.5 right-3 px-2 py-0.5 rounded-md bg-ink-brass text-neutral-950 font-mono text-[9.5px] font-bold">
+                <div className="absolute top-2.5 right-3 px-2 py-0.5 rounded-md bg-ink-brass text-neutral-950 font-mono text-[11px] font-bold">
                   {comparePreview.lookLabel}
                 </div>
 
                 <div className="absolute bottom-2.5 left-3 right-3 flex items-center gap-2.5 bg-black/80 backdrop-blur-sm px-3 py-1.5 rounded-xl border border-white/15">
-                  <span className="font-mono text-[9px] text-white/75">{t('filmBeforeTag')}</span>
+                  <span className="font-mono text-[11px] text-white/75">{t('filmBeforeTag')}</span>
                   <input
                     type="range"
                     min={5}
@@ -3016,18 +2966,18 @@ export default function FilmDirectorStudio() {
                     onChange={(e) => setCompareSplitPct(Number(e.target.value))}
                     className="flex-1 accent-ink-brass"
                   />
-                  <span className="font-mono text-[9px] text-ink-brass">{t('filmAfterTag')}</span>
+                  <span className="font-mono text-[11px] text-ink-brass">{t('filmAfterTag')}</span>
                   <button
                     type="button"
                     onClick={handleDownloadPosterPng}
-                    className="px-2.5 py-1 rounded-lg bg-ink-brass text-neutral-950 font-mono text-[9.5px] font-bold"
+                    className="px-2.5 py-1 rounded-lg bg-ink-brass text-neutral-950 font-mono text-[11px] font-bold"
                   >
                     {t('filmDownloadStill')}
                   </button>
                   <button
                     type="button"
                     onClick={() => setComparePreview(null)}
-                    className="px-2 py-1 rounded-lg bg-white/15 text-white font-mono text-[9.5px] font-bold hover:bg-white/25"
+                    className="px-2 py-1 rounded-lg bg-white/15 text-white font-mono text-[11px] font-bold hover:bg-white/25"
                   >
                     {t('filmClose')}
                   </button>
@@ -3054,7 +3004,7 @@ export default function FilmDirectorStudio() {
         </main>
 
         {/* RIGHT RAIL: Clean 2-Tab Shot Inspector (Acting | Camera & Voice) */}
-        <aside className="order-3 relative z-10 w-full lg:w-[272px] shrink-0 border-t lg:border-t-0 lg:border-l border-desk-border bg-desk-surface flex flex-col lg:overflow-hidden">
+        <aside className={`order-3 relative z-10 w-full lg:w-[272px] ${leftTab === 'inspector' ? 'flex flex-1 min-h-0 overflow-y-auto' : 'hidden'} lg:flex lg:flex-none lg:shrink-0 border-t lg:border-t-0 lg:border-l border-desk-border bg-desk-surface flex-col lg:overflow-hidden`}>
           <div className="p-2 border-b border-desk-border flex items-center gap-1 shrink-0">
             {(
               [
@@ -3093,18 +3043,18 @@ export default function FilmDirectorStudio() {
                           key={act.id}
                           type="button"
                           onClick={() => setSelectedActorId(act.id)}
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border transition-colors ${
+                          className={`px-2 py-0.5 rounded-full text-[11px] font-bold border transition-colors ${
                             act.id === selectedActor.id
                               ? 'bg-ink-brass text-neutral-950 border-ink-brass'
                               : 'border-desk-border text-desk-muted hover:text-desk-text'
                           }`}
                         >
-                          {act.name}
+                          {localizeActorName(act.name, locale)}
                         </button>
                       ))}
                     </div>
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono text-[9.5px] text-desk-muted shrink-0">
+                      <span className="font-mono text-[11px] text-desk-muted shrink-0">
                         {t('filmLookAtLabel')}
                       </span>
                       <select
@@ -3112,14 +3062,14 @@ export default function FilmDirectorStudio() {
                         onChange={(e) =>
                           patchSelectedActorInShot({ lookAtActorId: e.target.value || null })
                         }
-                        className="flex-1 min-w-0 px-2 py-1 rounded-md console-well border border-desk-border text-[10px] font-bold text-desk-text"
+                        className="flex-1 min-w-0 px-2 py-1 rounded-md console-well border border-desk-border text-[11px] font-bold text-desk-text"
                       >
                         <option value="">{t('filmLookAtCamera')}</option>
                         {castActors
                           .filter((a) => a.id !== selectedActor.id)
                           .map((other) => (
                             <option key={other.id} value={other.id}>
-                              {other.name}
+                              {localizeActorName(other.name, locale)}
                             </option>
                           ))}
                       </select>
@@ -3131,10 +3081,18 @@ export default function FilmDirectorStudio() {
                 {(selectedActor.creatureClass && selectedActor.creatureClass !== 'humanoid') ||
                 castActors.length >= 2 ? (
                   <div className="space-y-1">
-                    <span className="font-mono text-[9.5px] font-bold uppercase tracking-wider text-ink-brass block">
-                      {locale === 'en'
-                        ? UNIVERSAL_CREATURE_CATALOG[selectedActor.creatureClass ?? 'humanoid'].labelEn
-                        : UNIVERSAL_CREATURE_CATALOG[selectedActor.creatureClass ?? 'humanoid'].labelTr}{' '}
+                    <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass block">
+                      {t(
+                        ({
+                          humanoid: 'v4CreatureHumanoid',
+                          quadruped: 'v4CreatureQuadruped',
+                          avian_winged: 'v4CreatureAvian',
+                          aquatic_fish: 'v4CreatureAquatic',
+                          serpentine_tentacle: 'v4CreatureSerpentine',
+                          biped_tailed: 'v4CreatureBipedTailed',
+                          amorphous_vehicle: 'v4CreatureAmorphous',
+                        } as const)[selectedActor.creatureClass ?? 'humanoid']
+                      )}{' '}
                       · {t('filmActionGroupAct')}
                     </span>
                     <div className="flex flex-wrap gap-1">
@@ -3149,7 +3107,7 @@ export default function FilmDirectorStudio() {
                               key={ua}
                               type="button"
                               onClick={() => patchSelectedActorInShot({ universalAction: ua })}
-                              className={`px-2 py-1 rounded-lg text-[9.5px] font-bold border transition-colors ${
+                              className={`px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
                                 curUa === ua
                                   ? 'bg-ink-brass text-neutral-950 border-ink-brass'
                                   : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -3166,7 +3124,7 @@ export default function FilmDirectorStudio() {
                 {/* 360° 2.5D Character Angle Slider (appears when 2+ views exist!) */}
                 {countRigViews(selectedActor.masterRig) >= 2 && (
                   <div className="space-y-1">
-                    <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                       <span>{t('filmAngleSliderLabel')}</span>
                       <span className="text-ink-brass font-bold">
                         {activeShot.actorTracks?.[selectedActor.id]?.viewYawDeg ?? activeShot.viewYawDeg ?? 0}°
@@ -3191,7 +3149,7 @@ export default function FilmDirectorStudio() {
                 )}
 
                 <div className="space-y-1.5">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                     {t('filmActionLabel')}
                   </span>
                   <div className="grid grid-cols-3 gap-1">
@@ -3201,7 +3159,7 @@ export default function FilmDirectorStudio() {
                         type="button"
                         title={a.label}
                         onClick={() => patchActiveShot((sh) => ({ ...sh, action: a.id }))}
-                        className={`py-1.5 px-1 rounded-lg text-[9.5px] font-bold border transition-colors truncate ${
+                        className={`py-1.5 px-1 rounded-lg text-[11px] font-bold border transition-colors truncate ${
                           activeShot.action === a.id
                             ? 'bg-desk-panel border-ink-vermilion text-desk-text'
                             : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -3214,7 +3172,7 @@ export default function FilmDirectorStudio() {
                 </div>
 
                 <div className="space-y-1.5">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                     {t('filmMoodLabel')}
                   </span>
                   <div className="grid grid-cols-3 gap-1">
@@ -3223,7 +3181,7 @@ export default function FilmDirectorStudio() {
                         key={em.id}
                         type="button"
                         onClick={() => patchActiveShot((sh) => ({ ...sh, emotion: em.id }))}
-                        className={`py-1.5 px-1 rounded-lg text-[10px] font-bold border transition-colors truncate ${
+                        className={`py-1.5 px-1 rounded-lg text-[11px] font-bold border transition-colors truncate ${
                           activeShot.emotion === em.id
                             ? 'bg-desk-panel border-ink-brass text-desk-text'
                             : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -3236,7 +3194,7 @@ export default function FilmDirectorStudio() {
                 </div>
 
                 <div className="space-y-1">
-                  <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                  <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                     <span>{t('filmHeadTurnLabel')}</span>
                     <span className="text-desk-text font-bold">{activeShot.headAngleX}°</span>
                   </div>
@@ -3257,7 +3215,7 @@ export default function FilmDirectorStudio() {
                 </div>
 
                 <div className="space-y-1.5">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                     {t('filmPropLabel')}
                   </span>
                   <div className="grid grid-cols-2 gap-1">
@@ -3266,7 +3224,7 @@ export default function FilmDirectorStudio() {
                         key={pr.id}
                         type="button"
                         onClick={() => patchActiveShot((sh) => ({ ...sh, prop: pr.id }))}
-                        className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border transition-colors truncate ${
+                        className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border transition-colors truncate ${
                           activeShot.prop === pr.id
                             ? 'bg-desk-panel border-ink-brass text-desk-text'
                             : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -3280,7 +3238,7 @@ export default function FilmDirectorStudio() {
 
                 {/* Lightning & Thunder Switch (FIXED: pointer-events-none on thumb span!) */}
                 <div className="pt-2 border-t border-desk-border flex items-center justify-between">
-                  <span className="font-mono text-[10px] font-bold text-desk-text inline-flex items-center gap-1.5">
+                  <span className="font-mono text-[11px] font-bold text-desk-text inline-flex items-center gap-1.5">
                     <CloudLightning className="w-3.5 h-3.5 text-ink-brass" />
                     {t('filmLightningToggle')}
                   </span>
@@ -3317,7 +3275,7 @@ export default function FilmDirectorStudio() {
             {rightTab === 'camera' && (
               <>
                 <div className="space-y-1.5">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                     {t('filmFramingLabel')}
                   </span>
                   <div className="grid grid-cols-2 gap-1">
@@ -3350,7 +3308,7 @@ export default function FilmDirectorStudio() {
                             },
                           }));
                         }}
-                        className={`py-1.5 px-2 rounded-lg text-[10.5px] font-bold border transition-colors ${
+                        className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border transition-colors ${
                           activeShot.framing === f.id
                             ? 'bg-desk-panel border-ink-vermilion text-desk-text'
                             : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -3367,7 +3325,7 @@ export default function FilmDirectorStudio() {
                   <button
                     type="button"
                     onClick={() => setCameraFineOpen((v) => !v)}
-                    className="w-full flex items-center justify-between font-mono text-[9.5px] font-bold text-desk-muted hover:text-desk-text"
+                    className="w-full flex items-center justify-between font-mono text-[11px] font-bold text-desk-muted hover:text-desk-text"
                   >
                     <span className="inline-flex items-center gap-1.5">
                       <SlidersHorizontal className="w-3 h-3 text-ink-brass" />
@@ -3378,7 +3336,7 @@ export default function FilmDirectorStudio() {
                   {cameraFineOpen && (
                     <div className="space-y-1.5 pt-1">
                       <div>
-                        <div className="flex justify-between font-mono text-[9px] text-desk-muted">
+                        <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                           <span>{t('filmCamZoom')}</span>
                           <span>{activeShot.camera.toZoom.toFixed(2)}×</span>
                         </div>
@@ -3406,7 +3364,7 @@ export default function FilmDirectorStudio() {
                         />
                       </div>
                       <div>
-                        <div className="flex justify-between font-mono text-[9px] text-desk-muted">
+                        <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                           <span>{t('filmCamTilt')}</span>
                           <span>{activeShot.camera.tiltDeg.toFixed(1)}°</span>
                         </div>
@@ -3429,7 +3387,7 @@ export default function FilmDirectorStudio() {
                         />
                       </div>
                       <div>
-                        <div className="flex justify-between font-mono text-[9px] text-desk-muted">
+                        <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                           <span>{t('filmCamHandheld')}</span>
                           <span>{Math.round(activeShot.camera.handheld * 100)}%</span>
                         </div>
@@ -3458,7 +3416,7 @@ export default function FilmDirectorStudio() {
                 {/* Animation Flow + Duration + Transition */}
                 <div className="space-y-2">
                   <div className="space-y-1">
-                    <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                    <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                       {t('filmRhythmLabel')}
                     </span>
                     <div className="grid grid-cols-3 gap-1">
@@ -3467,7 +3425,7 @@ export default function FilmDirectorStudio() {
                           key={tm.id}
                           type="button"
                           onClick={() => patchActiveShot((sh) => ({ ...sh, timingMode: tm.id }))}
-                          className={`py-1 px-1 rounded-lg text-[9.5px] font-bold border ${
+                          className={`py-1 px-1 rounded-lg text-[11px] font-bold border ${
                             activeShot.timingMode === tm.id
                               ? 'bg-desk-panel border-ink-brass text-desk-text'
                               : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -3480,7 +3438,7 @@ export default function FilmDirectorStudio() {
                   </div>
 
                   <div className="space-y-0.5">
-                    <div className="flex justify-between font-mono text-[9.5px] text-desk-muted">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                       <span>{t('filmDurationLabel')}</span>
                       <span className="text-desk-text font-bold">
                         {activeShot.durationSec.toFixed(1)}s
@@ -3505,14 +3463,14 @@ export default function FilmDirectorStudio() {
                   {/* Shot Transition In: Cut vs Real Cross-Dissolve */}
                   {safeShotIdx > 0 && (
                     <div className="space-y-1">
-                      <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-desk-muted block">
+                      <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
                         {t('filmTransitionLabel')}
                       </span>
                       <div className="grid grid-cols-2 gap-1">
                         <button
                           type="button"
                           onClick={() => patchActiveShot((sh) => ({ ...sh, transition: 'cut' }))}
-                          className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border ${
+                          className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border ${
                             activeShot.transition === 'cut'
                               ? 'bg-desk-panel border-ink-brass text-desk-text'
                               : 'border-desk-border text-desk-muted'
@@ -3523,7 +3481,7 @@ export default function FilmDirectorStudio() {
                         <button
                           type="button"
                           onClick={() => patchActiveShot((sh) => ({ ...sh, transition: 'dissolve' }))}
-                          className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border ${
+                          className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border ${
                             activeShot.transition === 'dissolve'
                               ? 'bg-desk-panel border-ink-brass text-desk-text'
                               : 'border-desk-border text-desk-muted'
@@ -3538,12 +3496,12 @@ export default function FilmDirectorStudio() {
 
                 {/* Dialogue + Voice Recording + 100% $0 Speak Line */}
                 <div className="pt-2 border-t border-desk-border space-y-2">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-brass block">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass block">
                     {t('filmDialogueLabel')}
                   </span>
                   <input
                     type="text"
-                    value={activeShot.dialogue}
+                    value={localizeSceneOrNote(activeShot.dialogue, locale)}
                     onChange={(e) =>
                       patchActiveShot((sh) => ({ ...sh, dialogue: e.target.value }), false)
                     }
@@ -3556,7 +3514,7 @@ export default function FilmDirectorStudio() {
                       aria-label={t('filmVoiceCharacter')}
                       value={aiVoiceName}
                       onChange={(e) => setAiVoiceName(e.target.value)}
-                      className="flex-1 min-w-0 rounded-lg console-well border border-desk-border px-2 py-1.5 text-[10.5px] font-bold text-desk-text"
+                      className="flex-1 min-w-0 rounded-lg console-well border border-desk-border px-2 py-1.5 text-[11px] font-bold text-desk-text"
                     >
                       {studioVoices.map((v) => (
                         <option key={v.id} value={v.id}>
@@ -3568,7 +3526,7 @@ export default function FilmDirectorStudio() {
                       type="button"
                       disabled={synthesizingVoice}
                       onClick={() => void handleSynthesizeVoice()}
-                      className="px-2.5 py-1.5 rounded-lg bg-ink-brass/20 border border-ink-brass text-ink-brass hover:bg-ink-brass/30 text-[10.5px] font-bold inline-flex items-center gap-1 shrink-0 disabled:opacity-50"
+                      className="px-2.5 py-1.5 rounded-lg bg-ink-brass/20 border border-ink-brass text-ink-brass hover:bg-ink-brass/30 text-[11px] font-bold inline-flex items-center gap-1 shrink-0 disabled:opacity-50"
                     >
                       <Sparkles className="w-3 h-3" />
                       {synthesizingVoice ? t('filmVoiceSpeaking') : t('filmVoiceSpeak')}
@@ -3580,7 +3538,7 @@ export default function FilmDirectorStudio() {
                       type="button"
                       disabled={analyzingVoice}
                       onClick={() => void handleToggleMicVoice()}
-                      className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border inline-flex items-center justify-center gap-1 ${
+                      className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border inline-flex items-center justify-center gap-1 ${
                         recordingVoice
                           ? 'bg-red-600 text-white border-red-500 animate-pulse'
                           : 'bg-desk-panel border-desk-border hover:border-ink-vermilion text-desk-text'
@@ -3602,7 +3560,7 @@ export default function FilmDirectorStudio() {
                       type="button"
                       disabled={analyzingVoice}
                       onClick={() => voiceFileRef.current?.click()}
-                      className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[10px] font-bold text-desk-text inline-flex items-center justify-center gap-1"
+                      className="py-1.5 px-2 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-brass text-[11px] font-bold text-desk-text inline-flex items-center justify-center gap-1"
                     >
                       <Upload className="w-3 h-3" />
                       {t('filmVoiceUpload')}
@@ -3618,7 +3576,7 @@ export default function FilmDirectorStudio() {
 
                   {recordingVoice && (
                     <div className="p-2 rounded-lg bg-red-600/15 border border-red-500/40 space-y-1">
-                      <div className="flex justify-between font-mono text-[9px] text-red-400">
+                      <div className="flex justify-between font-mono text-[11px] text-red-400">
                         <span>● REC</span>
                         <span>{liveVoiceViseme.toUpperCase()}</span>
                       </div>
@@ -3633,7 +3591,7 @@ export default function FilmDirectorStudio() {
 
                   {activeShot.voiceTrack && (
                     <div className="p-2 rounded-xl console-well border border-ink-emerald/40 space-y-1.5">
-                      <div className="flex items-center justify-between font-mono text-[9px]">
+                      <div className="flex items-center justify-between font-mono text-[11px]">
                         <span className="text-ink-emerald font-bold inline-flex items-center gap-1">
                           <AudioLines className="w-3 h-3" />
                           {t('filmVoiceSynced')} ({activeShot.voiceTrack.durationSec}s)
@@ -3699,7 +3657,7 @@ export default function FilmDirectorStudio() {
                 soundEngine.click(1.04);
                 setPlayAllMode((v) => !v);
               }}
-              className={`px-2 py-1.5 rounded-lg border font-mono text-[10px] font-bold inline-flex items-center gap-1 transition-colors ${
+              className={`px-2 py-1.5 rounded-lg border font-mono text-[11px] font-bold inline-flex items-center gap-1 transition-colors ${
                 !playAllMode
                   ? 'bg-ink-brass/20 border-ink-brass text-desk-text'
                   : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
@@ -3716,7 +3674,7 @@ export default function FilmDirectorStudio() {
                 soundEngine.toggle(!soundOn);
                 setSoundOn((v) => !v);
               }}
-              className={`px-2 py-1.5 rounded-lg border font-mono text-[10px] font-bold inline-flex items-center gap-1 transition-colors ${
+              className={`px-2 py-1.5 rounded-lg border font-mono text-[11px] font-bold inline-flex items-center gap-1 transition-colors ${
                 soundOn && soundEnabled
                   ? 'bg-desk-panel border-ink-emerald text-ink-emerald'
                   : 'console-well border-desk-border text-desk-muted'
@@ -3732,7 +3690,7 @@ export default function FilmDirectorStudio() {
                 soundEngine.toggle(!musicOn);
                 setMusicOn((v) => !v);
               }}
-              className={`px-2 py-1.5 rounded-lg border font-mono text-[10px] font-bold inline-flex items-center gap-1 transition-colors ${
+              className={`px-2 py-1.5 rounded-lg border font-mono text-[11px] font-bold inline-flex items-center gap-1 transition-colors ${
                 musicOn && soundOn && soundEnabled
                   ? 'bg-desk-panel border-ink-brass text-ink-brass'
                   : 'console-well border-desk-border text-desk-muted'
@@ -3745,7 +3703,7 @@ export default function FilmDirectorStudio() {
 
           {/* Time Scrubber */}
           <div className="flex items-center gap-2 flex-1 max-w-md min-w-[160px]">
-            <span className="font-mono text-[10.5px] text-desk-muted tabular-nums shrink-0">
+            <span className="font-mono text-[11px] text-desk-muted tabular-nums shrink-0">
               {globalSec.toFixed(1)}s / {(playAllMode ? totalDuration : activeShot.durationSec).toFixed(1)}s
             </span>
             <input
@@ -3814,68 +3772,74 @@ export default function FilmDirectorStudio() {
                 }`}
               >
                 <div className="flex items-center justify-between gap-1">
-                  <span className="font-mono text-[10px] font-bold text-desk-text truncate flex items-center gap-1">
+                  <span className="font-mono text-[11px] font-bold text-desk-text truncate flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-ink-brass shrink-0" />
                     {t('filmShotWord')} {idx + 1} · {framingLabelMap[sh.framing]}
                   </span>
 
-                  <div className="flex items-center gap-0.5 shrink-0">
-                    {idx > 0 && (
+                  {active && (
+                    <div className="flex items-center gap-0.5 shrink-0">
+                      {idx > 0 && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleMoveShot(idx, -1);
+                          }}
+                          aria-label={t('filmMoveLeft')}
+                          title={t('filmMoveLeft')}
+                          className="min-w-[28px] min-h-[28px] rounded inline-flex items-center justify-center text-desk-muted hover:text-desk-text hover:bg-desk-surface"
+                        >
+                          <ArrowLeft className="w-3 h-3" />
+                        </button>
+                      )}
+                      {idx < graph.shots.length - 1 && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleMoveShot(idx, 1);
+                          }}
+                          aria-label={t('filmMoveRight')}
+                          title={t('filmMoveRight')}
+                          className="min-w-[28px] min-h-[28px] rounded inline-flex items-center justify-center text-desk-muted hover:text-desk-text hover:bg-desk-surface"
+                        >
+                          <ArrowRight className="w-3 h-3" />
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleMoveShot(idx, -1);
+                          handleDuplicateShot(idx);
                         }}
-                        className="p-0.5 text-desk-muted hover:text-desk-text"
-                        title={t('filmMoveLeft')}
+                        aria-label={t('filmDuplicateShot')}
+                        title={t('filmDuplicateShot')}
+                        className="min-w-[28px] min-h-[28px] rounded inline-flex items-center justify-center text-desk-muted hover:text-ink-brass hover:bg-desk-surface"
                       >
-                        <ArrowLeft className="w-3 h-3" />
+                        <Copy className="w-3 h-3" />
                       </button>
-                    )}
-                    {idx < graph.shots.length - 1 && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleMoveShot(idx, 1);
-                        }}
-                        className="p-0.5 text-desk-muted hover:text-desk-text"
-                        title={t('filmMoveRight')}
-                      >
-                        <ArrowRight className="w-3 h-3" />
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDuplicateShot(idx);
-                      }}
-                      className="p-0.5 text-desk-muted hover:text-ink-brass"
-                      title={t('filmDuplicateShot')}
-                    >
-                      <Copy className="w-3 h-3" />
-                    </button>
-                    {graph.shots.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const nextShots = graph.shots.filter((_, i) => i !== idx);
-                          commitGraph({ ...graph, shots: nextShots });
-                          setSelectedShotIdx(Math.max(0, idx - 1));
-                        }}
-                        className="p-0.5 text-desk-muted hover:text-ink-vermilion"
-                        title={t('filmDeleteShot')}
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    )}
-                  </div>
+                      {graph.shots.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const nextShots = graph.shots.filter((_, i) => i !== idx);
+                            commitGraph({ ...graph, shots: nextShots });
+                            setSelectedShotIdx(Math.max(0, idx - 1));
+                          }}
+                          aria-label={t('filmDeleteShot')}
+                          title={t('filmDeleteShot')}
+                          className="min-w-[28px] min-h-[28px] rounded inline-flex items-center justify-center text-desk-muted hover:text-ink-vermilion hover:bg-desk-surface"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
 
-                <div className="mt-0.5 flex items-center justify-between font-mono text-[9.5px] text-desk-muted">
+                <div className="mt-0.5 flex items-center justify-between font-mono text-[11px] text-desk-muted">
                   <span className="truncate">
                     {sh.durationSec.toFixed(1)}s · {actLabel}
                   </span>
@@ -3892,7 +3856,7 @@ export default function FilmDirectorStudio() {
           <button
             type="button"
             onClick={handleAddCleanShot}
-            className="shrink-0 h-[52px] px-3 rounded-xl border border-dashed border-desk-border hover:border-ink-brass text-desk-muted hover:text-desk-text font-mono text-[10.5px] font-bold inline-flex items-center gap-1.5 transition-colors"
+            className="shrink-0 h-[52px] px-3 rounded-xl border border-dashed border-desk-border hover:border-ink-brass text-desk-muted hover:text-desk-text font-mono text-[11px] font-bold inline-flex items-center gap-1.5 transition-colors"
           >
             <Plus className="w-3.5 h-3.5" />
             {t('filmAddShot')}
@@ -3907,26 +3871,29 @@ export default function FilmDirectorStudio() {
           className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
         >
           <div
+            ref={filmExportDialogRef}
             role="dialog"
             aria-modal="true"
+            aria-labelledby="film-export-modal-title"
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-2xl rounded-3xl bg-desk-surface border border-desk-border shadow-2xl overflow-hidden"
+            className="w-full max-w-2xl max-h-[calc(100dvh-1.5rem)] flex flex-col overflow-y-auto rounded-3xl bg-desk-surface border border-desk-border shadow-2xl"
           >
-            <div className="px-5 py-4 border-b border-desk-border flex items-center justify-between">
+            <div className="px-5 py-4 border-b border-desk-border flex items-center justify-between shrink-0">
               <div>
-                <h2 className="text-base font-extrabold text-desk-text">
+                <h2 id="film-export-modal-title" className="text-base font-extrabold text-desk-text">
                   {t('filmExportModalTitle')}
                 </h2>
-                <p className="font-mono text-[10.5px] text-desk-muted mt-0.5">
+                <p className="font-mono text-[11px] text-desk-muted mt-0.5">
                   {graph.shots.length} {t('filmShotWord')} · {totalDuration.toFixed(1)}s · 1280×720 ·{' '}
                   {t('filmExportModalSub')}
                 </p>
               </div>
               <button
                 type="button"
+                aria-label={t('exportCloseAria')}
                 disabled={Boolean(exportingKind)}
                 onClick={() => setFilmExportOpen(false)}
-                className="p-2 rounded-xl console-well border border-desk-border text-desk-muted hover:text-desk-text disabled:opacity-40"
+                className="min-w-[44px] min-h-[44px] p-2 rounded-xl inline-flex items-center justify-center console-well border border-desk-border text-desk-muted hover:text-desk-text disabled:opacity-40"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -3949,7 +3916,7 @@ export default function FilmDirectorStudio() {
                     <button
                       type="button"
                       onClick={handleCancelExport}
-                      className="px-3 py-1 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-vermilion font-mono text-[10.5px] font-bold text-ink-vermilion"
+                      className="px-3 py-1 rounded-lg bg-desk-panel border border-desk-border hover:border-ink-vermilion font-mono text-[11px] font-bold text-ink-vermilion"
                     >
                       {t('filmExportCancel')}
                     </button>

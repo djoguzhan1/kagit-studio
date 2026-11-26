@@ -16,7 +16,8 @@ import {
   getCachedSampleHeroCanvas,
   preloadSampleHeroCanvas,
 } from '../../engine/sampleHeroAsset';
-import { useT } from '../../i18n/translations';
+import { localizePinOrPartLabel, localizeProjectName, localizeSceneOrNote, useT } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
 import { InstantAliveStage } from './InstantAliveStage';
 import type { UniverseHoverTarget } from './AnimatedUniverseCanvas';
 import { PocketFlipbook3DPreview } from '../ui/PocketFlipbook3DPreview';
@@ -355,6 +356,12 @@ export function InteractiveLightboxStage({
   const t = useT();
   const locale = useStudioStore((s) => s.locale);
   const [stageView, setStageView] = useState<'live' | 'showcase'>('live');
+  const activeTourMode = useStudioStore((st) => st.activeTourMode);
+  useEffect(() => {
+    if (activeTourMode === 'desk' && stageView !== 'live') {
+      setStageView('live');
+    }
+  }, [activeTourMode, stageView]);
   const [show3DFlip, setShow3DFlip] = useState(false);
 
   // ---- MODE 4: Live Interactive 6-Layer 2.5D Parallax Mini-Cinema ----
@@ -417,7 +424,7 @@ export function InteractiveLightboxStage({
     if (previewMode !== 'draw') return;
     const c = sketchCanvasRef.current;
     if (!c) return;
-    e.currentTarget.setPointerCapture(e.pointerId);
+    safeSetPointerCapture(e.currentTarget, e.pointerId);
     setShowcasePlaying(false);
     const pt = toSketchPt(e);
     drawingRef.current = { active: true, lx: pt.x, ly: pt.y, lt: performance.now(), lw: 6.5 };
@@ -751,9 +758,9 @@ export function InteractiveLightboxStage({
       }
     }
     if (bestPin) {
-      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+      safeSetPointerCapture(e.currentTarget, e.pointerId);
       puppetDragRef.current = { pinId: bestPin.id, startX: x, startY: y };
-      setDraggingPinLabel(bestPin.label);
+      setDraggingPinLabel(localizePinOrPartLabel(bestPin.label, locale));
       soundEngine.click(1.18);
     }
   };
@@ -1007,7 +1014,7 @@ export function InteractiveLightboxStage({
           <span>{t('lightboxLabel')}</span>
           <label
             className="hidden md:inline-flex items-center gap-1.5 pl-2 border-l border-desk-border text-desk-muted"
-            title={locale === 'en' ? 'Backlight brightness' : 'Işıklı masa parlaklığı'}
+            title={t('deskBacklightTitle')}
           >
             <SunDim className="w-3.5 h-3.5 text-ink-brass shrink-0" />
             <input
@@ -1017,7 +1024,7 @@ export function InteractiveLightboxStage({
               step={0.05}
               value={lightboxDim}
               onChange={(e) => onLightboxDimChange(Number(e.target.value))}
-              aria-label={locale === 'en' ? 'Backlight brightness' : 'Işıklı masa parlaklığı'}
+              aria-label={t('deskBacklightTitle')}
               className="w-14 accent-[#D99B26] cursor-pointer"
             />
           </label>
@@ -1025,7 +1032,7 @@ export function InteractiveLightboxStage({
 
         <div
           role="tablist"
-          aria-label="Işıklı Masa Görünümü"
+          aria-label={t('deskLightboxViewAria')}
           className="flex items-center gap-1 p-0.5 rounded-xl console-well border border-desk-border"
         >
           <button
@@ -1082,7 +1089,7 @@ export function InteractiveLightboxStage({
             frames={project.frames}
             fps={project.fps}
             paperColor={project.paperColor}
-            projectName={project.name}
+            projectName={localizeProjectName(project.name, locale)}
             onClose={() => setShow3DFlip(false)}
           />
         </div>
@@ -1203,7 +1210,7 @@ export function InteractiveLightboxStage({
           {previewMode === 'paper' && (
             <div
               onPointerDown={(e) => {
-                e.currentTarget.setPointerCapture(e.pointerId);
+                safeSetPointerCapture(e.currentTarget, e.pointerId);
                 draggingCurtainRef.current = true;
                 updateCurtainFromPointer(e);
               }}
@@ -1282,14 +1289,14 @@ export function InteractiveLightboxStage({
           {/* Compact Single-Pill Demo Switcher + 3D Thumb-Flip Trigger */}
           <div className="absolute bottom-2.5 right-2.5 z-20 flex items-center gap-1.5 pointer-events-auto">
             <label className="stage-floating-pill px-2.5 py-1 rounded-full font-mono text-[11px] font-bold inline-flex items-center gap-1.5">
-              <span>{locale === 'en' ? 'Scene:' : 'Sahne:'}</span>
+              <span>{t('deskSampleSceneLabel')}</span>
               <select
                 value={previewMode}
                 onChange={(e) => {
                   soundEngine.click(1.08);
                   onPreviewModeChange(e.target.value as DeskPreviewMode);
                 }}
-                aria-label={locale === 'en' ? 'Select sample scene' : 'Örnek sahne seç'}
+                aria-label={t('deskSelectSceneAria')}
                 className="bg-transparent font-bold focus:outline-none cursor-pointer"
               >
                 <option value="draw" className="bg-neutral-900 text-white">{t('modeDrawPill')}</option>
@@ -1308,7 +1315,7 @@ export function InteractiveLightboxStage({
                 }}
                 className="stage-floating-pill px-2.5 py-1 rounded-full font-mono text-[11px] font-bold hover:border-ink-brass transition-colors"
               >
-                {locale === 'en' ? '3D Flip' : '3B Çevir'}
+                {t('deskFlip3dBtn')}
               </button>
             )}
           </div>
@@ -1323,7 +1330,7 @@ export function InteractiveLightboxStage({
           <div className="flex-1 flex flex-col gap-1 min-w-0 sm:order-2">
             <div className="flex items-center justify-between gap-2 font-mono text-[11px] text-desk-muted">
               <span className="truncate">
-                {activeShowcaseFrame?.note || project.name || t('frameScrubFallback')}
+                {localizeSceneOrNote(activeShowcaseFrame?.note ?? "", locale) || project.name || t('frameScrubFallback')}
               </span>
               <span className="shrink-0 text-desk-text/80">
                 #{String(activeShowcaseIdx + 1).padStart(2, '0')}/{String(frameCount).padStart(2, '0')} · {project.fps} FPS

@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
 import { useT } from '../../i18n/translations';
+import { useModalA11y } from '../../hooks/useModalA11y';
 import {
   clearAllLocalStudioData,
   getStorageUsageEstimate,
@@ -39,6 +40,12 @@ export default function LegalPolicyModal() {
   }>({ usedMb: 0, quotaMb: null, persisted: false });
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const dialogRef = useModalA11y<HTMLDivElement>({
+    open: legalOpen,
+    onClose: closeLegal,
+    closeDisabled: clearing,
+    modal: true,
+  });
 
   useEffect(() => {
     if (!legalOpen) return;
@@ -78,27 +85,28 @@ export default function LegalPolicyModal() {
       className="fixed inset-0 z-[80] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 select-none"
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={t('legalModalTitle')}
+        aria-labelledby="legal-modal-title"
         onClick={(e) => e.stopPropagation()}
-        className="toast-pop-in w-full max-w-2xl max-h-[88vh] flex flex-col rounded-3xl bg-desk-surface border border-desk-border shadow-2xl overflow-hidden"
+        className="toast-pop-in w-full max-w-2xl max-h-[calc(100dvh-1.5rem)] flex flex-col rounded-3xl bg-desk-surface border border-desk-border shadow-2xl overflow-hidden"
       >
         {/* Header */}
         <div className="px-5 py-4 border-b border-desk-border flex items-center justify-between gap-2 shrink-0">
           <div className="min-w-0">
-            <h2 className="text-base font-extrabold text-desk-text flex items-center gap-2">
+            <h2 id="legal-modal-title" className="text-base font-extrabold text-desk-text flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-ink-emerald shrink-0" />
               <span className="truncate">{t('legalModalTitle')}</span>
             </h2>
-            <p className="font-mono text-[10px] text-ink-emerald mt-0.5">
+            <p className="font-mono text-[11px] text-ink-emerald mt-0.5">
               ● {t('legalZeroCloudBadge')}
             </p>
           </div>
           <button
             type="button"
             onClick={closeLegal}
-            className="p-2 rounded-xl console-well border border-desk-border text-desk-muted hover:text-desk-text"
+            className="min-w-[44px] min-h-[44px] p-2 rounded-xl inline-flex items-center justify-center console-well border border-desk-border text-desk-muted hover:text-desk-text"
             aria-label={t('exportCloseAria')}
           >
             <X className="w-4 h-4" />
@@ -276,7 +284,7 @@ export default function LegalPolicyModal() {
               </div>
 
               <div className="rounded-2xl console-well border border-ink-emerald/40 p-3.5 space-y-1">
-                <div className="flex items-center justify-between font-mono text-[10.5px]">
+                <div className="flex items-center justify-between font-mono text-[11px]">
                   <span className="text-desk-muted">{t('perfActiveStatusLabel')}:</span>
                   <span className="font-bold text-ink-emerald">{activeTierLabel}</span>
                 </div>

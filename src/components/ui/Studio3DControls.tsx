@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { SlidersHorizontal } from 'lucide-react';
 import { soundEngine } from '../../engine/soundEngine';
+import { useT } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
 
 /** Shared zero-lag pointer 3D tilt hook for signature mechanical workshop objects */
 function useMechTilt(maxDeg = 10) {
@@ -59,7 +61,7 @@ export function Clapperboard3DButton({
   sceneStamp = 'SAHNE 01',
   active = false,
   activeBadge = 'AYAR',
-  settingsTitle = 'Sahne ayarları',
+  settingsTitle,
   onClick,
   onSettingsClick,
   onHover,
@@ -74,6 +76,8 @@ export function Clapperboard3DButton({
   onSettingsClick?: () => void;
   onHover?: () => void;
 }) {
+  const t = useT();
+  const resolvedSettingsTitle = settingsTitle ?? t('sceneSettingsTitle');
   const { ref, onPointerMove, onPointerLeave } = useMechTilt(9);
   const [snapping, setSnapping] = useState(false);
 
@@ -140,8 +144,8 @@ export function Clapperboard3DButton({
             soundEngine.click(1.05);
             onSettingsClick();
           }}
-          title={settingsTitle}
-          aria-label={settingsTitle}
+          title={resolvedSettingsTitle}
+          aria-label={resolvedSettingsTitle}
           aria-expanded={active}
           className={`absolute bottom-3.5 right-[62px] h-10 w-9 z-30 rounded-xl border inline-flex items-center justify-center transition-colors ${
             active
@@ -163,7 +167,7 @@ export function Clapperboard3DButton({
 export function ShutterLens3DButton({
   title,
   subtitle,
-  badge = 'KAĞIT MASASI',
+  badge = 'INKTROPE',
   compact = false,
   onClick,
   onHover,
@@ -347,7 +351,7 @@ export function Marionette3DButton({
 export function Projector3DButton({
   title,
   subtitle,
-  badge = '2.5D FİLM YÖNETMENİ',
+  badge = 'CINEMA',
   onClick,
   onHover,
 }: {
@@ -449,12 +453,13 @@ export function ToggleLeverSwitch({
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={title ?? label}
       title={title ?? label}
       onClick={() => {
         soundEngine.toggle(!checked);
         onChange(!checked);
       }}
-      className="inline-flex items-center gap-2 group cursor-pointer"
+      className="min-w-[44px] min-h-[44px] inline-flex items-center justify-center gap-2 group cursor-pointer"
     >
       {label && (
         <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted group-hover:text-desk-text transition-colors">
@@ -489,6 +494,7 @@ export function BrassRotaryDial({
   label: string;
   onChange: (next: number) => void;
 }) {
+  const t = useT();
   const dragRef = useRef<{ startX: number; startY: number; startVal: number } | null>(null);
   const span = Math.max(0.0001, max - min);
   const norm = Math.max(0, Math.min(1, (value - min) / span));
@@ -511,9 +517,9 @@ export function BrassRotaryDial({
       aria-valuemin={min}
       aria-valuemax={max}
       aria-valuenow={value}
-      title={`${label} (Sürükle veya tekerlekle çevir)`}
+      title={`${label} (${t('dialDragWheelHint')})`}
       onPointerDown={(e) => {
-        e.currentTarget.setPointerCapture(e.pointerId);
+        safeSetPointerCapture(e.currentTarget, e.pointerId);
         dragRef.current = { startX: e.clientX, startY: e.clientY, startVal: value };
       }}
       onPointerMove={(e) => {

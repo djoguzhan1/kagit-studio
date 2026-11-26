@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { X } from 'lucide-react';
 import { useT } from '../../i18n/translations';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
 
 /** Pure perceived-luminance contrast helper so swatch text is ALWAYS WCAG-legible on dark or light inks */
 export function getContrastTextColor(hex: string): '#FAF6EE' | '#181614' {
@@ -164,11 +165,11 @@ export default function ColorWheelPopover({
       <div onClick={onClose} className="fixed inset-0 z-40" />
       <div className="fixed left-3 lg:left-[224px] top-16 lg:top-auto lg:bottom-28 z-50 w-[264px] rounded-2xl bg-desk-surface border border-desk-border p-3.5 shadow-2xl space-y-3 select-none">
         <div className="flex items-center justify-between">
-          <span className="font-mono text-[10px] uppercase tracking-widest text-desk-muted">
+          <span className="font-mono text-[11px] uppercase tracking-widest text-desk-muted">
             {t('colorWheelTitle')}
           </span>
           <div className="flex items-center gap-2">
-            <span className="font-mono text-[10px] text-desk-text">{color.toUpperCase()}</span>
+            <span className="font-mono text-[11px] text-desk-text">{color.toUpperCase()}</span>
             <button
               type="button"
               onClick={onClose}
@@ -185,7 +186,7 @@ export default function ColorWheelPopover({
           <canvas
             ref={wheelRef}
             onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture(e.pointerId);
+              safeSetPointerCapture(e.currentTarget, e.pointerId);
               draggingRef.current = true;
               pickHueFromPointer(e);
             }}
@@ -202,7 +203,7 @@ export default function ColorWheelPopover({
         {/* Saturation & Lightness Sliders */}
         <div className="space-y-2">
           <div>
-            <div className="flex justify-between font-mono text-[9px] text-desk-muted mb-0.5">
+            <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
               <span>{t('colorWheelHint').split('·')[0].trim()} / S</span>
               <span>{hsl.s}%</span>
             </div>
@@ -216,7 +217,7 @@ export default function ColorWheelPopover({
             />
           </div>
           <div>
-            <div className="flex justify-between font-mono text-[9px] text-desk-muted mb-0.5">
+            <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
               <span>{t('colorHighlight').toUpperCase()} / L</span>
               <span>{hsl.l}%</span>
             </div>
@@ -233,7 +234,7 @@ export default function ColorWheelPopover({
 
         {/* Cel-Shading Companion Tone Helper (Shadow / Base / Highlight) */}
         <div className="space-y-1">
-          <div className="flex items-center justify-between font-mono text-[9px] text-desk-muted">
+          <div className="flex items-center justify-between font-mono text-[11px] text-desk-muted">
             <span className="uppercase">{t('colorHarmonyLabel')}</span>
             <button
               type="button"
@@ -251,7 +252,7 @@ export default function ColorWheelPopover({
                 backgroundColor: shadowHex,
                 color: getContrastTextColor(shadowHex),
               }}
-              className="h-7 rounded-lg border border-desk-border text-[9px] font-mono font-bold shadow-inner"
+              className="h-7 rounded-lg border border-desk-border text-[11px] font-mono font-bold shadow-inner"
               title={`${t('colorShadow')}: ${shadowHex}`}
             >
               {t('colorShadow')}
@@ -261,7 +262,7 @@ export default function ColorWheelPopover({
                 backgroundColor: color,
                 color: getContrastTextColor(color),
               }}
-              className="h-7 rounded-lg border-2 border-ink-brass flex items-center justify-center text-[9px] font-mono font-bold"
+              className="h-7 rounded-lg border-2 border-ink-brass flex items-center justify-center text-[11px] font-mono font-bold"
             >
               {t('colorBase')}
             </div>
@@ -272,7 +273,7 @@ export default function ColorWheelPopover({
                 backgroundColor: highlightHex,
                 color: getContrastTextColor(highlightHex),
               }}
-              className="h-7 rounded-lg border border-desk-border text-[9px] font-mono font-bold shadow-inner"
+              className="h-7 rounded-lg border border-desk-border text-[11px] font-mono font-bold shadow-inner"
               title={`${t('colorHighlight')}: ${highlightHex}`}
             >
               {t('colorHighlight')}
@@ -283,7 +284,7 @@ export default function ColorWheelPopover({
         {/* Recent 8 Colors */}
         {recentColors.length > 0 && (
           <div className="space-y-1">
-            <div className="font-mono text-[9px] uppercase text-desk-muted">{t('colorRecentLabel')}</div>
+            <div className="font-mono text-[11px] uppercase text-desk-muted">{t('colorRecentLabel')}</div>
             <div className="grid grid-cols-8 gap-1">
               {recentColors.slice(0, 8).map((hex) => (
                 <button

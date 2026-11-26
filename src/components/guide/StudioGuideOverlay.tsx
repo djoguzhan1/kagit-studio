@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, X } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
 import { useT } from '../../i18n/translations';
 import { TOUR_STEPS_BY_MODE } from '../../engine/tourConfig';
 import { soundEngine } from '../../engine/soundEngine';
 import { GuideMascotSvg } from './GuideMascotSvg';
+import { useModalA11y } from '../../hooks/useModalA11y';
 
 interface TargetRect {
   x: number;
@@ -14,8 +15,8 @@ interface TargetRect {
 }
 
 const CARD_W = 328;
-const CARD_H = 196;
-const PAD = 10;
+const DEFAULT_CARD_H = 216;
+const PAD = 8;
 
 export default function StudioGuideOverlay() {
   const t = useT();
@@ -23,15 +24,21 @@ export default function StudioGuideOverlay() {
 
   const [stepIdx, setStepIdx] = useState(0);
   const [celebrating, setCelebrating] = useState(false);
-  const [targetRect, setTargetRect] = useState<TargetRect | null>(null);
+  const [rawTargetRect, setRawTargetRect] = useState<TargetRect | null>(null);
+  const [measuredCardH, setMeasuredCardH] = useState(DEFAULT_CARD_H);
   const [viewport, setViewport] = useState(() => ({
     w: typeof window !== 'undefined' ? window.innerWidth : 1280,
     h: typeof window !== 'undefined' ? window.innerHeight : 800,
   }));
 
   const advanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
+  const cardRef = useModalA11y<HTMLDivElement>({
+    open: Boolean(activeTourMode),
+    onClose: stopTour,
+    modal: false,
+  });
   const scrolledStepRef = useRef<string | null>(null);
+  const holePointerDownRef = useRef(false);
 
   const steps = useMemo(
     () => (activeTourMode ? TOUR_STEPS_BY_MODE[activeTourMode] : []),
@@ -39,27 +46,43 @@ export default function StudioGuideOverlay() {
   );
   const currentStep = steps[stepIdx] ?? null;
 
-  // Reset to step 0 whenever tour mode opens or changes
   useEffect(() => {
     setStepIdx(0);
     setCelebrating(false);
+    holePointerDownRef.current = false;
     if (advanceTimerRef.current) {
       clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
     }
   }, [activeTourMode]);
 
-  // If user switches away to another studio manually while a tour is running, close cleanly
   useEffect(() => {
     if (activeTourMode && activeTourMode !== mode) {
       stopTour();
     }
   }, [activeTourMode, mode, stopTour]);
 
+  // Measure real rendered card height via ResizeObserver (eliminates hardcoded CARD_H = 196 overlap!)
+  useLayoutEffect(() => {
+    const el = cardRef.current;
+    if (!el || !activeTourMode) return;
+    const updateH = () => {
+      const h = Math.ceil(el.getBoundingClientRect().height);
+      if (h > 40) setMeasuredCardH((prev) => (Math.abs(prev - h) > 1 ? h : prev));
+    };
+    updateH();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(updateH);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    return undefined;
+  }, [activeTourMode, stepIdx, cardRef]);
+
   // Continuously locate & measure the real target DOM node via `data-tour="..."`
   useEffect(() => {
     if (!activeTourMode || !currentStep) {
-      setTargetRect(null);
+      setRawTargetRect(null);
       return;
     }
 
@@ -67,24 +90,31 @@ export default function StudioGuideOverlay() {
       const vwNow = window.innerWidth;
       const vhNow = window.innerHeight;
       setViewport({ w: vwNow, h: vhNow });
+
+      const candidates = Array.from(
+        document.querySelectorAll<HTMLElement>(currentStep.selector)
+      ).filter((node) => {
+        const r = node.getBoundingClientRect();
+        const st = window.getComputedStyle(node);
+        return st.display !== 'none' && st.visibility !== 'hidden' && r.width >= 4 && r.height >= 4;
+      });
       const el =
-        (document.querySelector(currentStep.selector) as HTMLElement | null) ??
+        candidates[0] ??
         (currentStep.fallbackSelector
           ? (document.querySelector(currentStep.fallbackSelector) as HTMLElement | null)
           : null);
 
       if (!el) {
-        setTargetRect(null);
+        setRawTargetRect(null);
         return;
       }
 
       let r = el.getBoundingClientRect();
       if (r.width < 4 || r.height < 4) {
-        setTargetRect(null);
+        setRawTargetRect(null);
         return;
       }
 
-      // On compact mobile screens, bring off-screen targets smoothly into view once per step
       const stepKey = `${activeTourMode}:${currentStep.id}`;
       if (
         scrolledStepRef.current !== stepKey &&
@@ -95,13 +125,13 @@ export default function StudioGuideOverlay() {
           el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
           r = el.getBoundingClientRect();
         } catch {
-          // ignore older browser behavior option
+          // ignore
         }
       }
 
       const x = Math.max(4, Math.min(vwNow - 12, r.left - PAD));
       const y = Math.max(4, Math.min(vhNow - 12, r.top - PAD));
-      setTargetRect({
+      setRawTargetRect({
         x,
         y,
         w: Math.max(24, Math.min(vwNow - x - 4, r.width + PAD * 2)),
@@ -134,7 +164,7 @@ export default function StudioGuideOverlay() {
       advanceTimerRef.current = setTimeout(() => {
         setCelebrating(false);
         setStepIdx((s) => s + 1);
-      }, 480);
+      }, 420);
     } else {
       setCelebrating(true);
       soundEngine.clapperSnap();
@@ -142,50 +172,135 @@ export default function StudioGuideOverlay() {
         setCelebrating(false);
         completeTour(activeTourMode);
         notify(t('guideCelebration'));
-      }, 650);
+      }, 560);
     }
   }, [activeTourMode, completeTour, notify, stepIdx, steps.length, t]);
 
-  // "Learn by Doing" — real clicks/taps inside the spotlighted control auto-advance smoothly!
+  // Compute strictly non-overlapping card & spotlight coordinates across ALL 5 viewports!
+  const vw = viewport.w;
+  const vh = viewport.h;
+  const margin = vw < 480 ? 10 : 16;
+  const gap = vw < 480 ? 12 : 18;
+  const cardW = Math.min(CARD_W, Math.max(240, vw - margin * 2));
+  const cardH = Math.min(measuredCardH, Math.max(150, vh - margin * 2));
+
+  let targetRect: TargetRect | null = rawTargetRect ? { ...rawTargetRect } : null;
+  let cardX = Math.round((vw - cardW) / 2);
+  let cardY = Math.round(vh - cardH - margin);
+
+  if (targetRect) {
+    const pref = currentStep?.preferredSide ?? 'bottom';
+    const tryOrder: ('top' | 'bottom' | 'left' | 'right')[] =
+      vw < 640 ? ['bottom', 'top', 'left', 'right'] : [pref, 'bottom', 'top', 'left', 'right'];
+
+    let placed = false;
+    for (const side of tryOrder) {
+      if (side === 'top' && targetRect.y - gap - cardH >= margin) {
+        cardX = targetRect.x + targetRect.w / 2 - cardW / 2;
+        cardY = targetRect.y - gap - cardH;
+        placed = true;
+        break;
+      }
+      if (side === 'bottom' && targetRect.y + targetRect.h + gap + cardH <= vh - margin) {
+        cardX = targetRect.x + targetRect.w / 2 - cardW / 2;
+        cardY = targetRect.y + targetRect.h + gap;
+        placed = true;
+        break;
+      }
+      if (side === 'left' && targetRect.x - gap - cardW >= margin) {
+        cardX = targetRect.x - gap - cardW;
+        cardY = targetRect.y + targetRect.h / 2 - cardH / 2;
+        placed = true;
+        break;
+      }
+      if (side === 'right' && targetRect.x + targetRect.w + gap + cardW <= vw - margin) {
+        cardX = targetRect.x + targetRect.w + gap;
+        cardY = targetRect.y + targetRect.h / 2 - cardH / 2;
+        placed = true;
+        break;
+      }
+    }
+
+    if (!placed) {
+      // Large container target (e.g. paper-stage or mobile full-height rail):
+      // Dock card at bottom (or top if target sits near bottom) AND trim spotlight rect so overlap === 0.0 px²!
+      const targetCenterY = targetRect.y + targetRect.h / 2;
+      if (targetCenterY <= vh * 0.58) {
+        cardY = vh - cardH - margin;
+        cardX = (vw - cardW) / 2;
+        const maxBottom = cardY - gap;
+        if (targetRect.y + targetRect.h > maxBottom) {
+          targetRect.h = Math.max(40, maxBottom - targetRect.y);
+        }
+      } else {
+        cardY = Math.max(margin, 62);
+        cardX = (vw - cardW) / 2;
+        const minTop = cardY + cardH + gap;
+        if (targetRect.y < minTop) {
+          const bottomEdge = targetRect.y + targetRect.h;
+          targetRect.y = minTop;
+          targetRect.h = Math.max(40, bottomEdge - minTop);
+        }
+      }
+    }
+  }
+
+  cardX = Math.max(margin, Math.min(vw - cardW - margin, Math.round(cardX)));
+  cardY = Math.max(margin, Math.min(vh - cardH - margin, Math.round(cardY)));
+
+  // "Learn by Doing" — advance ONLY on pointerup (after stroke/click completes, never cutting off a drawing mid-stroke!)
   useEffect(() => {
     if (!activeTourMode || !targetRect || celebrating) return;
-    const onCapturePointerDown = (e: PointerEvent) => {
-      // Ignore clicks on the guide card itself
-      if (cardRef.current && cardRef.current.contains(e.target as Node)) return;
-      const insideHole =
-        e.clientX >= targetRect.x &&
-        e.clientX <= targetRect.x + targetRect.w &&
-        e.clientY >= targetRect.y &&
-        e.clientY <= targetRect.y + targetRect.h;
-      if (insideHole) {
-        // Let the real button/canvas action run first, then celebrate & advance!
-        setTimeout(() => {
-          finishOrAdvance();
-        }, 280);
-      }
-    };
-    window.addEventListener('pointerdown', onCapturePointerDown, true);
-    return () => window.removeEventListener('pointerdown', onCapturePointerDown, true);
-  }, [activeTourMode, targetRect, celebrating, finishOrAdvance]);
+    const rectSnapshot = targetRect;
 
-  // Escape & Arrow navigation
+    const onCaptureDown = (e: PointerEvent) => {
+      if (cardRef.current && cardRef.current.contains(e.target as Node)) {
+        holePointerDownRef.current = false;
+        return;
+      }
+      holePointerDownRef.current =
+        e.clientX >= rectSnapshot.x &&
+        e.clientX <= rectSnapshot.x + rectSnapshot.w &&
+        e.clientY >= rectSnapshot.y &&
+        e.clientY <= rectSnapshot.y + rectSnapshot.h;
+    };
+
+    const onCaptureUp = (e: PointerEvent) => {
+      if (!holePointerDownRef.current) return;
+      holePointerDownRef.current = false;
+      if (cardRef.current && cardRef.current.contains(e.target as Node)) return;
+      setTimeout(() => {
+        finishOrAdvance();
+      }, 220);
+    };
+
+    window.addEventListener('pointerdown', onCaptureDown, true);
+    window.addEventListener('pointerup', onCaptureUp, true);
+    return () => {
+      window.removeEventListener('pointerdown', onCaptureDown, true);
+      window.removeEventListener('pointerup', onCaptureUp, true);
+    };
+  }, [activeTourMode, targetRect, celebrating, finishOrAdvance, cardRef]);
+
+  // Capture-phase ArrowLeft / ArrowRight isolation so background DrawingStage / PuppetStudio never flip frames!
   useEffect(() => {
     if (!activeTourMode) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'ArrowRight') {
         e.preventDefault();
-        stopTour();
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
         finishOrAdvance();
-      } else if (e.key === 'ArrowLeft' && stepIdx > 0) {
+      } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        setStepIdx((s) => Math.max(0, s - 1));
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        if (stepIdx > 0) setStepIdx((s) => Math.max(0, s - 1));
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [activeTourMode, finishOrAdvance, stepIdx, stopTour]);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [activeTourMode, finishOrAdvance, stepIdx]);
 
   useEffect(() => {
     return () => {
@@ -195,49 +310,6 @@ export default function StudioGuideOverlay() {
 
   if (!activeTourMode || !currentStep) return null;
 
-  // Smart card placement that NEVER overlaps the spotlighted target or clips outside ANY desktop or mobile viewport!
-  const vw = viewport.w;
-  const vh = viewport.h;
-  const margin = vw < 480 ? 12 : 16;
-  const cardW = Math.min(CARD_W, Math.max(240, vw - margin * 2));
-
-  let cardX = Math.round((vw - cardW) / 2);
-  let cardY = Math.round((vh - CARD_H) / 2);
-
-  if (targetRect) {
-    const gap = vw < 480 ? 14 : 22;
-    const pref = currentStep.preferredSide ?? 'bottom';
-    const tryOrder: ('top' | 'bottom' | 'left' | 'right')[] =
-      vw < 640 ? ['top', 'bottom', 'left', 'right'] : [pref, 'top', 'bottom', 'left', 'right'];
-    for (const side of tryOrder) {
-      if (side === 'top' && targetRect.y - gap - CARD_H >= margin) {
-        cardX = targetRect.x + targetRect.w / 2 - cardW / 2;
-        cardY = targetRect.y - gap - CARD_H;
-        break;
-      }
-      if (side === 'bottom' && targetRect.y + targetRect.h + gap + CARD_H <= vh - margin) {
-        cardX = targetRect.x + targetRect.w / 2 - cardW / 2;
-        cardY = targetRect.y + targetRect.h + gap;
-        break;
-      }
-      if (side === 'left' && targetRect.x - gap - cardW >= margin) {
-        cardX = targetRect.x - gap - cardW;
-        cardY = targetRect.y + targetRect.h / 2 - CARD_H / 2;
-        break;
-      }
-      if (side === 'right' && targetRect.x + targetRect.w + gap + cardW <= vw - margin) {
-        cardX = targetRect.x + targetRect.w + gap;
-        cardY = targetRect.y + targetRect.h / 2 - CARD_H / 2;
-        break;
-      }
-    }
-  }
-
-  // Always clamp strictly inside viewport bounds (even if targetRect is null or very large on phones!)
-  cardX = Math.max(margin, Math.min(vw - cardW - margin, Math.round(cardX)));
-  cardY = Math.max(margin, Math.min(vh - CARD_H - margin, Math.round(cardY)));
-
-  // Compute mascot gaze direction & hand-drawn arrow from card edge -> spotlight center
   let lookX = 0;
   let lookY = 0;
   let arrowPath = '';
@@ -247,14 +319,13 @@ export default function StudioGuideOverlay() {
     const tx = targetRect.x + targetRect.w / 2;
     const ty = targetRect.y + targetRect.h / 2;
     const cx = cardX + cardW / 2;
-    const cy = cardY + CARD_H / 2;
+    const cy = cardY + cardH / 2;
     const dx = tx - cx;
     const dy = ty - cy;
     const dist = Math.hypot(dx, dy) || 1;
     lookX = dx / dist;
     lookY = dy / dist;
 
-    // Start arrow on nearest side of the guide card & stop cleanly at the spotlight border
     const startX =
       Math.abs(dx) > Math.abs(dy)
         ? dx > 0
@@ -263,9 +334,9 @@ export default function StudioGuideOverlay() {
         : Math.max(cardX + 24, Math.min(cardX + cardW - 24, tx));
     const startY =
       Math.abs(dx) > Math.abs(dy)
-        ? Math.max(cardY + 24, Math.min(cardY + CARD_H - 24, ty))
+        ? Math.max(cardY + 24, Math.min(cardY + cardH - 24, ty))
         : dy > 0
-          ? cardY + CARD_H
+          ? cardY + cardH
           : cardY;
 
     const endX =
@@ -295,25 +366,26 @@ export default function StudioGuideOverlay() {
 
   return (
     <div
-      className="fixed inset-0 z-[70] pointer-events-none select-none"
+      className="fixed inset-0 z-[90] pointer-events-none select-none"
       role="dialog"
+      aria-modal="false"
       aria-label={t('guideMenuTitle')}
     >
-      {/* 4-Panel True Clickable-Hole Spotlight Backdrop (Hole stays 100% interactive!) */}
+      {/* 4-Panel True Clickable-Hole Spotlight Backdrop */}
       {targetRect ? (
         <>
           <div
-            className="fixed left-0 top-0 right-0 bg-black/55 backdrop-blur-[1px] pointer-events-auto transition-all duration-300"
+            className="fixed left-0 top-0 right-0 bg-black/55 backdrop-blur-[1px] pointer-events-auto transition-all duration-200"
             style={{ height: Math.max(0, targetRect.y) }}
             onClick={stopTour}
           />
           <div
-            className="fixed left-0 right-0 bottom-0 bg-black/55 backdrop-blur-[1px] pointer-events-auto transition-all duration-300"
+            className="fixed left-0 right-0 bottom-0 bg-black/55 backdrop-blur-[1px] pointer-events-auto transition-all duration-200"
             style={{ top: Math.min(vh, targetRect.y + targetRect.h) }}
             onClick={stopTour}
           />
           <div
-            className="fixed left-0 bg-black/55 backdrop-blur-[1px] pointer-events-auto transition-all duration-300"
+            className="fixed left-0 bg-black/55 backdrop-blur-[1px] pointer-events-auto transition-all duration-200"
             style={{
               top: targetRect.y,
               height: targetRect.h,
@@ -322,7 +394,7 @@ export default function StudioGuideOverlay() {
             onClick={stopTour}
           />
           <div
-            className="fixed right-0 bg-black/55 backdrop-blur-[1px] pointer-events-auto transition-all duration-300"
+            className="fixed right-0 bg-black/55 backdrop-blur-[1px] pointer-events-auto transition-all duration-200"
             style={{
               top: targetRect.y,
               height: targetRect.h,
@@ -388,39 +460,47 @@ export default function StudioGuideOverlay() {
         )}
       </svg>
 
-      {/* Living Bereli Gezgin Guide Card */}
+      {/* Living Mascot Guide Card */}
       <div
         ref={cardRef}
+        data-tour-card="true"
         style={{ left: cardX, top: cardY, width: cardW }}
-        className="fixed pointer-events-auto rounded-3xl bg-desk-surface/95 backdrop-blur-md border-2 border-ink-brass shadow-2xl p-4 transition-all duration-300"
+        className="fixed pointer-events-auto rounded-3xl bg-desk-surface/98 backdrop-blur-md border-2 border-ink-brass shadow-2xl p-3.5 sm:p-4 transition-all duration-200"
       >
-        <div className="flex items-start gap-3">
-          <GuideMascotSvg celebrating={celebrating} lookX={lookX} lookY={lookY} className="w-14 h-14 -mt-1" />
+        <div className="flex items-start gap-2.5 sm:gap-3">
+          <GuideMascotSvg
+            celebrating={celebrating}
+            lookX={lookX}
+            lookY={lookY}
+            className="w-12 h-12 sm:w-14 sm:h-14 -mt-1 shrink-0"
+          />
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex items-center justify-between gap-2">
-              <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-brass">
+              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass">
                 {t('guideStepOf')} {stepIdx + 1} / {steps.length}
               </span>
               <button
                 type="button"
                 onClick={stopTour}
-                className="p-1 rounded-lg text-desk-muted hover:text-desk-text hover:bg-desk-panel"
+                className="min-w-[36px] min-h-[36px] -my-1 -mr-1 p-1.5 rounded-xl text-desk-muted hover:text-desk-text hover:bg-desk-panel inline-flex items-center justify-center"
                 title={t('guideSkip')}
+                aria-label={t('guideSkip')}
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
             <h3 className="text-sm font-extrabold text-desk-text leading-snug">
               {t(currentStep.titleKey)}
             </h3>
-            <p className="text-xs text-desk-muted leading-relaxed">
-              {t(currentStep.bodyKey)}
+            <p className="text-xs text-desk-muted leading-relaxed">{t(currentStep.bodyKey)}</p>
+            <p className="font-mono text-[11px] text-ink-brass/90 pt-0.5 hidden sm:block">
+              {t('guideActionTip')}
             </p>
           </div>
         </div>
 
         {/* Step Dots + Navigation */}
-        <div className="mt-3 pt-2.5 border-t border-desk-border flex items-center justify-between gap-2">
+        <div className="mt-2.5 pt-2 border-t border-desk-border flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5">
             {steps.map((s, i) => (
               <span
@@ -444,18 +524,18 @@ export default function StudioGuideOverlay() {
                   soundEngine.click(0.95);
                   setStepIdx((s) => Math.max(0, s - 1));
                 }}
-                className="px-2.5 py-1 rounded-xl console-well border border-desk-border text-[11px] font-bold text-desk-muted hover:text-desk-text inline-flex items-center gap-1"
+                className="min-h-[38px] px-3 py-1.5 rounded-xl console-well border border-desk-border text-[11px] font-bold text-desk-muted hover:text-desk-text inline-flex items-center gap-1"
               >
-                <ArrowLeft className="w-3 h-3" />
+                <ArrowLeft className="w-3.5 h-3.5" />
                 {t('guidePrev')}
               </button>
             )}
             <button
               type="button"
               onClick={finishOrAdvance}
-              className="px-3 py-1 rounded-xl bg-ink-vermilion text-white text-[11px] font-extrabold inline-flex items-center gap-1 hover:brightness-110 shadow"
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-ink-vermilion hover:brightness-110 text-white text-xs font-extrabold inline-flex items-center gap-1.5 shadow"
             >
-              {stepIdx + 1 === steps.length ? (
+              {stepIdx + 1 >= steps.length ? (
                 <>
                   <Check className="w-3.5 h-3.5" />
                   {t('guideFinish')}
@@ -463,7 +543,7 @@ export default function StudioGuideOverlay() {
               ) : (
                 <>
                   {t('guideNext')}
-                  <ArrowRight className="w-3 h-3" />
+                  <ArrowRight className="w-3.5 h-3.5" />
                 </>
               )}
             </button>

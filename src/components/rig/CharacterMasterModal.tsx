@@ -47,7 +47,10 @@ import {
   setSavedByokGeminiKey,
 } from '../../engine/aiStudioClient';
 import { soundEngine } from '../../engine/soundEngine';
-import { useT, type TranslationKey } from '../../i18n/translations';
+import { localizePinOrPartLabel, useT, type TranslationKey } from '../../i18n/translations';
+import { useStudioStore } from '../../store/useStudioStore';
+import { safeSetPointerCapture } from '../../utils/pointerCapture';
+import { useModalA11y } from '../../hooks/useModalA11y';
 
 interface CharacterMasterModalProps {
   open: boolean;
@@ -83,11 +86,11 @@ const DEFAULT_JOINT_PINS: Array<{ id: string; labelTr: string; x: number; y: num
   { id: 'footR', labelTr: 'Ayak Sağ', x: 0.61, y: 0.90 },
 ];
 
-const MOUTH_KEYS: Array<{ id: CustomMouthKey; label: string }> = [
-  { id: 'closed', label: 'Kapalı' },
-  { id: 'A', label: 'A' },
-  { id: 'E', label: 'E' },
-  { id: 'O', label: 'O' },
+const MOUTH_KEYS: Array<{ id: CustomMouthKey; labelKey?: TranslationKey; literal?: string }> = [
+  { id: 'closed', labelKey: 'rigMouthClosed' },
+  { id: 'A', literal: 'A' },
+  { id: 'E', literal: 'E' },
+  { id: 'O', literal: 'O' },
 ];
 
 function loadCanvasFromUrl(url: string): Promise<HTMLCanvasElement> {
@@ -125,6 +128,12 @@ export default function CharacterMasterModal({
   onSave,
 }: CharacterMasterModalProps) {
   const t = useT();
+  const locale = useStudioStore((st) => st.locale);
+  const modalDialogRef = useModalA11y<HTMLDivElement>({
+    open,
+    onClose,
+    modal: true,
+  });
   const [draft, setDraft] = useState<CharacterMasterRig>(initialRig);
   const [activeTab, setActiveTab] = useState<'angles' | 'joints' | 'face'>('angles');
   const [previewAngleDeg, setPreviewAngleDeg] = useState<number>(0);
@@ -313,10 +322,10 @@ export default function CharacterMasterModal({
         soundEngine.click(1.18);
         setNotice(null);
       } catch {
-        setNotice({ text: 'Görsel okunamadı, lütfen başka bir çizim dene.', tone: 'amber' });
+        setNotice({ text: t('rigErrReadSingle'), tone: 'amber' });
       }
     },
-    [refAnchors]
+    [refAnchors, t]
   );
 
   const handleUploadBatchPhotos = useCallback(
@@ -367,7 +376,7 @@ export default function CharacterMasterModal({
         }
 
         if (addedCount === 0) {
-          setNotice({ text: 'Görsel okunamadı, lütfen başka bir çizim dene.', tone: 'amber' });
+          setNotice({ text: t('rigErrReadSingle'), tone: 'amber' });
           return;
         }
 
@@ -380,7 +389,7 @@ export default function CharacterMasterModal({
         soundEngine.click(1.22);
         setNotice({ text: `✓ ${addedCount} ${t('v4MultiPhotosSuccess')}`, tone: 'ok' });
       } catch {
-        setNotice({ text: 'Görseller okunamadı, lütfen tekrar dene.', tone: 'amber' });
+        setNotice({ text: t('rigErrReadMulti'), tone: 'amber' });
       }
     },
     [draft.views, refAnchors, t]
@@ -456,7 +465,7 @@ export default function CharacterMasterModal({
     const c = traceCanvasRef.current;
     const ctx = c?.getContext('2d', { willReadFrequently: true });
     if (!c || !ctx) return;
-    c.setPointerCapture(e.pointerId);
+    safeSetPointerCapture(c, e.pointerId);
     traceHistoryRef.current.push(ctx.getImageData(0, 0, c.width, c.height));
     if (traceHistoryRef.current.length > 20) traceHistoryRef.current.shift();
     traceDrawingRef.current = true;
@@ -648,12 +657,17 @@ export default function CharacterMasterModal({
 
   const modalNode = (
     <div
+      onClick={onClose}
       className="fixed inset-0 z-[9999] flex items-center justify-center p-2 sm:p-4 bg-black/75 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t('v4ModalTitle')}
     >
-      <div className="relative w-full max-w-3xl max-h-[92dvh] flex flex-col rounded-2xl bg-desk-panel/95 border border-ink-brass/40 shadow-2xl overflow-hidden text-desk-ink">
+      <div
+        ref={modalDialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="char-master-modal-title"
+        onClick={(e) => e.stopPropagation()}
+        className="relative w-full max-w-3xl max-h-[calc(100dvh-1rem)] flex flex-col rounded-2xl bg-desk-panel/95 border border-ink-brass/40 shadow-2xl overflow-hidden text-desk-ink"
+      >
         {/* Hidden file inputs */}
         <input
           ref={singleSlotInputRef}
@@ -706,11 +720,11 @@ export default function CharacterMasterModal({
           <div className="flex items-center justify-between gap-2 mb-2.5">
             <div className="flex items-center gap-2 min-w-0">
               <Sparkles className="w-4 h-4 text-ink-brass shrink-0" />
-              <h2 className="text-sm sm:text-base font-bold tracking-tight truncate">
+              <h2 id="char-master-modal-title" className="text-sm sm:text-base font-bold tracking-tight truncate">
                 {t('v4ModalTitle')}
               </h2>
               <span
-                className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold shrink-0 ${
+                className={`px-2 py-0.5 rounded-full text-[11px] font-bold shrink-0 ${
                   viewCount >= 3
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
                     : 'bg-ink-brass/15 text-ink-brass border border-ink-brass/35'
@@ -722,7 +736,7 @@ export default function CharacterMasterModal({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-desk-muted hover:text-desk-ink hover:bg-white/5 transition-colors"
+              className="min-w-[44px] min-h-[44px] p-2 rounded-lg inline-flex items-center justify-center text-desk-muted hover:text-desk-ink hover:bg-white/5 transition-colors"
               aria-label={t('exportCloseAria')}
             >
               <X className="w-4 h-4" />
@@ -733,7 +747,7 @@ export default function CharacterMasterModal({
             {/* Compact Backlit Live 360° Preview */}
             <div className="relative w-28 h-28 sm:w-32 sm:h-32 shrink-0 rounded-xl bg-[#F8F4EC] border border-ink-brass/40 shadow-inner overflow-hidden flex items-center justify-center">
               <canvas ref={previewCanvasRef} width={160} height={160} className="w-full h-full block" />
-              <span className="absolute bottom-1 right-1.5 px-1.5 py-0.5 rounded bg-neutral-950/75 text-[9.5px] font-mono text-ink-brass">
+              <span className="absolute bottom-1 right-1.5 px-1.5 py-0.5 rounded bg-neutral-950/75 text-[11px] font-mono text-ink-brass">
                 {previewAngleDeg > 0 ? `+${previewAngleDeg}°` : `${previewAngleDeg}°`}
               </span>
             </div>
@@ -755,7 +769,7 @@ export default function CharacterMasterModal({
                         key={s.label}
                         type="button"
                         onClick={() => setPreviewAngleDeg(s.val)}
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                        className={`px-1.5 py-0.5 rounded text-[11px] font-bold transition-colors ${
                           Math.abs(previewAngleDeg - s.val) <= 8
                             ? 'bg-ink-brass text-neutral-950'
                             : 'bg-white/5 text-desk-muted hover:text-desk-ink'
@@ -779,7 +793,7 @@ export default function CharacterMasterModal({
 
               {/* 7-Class Universal Creature Type Selector */}
               <div>
-                <div className="text-[10.5px] font-semibold text-desk-muted mb-1">
+                <div className="text-[11px] font-semibold text-desk-muted mb-1">
                   {t('v4CreatureTypeLabel')}
                 </div>
                 <div className="flex flex-wrap gap-1">
@@ -889,7 +903,7 @@ export default function CharacterMasterModal({
                         <span className="text-[11px] font-bold">{t(labelKey)}</span>
                         {slot ? (
                           <span
-                            className={`px-1.5 py-0.5 rounded-full text-[9.5px] font-bold ${
+                            className={`px-1.5 py-0.5 rounded-full text-[11px] font-bold ${
                               isFront
                                 ? 'bg-emerald-500/20 text-emerald-300'
                                 : 'bg-ink-brass/20 text-ink-brass'
@@ -902,7 +916,7 @@ export default function CharacterMasterModal({
                                 : '✓'}
                           </span>
                         ) : (
-                          <span className="text-[9.5px] text-desk-muted">{t('v4BadgeOptional')}</span>
+                          <span className="text-[11px] text-desk-muted">{t('v4BadgeOptional')}</span>
                         )}
                       </div>
 
@@ -928,7 +942,7 @@ export default function CharacterMasterModal({
                         ) : (
                           <div className="flex flex-col items-center gap-1 text-neutral-500 group-hover:text-neutral-800">
                             <Upload className="w-5 h-5" />
-                            <span className="text-[10px] font-bold">+</span>
+                            <span className="text-[11px] font-bold">+</span>
                           </div>
                         )}
                       </button>
@@ -941,7 +955,7 @@ export default function CharacterMasterModal({
                             singleSlotTargetRef.current = 'front';
                             singleSlotInputRef.current?.click();
                           }}
-                          className="w-full py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-desk-border text-[10.5px] font-bold inline-flex items-center justify-center gap-1"
+                          className="w-full py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-desk-border text-[11px] font-bold inline-flex items-center justify-center gap-1"
                         >
                           <Upload className="w-3 h-3 text-ink-brass" />
                           {t('v4BtnUpload')}
@@ -955,7 +969,7 @@ export default function CharacterMasterModal({
                                 singleSlotTargetRef.current = angle;
                                 singleSlotInputRef.current?.click();
                               }}
-                              className="py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-desk-border text-[10px] font-bold inline-flex items-center justify-center gap-1"
+                              className="py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-desk-border text-[11px] font-bold inline-flex items-center justify-center gap-1"
                             >
                               <Upload className="w-3 h-3 text-ink-brass" />
                               {t('v4BtnUpload')}
@@ -963,7 +977,7 @@ export default function CharacterMasterModal({
                             <button
                               type="button"
                               onClick={() => openTracePad(angle)}
-                              className="py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-desk-border text-[10px] font-bold inline-flex items-center justify-center gap-1"
+                              className="py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-desk-border text-[11px] font-bold inline-flex items-center justify-center gap-1"
                             >
                               <Pencil className="w-3 h-3 text-ink-brass" />
                               {t('v4BtnDrawOnDesk')}
@@ -979,7 +993,7 @@ export default function CharacterMasterModal({
                                   setAiDrawerAngle((cur) => (cur === angle ? null : angle));
                                   setPendingAiApproval(null);
                                 }}
-                                className={`flex-1 py-1 rounded-lg text-[10px] font-bold inline-flex items-center justify-center gap-1 border transition-colors ${
+                                className={`flex-1 py-1 rounded-lg text-[11px] font-bold inline-flex items-center justify-center gap-1 border transition-colors ${
                                   aiDrawerAngle === angle
                                     ? 'bg-amber-500/25 border-amber-400/60 text-amber-200'
                                     : 'bg-ink-brass/10 hover:bg-ink-brass/20 border-ink-brass/30 text-ink-brass'
@@ -1070,10 +1084,10 @@ export default function CharacterMasterModal({
                         <button
                           type="button"
                           onClick={() => setShowByokInput((v) => !v)}
-                          className="text-[10.5px] text-desk-muted hover:text-ink-brass inline-flex items-center gap-1"
+                          className="text-[11px] text-desk-muted hover:text-ink-brass inline-flex items-center gap-1"
                         >
                           <KeyRound className="w-3 h-3" />
-                          <span>{showByokInput ? 'Kişisel anahtarı gizle' : 'İsteğe bağlı: Kişisel Gemini anahtarı kullan'}</span>
+                          <span>{showByokInput ? t('rigHideApiKey') : t('rigShowApiKey')}</span>
                         </button>
                         {showByokInput && (
                           <input
@@ -1083,7 +1097,7 @@ export default function CharacterMasterModal({
                               setByokKey(e.target.value);
                               setSavedByokGeminiKey(e.target.value);
                             }}
-                            placeholder="AIza... (Yalnızca bu tarayıcı oturumunda kalır)"
+                            placeholder={t('rigApiKeyPlaceholder')}
                             className="mt-1.5 w-full px-2.5 py-1.5 rounded-lg bg-black/30 border border-desk-border text-xs text-desk-ink"
                           />
                         )}
@@ -1095,7 +1109,7 @@ export default function CharacterMasterModal({
                       <div className="text-xs font-bold text-ink-brass">{t('v4AiApproveTitle')}</div>
                       <div className="grid grid-cols-2 gap-2.5">
                         <div className="rounded-lg bg-[#F8F4EC] p-2 text-center">
-                          <div className="text-[10px] font-bold text-neutral-700 mb-1">{t('v4BadgeOriginal')}</div>
+                          <div className="text-[11px] font-bold text-neutral-700 mb-1">{t('v4BadgeOriginal')}</div>
                           <img
                             src={draft.views.front?.dataUrl}
                             alt="Front"
@@ -1103,7 +1117,7 @@ export default function CharacterMasterModal({
                           />
                         </div>
                         <div className="rounded-lg bg-[#F8F4EC] p-2 text-center">
-                          <div className="text-[10px] font-bold text-neutral-700 mb-1">
+                          <div className="text-[11px] font-bold text-neutral-700 mb-1">
                             {pendingAiApproval.angle === 'back' ? t('v4SlotBack') : t('v4SlotSide')}
                           </div>
                           <img
@@ -1217,18 +1231,18 @@ export default function CharacterMasterModal({
                 )}
                 {/* 5 Horizontal Blue Calibration Lines */}
                 {[
-                  { v: refAnchors.headTopV, lbl: 'Baş' },
-                  { v: refAnchors.eyeLineV, lbl: 'Göz' },
-                  { v: refAnchors.shoulderV, lbl: 'Omuz' },
-                  { v: refAnchors.hipV, lbl: 'Kalça' },
-                  { v: refAnchors.soleV, lbl: 'Taban' },
+                  { v: refAnchors.headTopV, lbl: t('rigLandmarkHead') },
+                  { v: refAnchors.eyeLineV, lbl: t('rigLandmarkEye') },
+                  { v: refAnchors.shoulderV, lbl: t('rigLandmarkShoulder') },
+                  { v: refAnchors.hipV, lbl: t('rigLandmarkHip') },
+                  { v: refAnchors.soleV, lbl: t('rigLandmarkSole') },
                 ].map((line) => (
                   <div
                     key={line.lbl}
                     className="absolute left-0 right-0 border-t border-dashed border-sky-500/60 pointer-events-none flex justify-end pr-1.5"
                     style={{ top: `${Math.round(line.v * 100)}%` }}
                   >
-                    <span className="text-[9px] font-bold text-sky-600/80 -mt-3 bg-[#FAF6ED]/80 px-1 rounded">
+                    <span className="text-[11px] font-bold text-sky-600/80 -mt-3 bg-[#FAF6ED]/80 px-1 rounded">
                       {line.lbl}
                     </span>
                   </div>
@@ -1386,7 +1400,7 @@ export default function CharacterMasterModal({
                           top: `${pos.y * 100}%`,
                         }}
                         className="absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-ink-brass border-2 border-neutral-950 shadow-md hover:scale-125 transition-transform cursor-grab active:cursor-grabbing"
-                        title={pin.labelTr}
+                        title={localizePinOrPartLabel(pin.labelTr, locale)}
                       />
                     );
                   })}
@@ -1432,12 +1446,12 @@ export default function CharacterMasterModal({
                         key={m.id}
                         className="rounded-xl border border-desk-border bg-desk-surface/40 p-2 flex flex-col items-center gap-1.5"
                       >
-                        <span className="text-[11px] font-bold">{m.label}</span>
+                        <span className="text-[11px] font-bold">{m.labelKey ? t(m.labelKey) : m.literal}</span>
                         <div className="w-16 h-12 rounded-lg bg-[#FAF6ED] border border-black/10 flex items-center justify-center overflow-hidden">
                           {customUrl ? (
-                            <img src={customUrl} alt={m.label} className="w-full h-full object-contain p-1" />
+                            <img src={customUrl} alt={m.labelKey ? t(m.labelKey) : m.literal} className="w-full h-full object-contain p-1" />
                           ) : (
-                            <span className="text-[10px] text-neutral-400">Auto</span>
+                            <span className="text-[11px] text-neutral-500">{t('rigAutoBadge')}</span>
                           )}
                         </div>
                         <button
@@ -1446,7 +1460,7 @@ export default function CharacterMasterModal({
                             mouthTargetRef.current = m.id;
                             mouthInputRef.current?.click();
                           }}
-                          className="w-full py-1 rounded-lg bg-white/5 hover:bg-white/10 text-[10px] font-bold"
+                          className="w-full py-1 rounded-lg bg-white/5 hover:bg-white/10 text-[11px] font-bold"
                         >
                           {t('v4BtnUpload')}
                         </button>

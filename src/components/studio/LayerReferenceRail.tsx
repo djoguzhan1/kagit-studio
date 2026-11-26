@@ -29,7 +29,8 @@ import { BlobImage, KeycapButton } from '../ui/KeycapButton';
 import { ToggleLeverSwitch } from '../ui/Studio3DControls';
 import { OnionLayersIcon } from '../ui/AnimatedStudioIcons';
 import { makeId, saveBlob } from '../../engine/db';
-import { useT, type TranslationKey } from '../../i18n/translations';
+import { localizeLayerName, useT, type TranslationKey } from '../../i18n/translations';
+import { useModalA11y } from '../../hooks/useModalA11y';
 
 const PAPER_STYLES: { id: PaperStyleId; labelKey: TranslationKey }[] = [
   { id: 'bristol', labelKey: 'railPaperBristol' },
@@ -136,6 +137,12 @@ export default function LayerReferenceRail({
     notify,
   } = useStudioStore();
   const t = useT();
+  const locale = useStudioStore((st) => st.locale);
+  const mobileRailRef = useModalA11y<HTMLElement>({
+    open: Boolean(mobileOpen),
+    onClose: onCloseMobile,
+    modal: true,
+  });
 
   const [addLayerOpen, setAddLayerOpen] = useState(false);
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
@@ -178,9 +185,9 @@ export default function LayerReferenceRail({
         blobKey,
         swatches,
       });
-      notify('Karakter referansı & renk paleti eklendi');
+      notify(t('refAddedToast'));
     } catch {
-      notify('Referans yüklenemedi', 'error');
+      notify(t('refErrorToast'), 'error');
     } finally {
       if (refInput.current) refInput.current.value = '';
     }
@@ -192,9 +199,9 @@ export default function LayerReferenceRail({
     try {
       const key = await saveBlob(file);
       setSceneBackground(key);
-      notify('Sabit sahne arka planı yüklendi (tüm karelerin altında sabit!)');
+      notify(t('bgAddedToast'));
     } catch {
-      notify('Arka plan yüklenemedi', 'error');
+      notify(t('bgErrorToast'), 'error');
     } finally {
       if (bgInput.current) bgInput.current.value = '';
     }
@@ -233,8 +240,12 @@ export default function LayerReferenceRail({
         <div onClick={onCloseMobile} className="fixed inset-0 z-40 bg-black/60 lg:hidden" />
       )}
       <aside
+        ref={mobileRailRef}
+        role={mobileOpen ? 'dialog' : undefined}
+        aria-modal={mobileOpen ? 'true' : undefined}
+        aria-label={mobileOpen ? t('railTabLayers') : undefined}
         className={`${
-          mobileOpen ? 'fixed right-0 top-14 bottom-0 z-50 flex shadow-2xl' : 'hidden'
+          mobileOpen ? 'fixed right-0 top-14 bottom-0 z-50 flex shadow-2xl max-w-[calc(100vw-1rem)]' : 'hidden'
         } lg:static lg:flex w-[256px] shrink-0 border-l border-desk-border bg-desk-surface flex-col select-none`}
       >
         {/* Clean 3-Tab Rail Header: Layers | Paper & Guides | Camera */}
@@ -279,7 +290,7 @@ export default function LayerReferenceRail({
             {/* Cel Layer Stack */}
             <div className="space-y-2">
               <div className="flex items-center justify-between px-1">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-desk-muted">
+                <span className="font-mono text-[11px] uppercase tracking-widest text-desk-muted">
                   {t('stageFrameLabel')} #{activeFrameIndex + 1} · {t('railFrameLayers')}
                 </span>
                 <button
@@ -302,21 +313,21 @@ export default function LayerReferenceRail({
                   <button
                     type="button"
                     onClick={() => addRoleLayer('color')}
-                    className="py-1 px-1 rounded-lg bg-desk-panel hover:border-ink-brass border border-desk-border font-mono text-[9.5px] font-bold text-ink-brass"
+                    className="py-1 px-1 rounded-lg bg-desk-panel hover:border-ink-brass border border-desk-border font-mono text-[11px] font-bold text-ink-brass"
                   >
                     {t('railAddColor')}
                   </button>
                   <button
                     type="button"
                     onClick={() => addRoleLayer('ink')}
-                    className="py-1 px-1 rounded-lg bg-desk-panel hover:border-desk-text border border-desk-border font-mono text-[9.5px] font-bold text-desk-text"
+                    className="py-1 px-1 rounded-lg bg-desk-panel hover:border-desk-text border border-desk-border font-mono text-[11px] font-bold text-desk-text"
                   >
                     {t('railAddInk')}
                   </button>
                   <button
                     type="button"
                     onClick={() => addRoleLayer('rough')}
-                    className="py-1 px-1 rounded-lg bg-desk-panel hover:border-ink-blue border border-desk-border font-mono text-[9.5px] font-bold text-ink-blue"
+                    className="py-1 px-1 rounded-lg bg-desk-panel hover:border-ink-blue border border-desk-border font-mono text-[11px] font-bold text-ink-blue"
                   >
                     {t('railAddRough')}
                   </button>
@@ -372,7 +383,7 @@ export default function LayerReferenceRail({
                             title={t('railRenameHint')}
                             className="text-xs font-semibold text-desk-text truncate flex-1 flex items-center gap-1.5"
                           >
-                            <span className="truncate">{layer.name}</span>
+                            <span className="truncate">{localizeLayerName(layer.name, locale)}</span>
                             {layer.blobKey && (
                               <span
                                 className="w-1.5 h-1.5 rounded-full bg-ink-emerald shrink-0"
@@ -477,7 +488,7 @@ export default function LayerReferenceRail({
                                   layer.blendMode === 'multiply' ? 'source-over' : 'multiply',
                               });
                             }}
-                            className={`font-mono text-[8.5px] px-1.5 py-0.5 rounded border shrink-0 ${
+                            className={`font-mono text-[11px] px-1.5 py-0.5 rounded border shrink-0 ${
                               layer.blendMode === 'multiply'
                                 ? 'border-ink-brass text-ink-brass'
                                 : 'border-desk-border text-desk-muted'
@@ -496,7 +507,7 @@ export default function LayerReferenceRail({
             {/* Fixed Scene Background Plane (1 Background across all frames + Parallax!) */}
             <div className="rounded-2xl console-well border border-desk-border p-2.5 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-desk-muted flex items-center gap-1.5">
+                <span className="font-mono text-[11px] uppercase tracking-widest text-desk-muted flex items-center gap-1.5">
                   <ImageIcon className="w-3.5 h-3.5 text-ink-emerald" />
                   {t('railFixedBg')}
                 </span>
@@ -504,7 +515,7 @@ export default function LayerReferenceRail({
                   <button
                     type="button"
                     onClick={() => setSceneBackground(null)}
-                    className="font-mono text-[10px] text-ink-vermilion hover:underline"
+                    className="font-mono text-[11px] text-ink-vermilion hover:underline"
                   >
                     {t('railRemoveBg')}
                   </button>
@@ -521,7 +532,7 @@ export default function LayerReferenceRail({
                     />
                   </div>
                   <div>
-                    <div className="flex justify-between font-mono text-[9px] text-desk-muted mb-0.5">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-0.5">
                       <span className="uppercase">{t('railParallax')}</span>
                       <span>{Math.round((project.backgroundParallax ?? 0.35) * 100)}%</span>
                     </div>
@@ -563,7 +574,7 @@ export default function LayerReferenceRail({
             {/* Onion Skin Block with 3D Toggle Lever */}
             <div className="rounded-2xl console-well border border-desk-border p-2.5 space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-desk-muted flex items-center gap-1.5">
+                <span className="font-mono text-[11px] uppercase tracking-widest text-desk-muted flex items-center gap-1.5">
                   <OnionLayersIcon className="w-4 h-4 text-desk-text" />
                   {t('railOnionTitle')}
                 </span>
@@ -578,7 +589,7 @@ export default function LayerReferenceRail({
                 <>
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     <div>
-                      <div className="font-mono text-[10px] text-ink-rose mb-1">
+                      <div className="font-mono text-[11px] text-ink-rose mb-1">
                         {t('railOnionPrev')} ({onion.prevCount})
                       </div>
                       <div className="flex gap-1">
@@ -587,7 +598,7 @@ export default function LayerReferenceRail({
                             key={n}
                             type="button"
                             onClick={() => updateOnion({ prevCount: n })}
-                            className={`flex-1 py-0.5 rounded font-mono text-[10px] border ${
+                            className={`flex-1 py-0.5 rounded font-mono text-[11px] border ${
                               onion.prevCount === n
                                 ? 'bg-ink-rose/20 border-ink-rose text-desk-text font-bold'
                                 : 'border-desk-border text-desk-muted'
@@ -599,7 +610,7 @@ export default function LayerReferenceRail({
                       </div>
                     </div>
                     <div>
-                      <div className="font-mono text-[10px] text-ink-blue mb-1">
+                      <div className="font-mono text-[11px] text-ink-blue mb-1">
                         {t('railOnionNext')} ({onion.nextCount})
                       </div>
                       <div className="flex gap-1">
@@ -608,7 +619,7 @@ export default function LayerReferenceRail({
                             key={n}
                             type="button"
                             onClick={() => updateOnion({ nextCount: n })}
-                            className={`flex-1 py-0.5 rounded font-mono text-[10px] border ${
+                            className={`flex-1 py-0.5 rounded font-mono text-[11px] border ${
                               onion.nextCount === n
                                 ? 'bg-ink-blue/20 border-ink-blue text-desk-text font-bold'
                                 : 'border-desk-border text-desk-muted'
@@ -622,7 +633,7 @@ export default function LayerReferenceRail({
                   </div>
 
                   <div>
-                    <div className="flex justify-between font-mono text-[10px] text-desk-muted mb-1">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted mb-1">
                       <span className="uppercase">{t('railOnionOpacity')}</span>
                       <span>{Math.round(onion.opacity * 100)}%</span>
                     </div>
@@ -642,7 +653,7 @@ export default function LayerReferenceRail({
 
             {/* Physical Paper Surface Picker */}
             <div className="rounded-2xl console-well border border-desk-border p-2.5 space-y-2">
-              <span className="font-mono text-[10px] uppercase tracking-widest text-desk-muted">
+              <span className="font-mono text-[11px] uppercase tracking-widest text-desk-muted">
                 {t('railPaperTitle')}
               </span>
               <div className="grid grid-cols-3 gap-1">
@@ -653,7 +664,7 @@ export default function LayerReferenceRail({
                       key={ps.id}
                       type="button"
                       onClick={() => updateProjectSettings({ paperStyle: ps.id })}
-                      className={`py-1 px-1.5 rounded-lg font-mono text-[10px] border transition-colors ${
+                      className={`py-1 px-1.5 rounded-lg font-mono text-[11px] border transition-colors ${
                         active
                           ? 'bg-desk-panel border-ink-brass text-desk-text font-bold'
                           : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -668,7 +679,7 @@ export default function LayerReferenceRail({
 
             {/* Field Guides Toggle */}
             <div className="flex items-center justify-between px-1">
-              <span className="font-mono text-[10px] uppercase tracking-widest text-desk-muted flex items-center gap-1.5">
+              <span className="font-mono text-[11px] uppercase tracking-widest text-desk-muted flex items-center gap-1.5">
                 <Grid className="w-3.5 h-3.5" />
                 {t('railFieldGuides')}
               </span>
@@ -681,7 +692,7 @@ export default function LayerReferenceRail({
             {/* Animator's Underlay Motion Guides (Non-Exporting Blue Sheets!) */}
             <div className="rounded-2xl console-well border border-desk-border p-2.5 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-ink-blue">
+                <span className="font-mono text-[11px] uppercase tracking-widest text-ink-blue">
                   {t('railGuidesTitle')}
                 </span>
               </div>
@@ -691,7 +702,7 @@ export default function LayerReferenceRail({
                     key={g.id}
                     type="button"
                     onClick={() => updateGuides({ underlay: g.id })}
-                    className={`py-1.5 px-2 rounded-lg font-mono text-[10px] border text-left transition-colors ${
+                    className={`py-1.5 px-2 rounded-lg font-mono text-[11px] border text-left transition-colors ${
                       guides.underlay === g.id
                         ? 'bg-ink-blue/20 border-ink-blue text-desk-text font-bold'
                         : 'border-desk-border text-desk-muted hover:text-desk-text'
@@ -711,7 +722,7 @@ export default function LayerReferenceRail({
             {/* 2D Cinematic Camera Rig & Impact Shake */}
             <div className="rounded-2xl console-well border border-desk-border p-2.5 space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-ink-vermilion flex items-center gap-1.5">
+                <span className="font-mono text-[11px] uppercase tracking-widest text-ink-vermilion flex items-center gap-1.5">
                   <Film className="w-3.5 h-3.5" />
                   {t('railCamTitle')}
                 </span>
@@ -719,7 +730,7 @@ export default function LayerReferenceRail({
                   <button
                     type="button"
                     onClick={clearCameraKeyframes}
-                    className="font-mono text-[9px] text-desk-muted hover:text-ink-vermilion"
+                    className="font-mono text-[11px] text-desk-muted hover:text-ink-vermilion"
                   >
                     {t('railCamReset')}
                   </button>
@@ -728,7 +739,7 @@ export default function LayerReferenceRail({
 
               <div className="space-y-2">
                 <div>
-                  <div className="flex justify-between font-mono text-[9px] text-desk-muted">
+                  <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                     <span>
                       {t('stageFrameLabel')} #{activeFrameIndex + 1} {t('railCamZoom')}
                     </span>
@@ -752,7 +763,7 @@ export default function LayerReferenceRail({
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <div className="flex justify-between font-mono text-[9px] text-desk-muted">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                       <span>{t('railCamPanX')}</span>
                       <span>{Math.round(activeCamKf.panX * 100)}%</span>
                     </div>
@@ -773,7 +784,7 @@ export default function LayerReferenceRail({
                     />
                   </div>
                   <div>
-                    <div className="flex justify-between font-mono text-[9px] text-desk-muted">
+                    <div className="flex justify-between font-mono text-[11px] text-desk-muted">
                       <span>{t('railCamPanY')}</span>
                       <span>{Math.round(activeCamKf.panY * 100)}%</span>
                     </div>
@@ -794,12 +805,12 @@ export default function LayerReferenceRail({
                     />
                   </div>
                 </div>
-                <p className="text-[10px] text-desk-muted leading-snug">{t('railCamHint')}</p>
+                <p className="text-[11px] text-desk-muted leading-snug">{t('railCamHint')}</p>
               </div>
 
               {/* 1-Click Impact Camera Shake on Active Frame */}
               <div className="pt-2 border-t border-desk-border flex items-center justify-between">
-                <span className="font-mono text-[9.5px] text-desk-muted flex items-center gap-1">
+                <span className="font-mono text-[11px] text-desk-muted flex items-center gap-1">
                   <Zap className="w-3.5 h-3.5 text-ink-brass" />
                   {t('railShakeTitle')}
                 </span>
@@ -809,7 +820,7 @@ export default function LayerReferenceRail({
                       key={lvl}
                       type="button"
                       onClick={() => setFrameCameraShake(activeFrameIndex, lvl)}
-                      className={`w-6 h-6 rounded font-mono text-[10px] border ${
+                      className={`w-6 h-6 rounded font-mono text-[11px] border ${
                         (frame.cameraShake ?? 0) === lvl
                           ? 'bg-ink-vermilion text-white border-ink-vermilion font-bold'
                           : 'border-desk-border text-desk-muted'
@@ -823,7 +834,7 @@ export default function LayerReferenceRail({
 
               {/* Scene Lighting Atmosphere */}
               <div className="pt-2 border-t border-desk-border space-y-1.5">
-                <span className="font-mono text-[9px] uppercase text-desk-muted">
+                <span className="font-mono text-[11px] uppercase text-desk-muted">
                   {t('railAtmoTitle')}
                 </span>
                 <div className="grid grid-cols-2 gap-1">
@@ -832,7 +843,7 @@ export default function LayerReferenceRail({
                       key={a.id}
                       type="button"
                       onClick={() => setSceneAtmosphere(a.id)}
-                      className={`py-1 px-1.5 rounded-lg font-mono text-[10px] border ${
+                      className={`py-1 px-1.5 rounded-lg font-mono text-[11px] border ${
                         (project.atmosphere ?? 'none') === a.id
                           ? 'bg-desk-panel border-ink-brass text-desk-text font-bold'
                           : 'border-desk-border text-desk-muted'
@@ -847,7 +858,7 @@ export default function LayerReferenceRail({
 
             {/* Character Model Sheet & Reference Drawer */}
             <div className="space-y-2">
-              <div className="font-mono text-[10px] uppercase tracking-widest text-desk-muted flex items-center gap-1.5 px-1">
+              <div className="font-mono text-[11px] uppercase tracking-widest text-desk-muted flex items-center gap-1.5 px-1">
                 <BookOpen className="w-3.5 h-3.5 text-ink-brass" />
                 {t('railRefsTitle')}
               </div>

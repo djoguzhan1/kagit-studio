@@ -44,15 +44,18 @@ export default function DrawWorkspace() {
   // Global Tab (Zen Mode) + Q (Radial Quick Wheel) shortcuts
   useEffect(() => {
     const onPointerMove = (e: PointerEvent) => {
-      lastPointerRef.current = { x: e.clientX, y: e.clientY };
+      if (e.pointerType !== 'touch') {
+        lastPointerRef.current = { x: e.clientX, y: e.clientY };
+      }
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if ((e.target as HTMLElement | null)?.isContentEditable) return;
 
-      if (e.key === 'Tab') {
+      if (e.key === 'Tab' && !useStudioStore.getState().activeTourMode) {
         e.preventDefault();
         soundEngine.toggle(!useStudioStore.getState().zenMode);
         toggleZenMode();
@@ -91,6 +94,13 @@ export default function DrawWorkspace() {
   const handleUndo = () => persistAfterHistory(engineRef.current?.undo() ?? null);
   const handleRedo = () => persistAfterHistory(engineRef.current?.redo() ?? null);
 
+  const handleOpenQuickWheelCentered = () => {
+    soundEngine.click(1.1);
+    const cx = typeof window !== 'undefined' ? Math.round(window.innerWidth / 2) : 480;
+    const cy = typeof window !== 'undefined' ? Math.round(window.innerHeight / 2) : 340;
+    setWheelState((prev) => (prev.open ? { ...prev, open: false } : { open: true, x: cx, y: cy }));
+  };
+
   return (
     <div className="relative flex-1 flex flex-col min-h-0">
       <div className="flex-1 flex flex-col lg:flex-row min-h-0">
@@ -102,6 +112,7 @@ export default function DrawWorkspace() {
             onRedo={handleRedo}
             onClearLayer={() => engineRef.current?.clearActiveLayer()}
             onToggleMobileLayers={() => setMobileLayersOpen((v) => !v)}
+            onOpenQuickWheel={handleOpenQuickWheelCentered}
           />
         )}
 
@@ -131,7 +142,7 @@ export default function DrawWorkspace() {
       </div>
       {!zenMode && <XSheetTimeline />}
 
-      {/* 8-Slice Radial Quick Wheel (Q or Right-Click on Stage) */}
+      {/* 8-Slice Radial Quick Wheel (Q, Right-Click on Stage, or Toolbar Button on Touch/Desktop) */}
       <RadialQuickWheel
         open={wheelState.open}
         x={wheelState.x}
@@ -140,9 +151,9 @@ export default function DrawWorkspace() {
         onUndo={handleUndo}
       />
 
-      {/* Enhanced Zen Floating Mini-Transport Bar */}
+      {/* Enhanced Zen Floating Mini-Transport Bar (Every button >= 44x44px & >= 11px font!) */}
       {zenMode && (
-        <div className="toast-pop-in fixed bottom-5 left-1/2 -translate-x-1/2 z-40 px-2.5 py-1.5 rounded-full bg-desk-panel/95 backdrop-blur-md border border-ink-brass/55 shadow-2xl flex items-center gap-1.5">
+        <div className="toast-pop-in fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-2 py-1 rounded-full bg-desk-panel/95 backdrop-blur-md border border-ink-brass/55 shadow-2xl flex items-center gap-1">
           <button
             type="button"
             disabled={activeFrameIndex <= 0}
@@ -150,7 +161,7 @@ export default function DrawWorkspace() {
               soundEngine.paperFlip();
               selectFrame(Math.max(0, activeFrameIndex - 1));
             }}
-            className="p-1.5 rounded-full hover:bg-desk-well text-desk-text disabled:opacity-35 transition-colors"
+            className="min-w-[44px] min-h-[44px] p-2 rounded-full hover:bg-desk-well text-desk-text disabled:opacity-35 inline-flex items-center justify-center transition-colors"
             title={t('stagePrevPaper')}
             aria-label={t('stagePrevPaper')}
           >
@@ -160,7 +171,7 @@ export default function DrawWorkspace() {
           <button
             type="button"
             onClick={() => setPlaying(!isPlaying)}
-            className="px-2.5 py-1 rounded-full bg-ink-vermilion text-white font-mono text-[10.5px] font-bold inline-flex items-center gap-1.5"
+            className="min-h-[44px] px-3.5 rounded-full bg-ink-vermilion text-white font-mono text-[11px] font-bold inline-flex items-center justify-center gap-1.5"
             title={t('playPause')}
           >
             <MotionPlayIcon playing={isPlaying} className="w-3.5 h-3.5" />
@@ -176,7 +187,7 @@ export default function DrawWorkspace() {
               soundEngine.paperFlip();
               selectFrame(Math.min(frameCount - 1, activeFrameIndex + 1));
             }}
-            className="p-1.5 rounded-full hover:bg-desk-well text-desk-text disabled:opacity-35 transition-colors"
+            className="min-w-[44px] min-h-[44px] p-2 rounded-full hover:bg-desk-well text-desk-text disabled:opacity-35 inline-flex items-center justify-center transition-colors"
             title={t('stageNextPaper')}
             aria-label={t('stageNextPaper')}
           >
@@ -189,14 +200,14 @@ export default function DrawWorkspace() {
               soundEngine.paperFlip();
               void addFrameAfterCurrent(false);
             }}
-            className="px-2 py-1 rounded-full console-well border border-desk-border hover:border-ink-brass text-[10.5px] font-mono font-bold text-desk-text inline-flex items-center gap-1 transition-colors"
+            className="min-h-[44px] px-3 rounded-full console-well border border-desk-border hover:border-ink-brass text-[11px] font-mono font-bold text-desk-text inline-flex items-center justify-center gap-1 transition-colors"
             title={t('xsheetBlankFrame')}
           >
             <Plus className="w-3.5 h-3.5 text-ink-brass" />
             <span>{t('radialNewFrame')}</span>
           </button>
 
-          <span className="w-px h-4 bg-desk-border mx-0.5" aria-hidden="true" />
+          <span className="w-px h-5 bg-desk-border mx-0.5" aria-hidden="true" />
 
           <button
             type="button"
@@ -204,10 +215,10 @@ export default function DrawWorkspace() {
               soundEngine.toggle(false);
               setZenMode(false);
             }}
-            className="px-2.5 py-1 rounded-full text-xs font-mono font-bold text-ink-brass hover:text-desk-text inline-flex items-center gap-1 transition-colors"
+            className="min-h-[44px] px-3 rounded-full text-xs font-mono font-bold text-ink-brass hover:text-desk-text inline-flex items-center justify-center gap-1 transition-colors"
           >
             <Minimize2 className="w-3.5 h-3.5" />
-            {t('exitZen')}
+            <span>{t('exitZen')}</span>
           </button>
         </div>
       )}

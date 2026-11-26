@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { useStudioStore } from './store/useStudioStore';
 import StudioDeskHub from './components/desk/StudioDeskHub';
 import TopConsoleBar from './components/studio/TopConsoleBar';
@@ -19,7 +19,6 @@ export function preloadStudioModule(target: StudioMode): void {
   }
 }
 
-// Code-split every heavy studio workspace & optional modal so initial boot stays fast on mobile!
 const DrawWorkspace = lazy(studioLoaders.draw);
 const PaperCameraStudio = lazy(studioLoaders.paper);
 const PuppetStudio = lazy(studioLoaders.puppet);
@@ -32,9 +31,11 @@ const AccountModal = lazy(() => import('./components/account/AccountModal'));
 
 function StudioModuleLoader({ label }: { label: string }) {
   return (
-    <div className="flex-1 desk-surface-mat flex flex-col items-center justify-center gap-2.5">
-      <span className="w-3 h-3 rounded-full bg-ink-vermilion animate-pulse" />
-      <span className="font-mono text-xs text-desk-muted">{label}</span>
+    <div className="flex-1 flex flex-col items-center justify-center gap-3 desk-surface-mat">
+      <div className="w-9 h-9 rounded-xl bg-[#F7F3E9] border border-desk-border shadow-md flex items-center justify-center">
+        <span className="w-2.5 h-2.5 rounded-full bg-ink-vermilion animate-pulse" />
+      </div>
+      <p className="font-mono text-xs text-desk-muted">{label}</p>
     </div>
   );
 }
@@ -43,13 +44,13 @@ export default function App() {
   const {
     ready,
     mode,
+    bootstrap,
     exportOpen,
     activeTourMode,
     overviewShowOpen,
     legalOpen,
     accountModalOpen,
     toast,
-    bootstrap,
     clearToast,
   } = useStudioStore();
   const t = useT();
@@ -70,7 +71,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-desk-bg text-desk-text">
+    <div className="h-[100dvh] flex flex-col overflow-hidden bg-desk-bg text-desk-text">
       {mode === 'desk' ? (
         <div className="flex-1 overflow-y-auto lg:overflow-hidden">
           <StudioDeskHub />
@@ -113,7 +114,6 @@ export default function App() {
 
       <StudioTransitionOverlay mode={mode} />
 
-      {/* Lazy-Loaded Site-Wide Living Guide, 10s Overview Show & Legal/Performance Center */}
       {activeTourMode && (
         <Suspense fallback={null}>
           <StudioGuideOverlay />
@@ -138,12 +138,13 @@ export default function App() {
         </Suspense>
       )}
 
-      {/* Tactile Studio Toast — top-center below header so bottom-right CTAs & tools are NEVER covered */}
+      {/* Tactile Studio Toast — docked safely above bottom timeline on mobile (<1024px) so top ToolDeck is NEVER occluded! */}
       {toast && (
         <div
           onClick={clearToast}
           role="status"
-          className="toast-pop-in fixed top-16 left-1/2 -translate-x-1/2 z-[60] max-w-[calc(100vw-2rem)] sm:max-w-md px-4 py-2 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-desk-border shadow-2xl flex items-center gap-2.5 cursor-pointer"
+          aria-live="polite"
+          className="toast-pop-in fixed bottom-28 lg:bottom-auto lg:top-16 left-1/2 -translate-x-1/2 z-[60] max-w-[calc(100vw-1.5rem)] sm:max-w-md px-4 py-2 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-desk-border shadow-2xl flex items-center gap-2.5 cursor-pointer"
         >
           <span
             className="hardware-led"

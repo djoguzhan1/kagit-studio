@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
   Copy,
   Film,
   Mic,
+  MoreHorizontal,
   Plus,
   Repeat,
   Square,
@@ -13,6 +14,7 @@ import {
   Upload,
   Volume2,
   VolumeX,
+  X,
   Zap,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
@@ -20,7 +22,7 @@ import { BlobImage, KeycapButton } from '../ui/KeycapButton';
 import { FlipPageIcon, MotionPlayIcon, OnionLayersIcon } from '../ui/AnimatedStudioIcons';
 import { analyzeAndStoreAudio, MicVoiceRecorder } from '../../engine/audioEngine';
 import { soundEngine } from '../../engine/soundEngine';
-import { useT } from '../../i18n/translations';
+import { localizeSceneOrNote, useT } from '../../i18n/translations';
 
 export default function XSheetTimeline() {
   const {
@@ -60,10 +62,19 @@ export default function XSheetTimeline() {
   const [recording, setRecording] = useState(false);
   const [renamingSceneId, setRenamingSceneId] = useState<string | null>(null);
   const [sceneNameDraft, setSceneNameDraft] = useState('');
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
 
-  // Drag-and-drop frame reordering state
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!mobileMoreOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileMoreOpen(false);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [mobileMoreOpen]);
 
   if (!project) return null;
 
@@ -138,22 +149,32 @@ export default function XSheetTimeline() {
   return (
     <section
       aria-label="X-Sheet Timeline"
-      className="border-t border-desk-border bg-desk-surface px-3 py-1.5 shrink-0 select-none z-20 space-y-1.5"
+      className="border-t border-desk-border bg-desk-surface px-2 sm:px-3 py-1.5 shrink-0 select-none z-20 space-y-1.5"
     >
-      {/* Multi-Scene Storyboard Film Strip + Loop In/Out Range */}
-      <div className="flex flex-wrap items-center justify-between gap-2 pb-1 border-b border-desk-border/70">
-        <div className="flex items-center gap-1 overflow-x-auto">
-          <span className="font-mono text-[9px] uppercase tracking-widest text-desk-muted flex items-center gap-1 pr-1 shrink-0">
-            <Film className="w-3 h-3 text-ink-brass" />
+      {/* Hidden Audio File Input */}
+      <input
+        ref={audioInputRef}
+        type="file"
+        accept="audio/*"
+        className="hidden"
+        onChange={handleAudioFile}
+      />
+
+      {/* Multi-Scene Storyboard Strip (Desktop & Tablet >=768px; on <768px accessible inside More menu) */}
+      <div className="hidden md:flex flex-wrap items-center justify-between gap-2 pb-1 border-b border-desk-border/70">
+        <div className="flex items-center gap-1.5 overflow-x-auto">
+          <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted flex items-center gap-1 pr-1 shrink-0">
+            <Film className="w-3.5 h-3.5 text-ink-brass" />
             {t('xsheetScenes')}
           </span>
           {scenes.map((sc) => {
             const active = sc.id === project.activeSceneId;
             const isRenaming = renamingSceneId === sc.id;
+            const localizedScName = localizeSceneOrNote(sc.name, locale);
             return (
               <div
                 key={sc.id}
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-mono text-[10px] border transition-colors shrink-0 ${
+                className={`inline-flex items-center gap-1 min-h-[28px] px-2.5 py-0.5 rounded-lg font-mono text-[11px] border transition-colors shrink-0 ${
                   active
                     ? 'bg-desk-panel border-ink-brass text-desk-text font-bold'
                     : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
@@ -170,7 +191,7 @@ export default function XSheetTimeline() {
                       if (e.key === 'Enter') commitSceneRename(sc.id);
                       else if (e.key === 'Escape') setRenamingSceneId(null);
                     }}
-                    className="w-24 bg-desk-surface border border-ink-brass rounded px-1 text-[10px] text-desk-text focus:outline-none"
+                    className="w-28 bg-desk-surface border border-ink-brass rounded px-1.5 py-0.5 text-[11px] text-desk-text focus:outline-none"
                   />
                 ) : (
                   <button
@@ -178,20 +199,21 @@ export default function XSheetTimeline() {
                     onClick={() => selectScene(sc.id)}
                     onDoubleClick={() => {
                       setRenamingSceneId(sc.id);
-                      setSceneNameDraft(sc.name);
+                      setSceneNameDraft(localizedScName);
                     }}
                     title={t('xsheetRenameSceneHint')}
+                    className="min-h-[26px]"
                   >
-                    {locale === 'en' ? sc.name.replace(/^Sahne (\d+)$/, 'Scene $1') : sc.name} (
-                    {sc.frames.length})
+                    {localizedScName} ({sc.frames.length})
                   </button>
                 )}
                 {scenes.length > 1 && (
                   <button
                     type="button"
                     onClick={() => deleteScene(sc.id)}
-                    className="opacity-55 hover:opacity-100 hover:text-ink-vermilion ml-0.5"
+                    className="min-w-[24px] min-h-[24px] inline-flex items-center justify-center opacity-65 hover:opacity-100 hover:text-ink-vermilion ml-0.5"
                     title={t('xsheetDeleteScene')}
+                    aria-label={t('xsheetDeleteScene')}
                   >
                     ×
                   </button>
@@ -205,16 +227,16 @@ export default function XSheetTimeline() {
               soundEngine.clapperSnap();
               addScene();
             }}
-            className="px-2 py-0.5 rounded-md font-mono text-[10px] border border-dashed border-desk-border text-desk-muted hover:text-ink-brass hover:border-ink-brass inline-flex items-center gap-0.5 shrink-0"
+            className="min-h-[28px] px-2.5 py-0.5 rounded-lg font-mono text-[11px] border border-dashed border-desk-border text-desk-muted hover:text-ink-brass hover:border-ink-brass inline-flex items-center gap-1 shrink-0"
             title={`+ ${t('xsheetAddScene')}`}
           >
-            <Plus className="w-3 h-3" />
+            <Plus className="w-3.5 h-3.5" />
             {t('xsheetAddScene')}
           </button>
         </div>
 
         {/* Loop In / Out Range Selector */}
-        <div className="hidden md:flex items-center gap-1 font-mono text-[10px]">
+        <div className="hidden lg:flex items-center gap-1.5 font-mono text-[11px]">
           <span className="text-desk-muted">{t('xsheetLoopRange')}</span>
           <button
             type="button"
@@ -224,7 +246,7 @@ export default function XSheetTimeline() {
                 end: Math.max(activeFrameIndex, loopRange?.end ?? project.frames.length - 1),
               })
             }
-            className="px-1.5 py-0.5 rounded console-well border border-desk-border text-desk-muted hover:text-desk-text"
+            className="min-h-[28px] px-2 py-0.5 rounded-lg console-well border border-desk-border text-desk-muted hover:text-desk-text"
             title="In"
           >
             In #{(loopRange?.start ?? 0) + 1}
@@ -237,7 +259,7 @@ export default function XSheetTimeline() {
                 end: activeFrameIndex,
               })
             }
-            className="px-1.5 py-0.5 rounded console-well border border-desk-border text-desk-muted hover:text-desk-text"
+            className="min-h-[28px] px-2 py-0.5 rounded-lg console-well border border-desk-border text-desk-muted hover:text-desk-text"
             title="Out"
           >
             Out #{(loopRange?.end ?? project.frames.length - 1) + 1}
@@ -246,7 +268,7 @@ export default function XSheetTimeline() {
             <button
               type="button"
               onClick={() => setLoopRange(null)}
-              className="px-1.5 py-0.5 rounded text-ink-vermilion hover:underline"
+              className="min-h-[28px] px-2 py-0.5 rounded-lg text-ink-vermilion hover:underline"
             >
               {t('shelfTabAll')}
             </button>
@@ -254,9 +276,9 @@ export default function XSheetTimeline() {
         </div>
       </div>
 
-      {/* Top Hardware Transport + Quick Onion Toggle + Frame Note Row */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
+      {/* Hardware Transport Row — Fits 360px cleanly in ONE row with 0px clipping and >=44x44px targets! */}
+      <div className="flex items-center justify-between gap-1 sm:gap-2">
+        <div className="flex items-center gap-1 sm:gap-1.5 min-w-0">
           <KeycapButton
             data-tour="draw-play"
             size="sm"
@@ -268,9 +290,10 @@ export default function XSheetTimeline() {
             ledPulse={isPlaying}
             onClick={() => setPlaying(!isPlaying)}
             title={`${t('playPause')} (Space / Enter)`}
+            aria-label={isPlaying ? t('xsheetStop') : t('xsheetPlay')}
           >
-            <MotionPlayIcon playing={isPlaying} className="w-3.5 h-3.5" />
-            <span>{isPlaying ? t('xsheetStop') : t('xsheetPlay')}</span>
+            <MotionPlayIcon playing={isPlaying} className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden sm:inline">{isPlaying ? t('xsheetStop') : t('xsheetPlay')}</span>
           </KeycapButton>
 
           <KeycapButton
@@ -280,6 +303,8 @@ export default function XSheetTimeline() {
             sound="toggle"
             onClick={toggleLoop}
             title={t('xsheetLoopRange')}
+            aria-label={t('xsheetLoopRange')}
+            className="hidden md:inline-flex"
           >
             <Repeat className="w-3.5 h-3.5" />
           </KeycapButton>
@@ -296,34 +321,35 @@ export default function XSheetTimeline() {
             <OnionLayersIcon className="w-3.5 h-3.5" />
           </KeycapButton>
 
-          <div className="w-px h-5 bg-desk-border mx-0.5" />
-
           <KeycapButton
             size="sm"
             sound="flip"
             onClick={() => selectFrame(Math.max(0, activeFrameIndex - 1))}
             disabled={activeFrameIndex <= 0}
             title={t('stagePrevPaper')}
+            aria-label={t('stagePrevPaper')}
           >
-            <ChevronLeft className="w-3.5 h-3.5" />
+            <ChevronLeft className="w-4 h-4" />
           </KeycapButton>
-          <span className="font-mono text-xs text-desk-text px-1 min-w-[58px] text-center">
-            {String(displayFrameIdx + 1).padStart(2, '0')} /{' '}
-            {String(project.frames.length).padStart(2, '0')}
+
+          <span className="font-mono text-[11px] font-bold text-desk-text px-0.5 whitespace-nowrap tabular-nums text-center">
+            {String(displayFrameIdx + 1).padStart(2, '0')}/{String(project.frames.length).padStart(2, '0')}
           </span>
+
           <KeycapButton
             size="sm"
             sound="flip"
             onClick={() => selectFrame(Math.min(project.frames.length - 1, activeFrameIndex + 1))}
             disabled={activeFrameIndex >= project.frames.length - 1}
             title={t('stageNextPaper')}
+            aria-label={t('stageNextPaper')}
           >
-            <ChevronRight className="w-3.5 h-3.5" />
+            <ChevronRight className="w-4 h-4" />
           </KeycapButton>
         </div>
 
-        {/* Frame Operations + Inline Dialogue/Note Input */}
-        <div className="flex items-center gap-1.5 flex-wrap">
+        {/* Right Transport Group: + Frame + Mobile More Menu / Desktop Full Frame & Audio Tools */}
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
           <KeycapButton
             data-tour="draw-add-frame"
             size="sm"
@@ -331,111 +357,284 @@ export default function XSheetTimeline() {
             sound="flip"
             onClick={() => void addFrameAfterCurrent(false)}
             title={`${t('xsheetBlankFrame')} (N)`}
+            aria-label={t('xsheetBlankFrame')}
           >
-            <FlipPageIcon className="w-3.5 h-3.5" />
+            <FlipPageIcon className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden sm:inline">{t('xsheetBlankFrame')}</span>
           </KeycapButton>
 
-          <KeycapButton
-            size="sm"
-            sound="flip"
-            onClick={() => void addFrameAfterCurrent(true)}
-            title={t('xsheetDuplicateFrame')}
-          >
-            <Copy className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{t('xsheetDuplicateFrame')}</span>
-          </KeycapButton>
+          {/* Desktop / Tablet >=768px Frame & Hold & FPS & Audio Controls */}
+          <div className="hidden md:flex items-center gap-1.5">
+            <KeycapButton
+              size="sm"
+              sound="flip"
+              onClick={() => void addFrameAfterCurrent(true)}
+              title={t('xsheetDuplicateFrame')}
+              aria-label={t('xsheetDuplicateFrame')}
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span className="hidden xl:inline">{t('xsheetDuplicateFrame')}</span>
+            </KeycapButton>
 
-          <KeycapButton
-            size="sm"
-            onClick={() => deleteFrame(activeFrameIndex)}
-            disabled={project.frames.length <= 1}
-            title={t('xsheetDeleteFrame')}
-          >
-            <Trash2 className="w-3.5 h-3.5 text-ink-vermilion" />
-          </KeycapButton>
+            <KeycapButton
+              size="sm"
+              onClick={() => deleteFrame(activeFrameIndex)}
+              disabled={project.frames.length <= 1}
+              title={t('xsheetDeleteFrame')}
+              aria-label={t('xsheetDeleteFrame')}
+            >
+              <Trash2 className="w-3.5 h-3.5 text-ink-vermilion" />
+            </KeycapButton>
 
-          {activeFrame && (
-            <div className="hidden lg:flex items-center gap-1.5 px-2 py-1 rounded-lg console-well border border-desk-border">
-              <StickyNote className="w-3 h-3 text-ink-brass shrink-0" />
-              <input
-                type="text"
-                value={activeFrame.note ?? ''}
-                onChange={(e) => updateFrameNote(activeFrameIndex, e.target.value)}
-                placeholder={t('xsheetNotePlaceholder')}
-                className="bg-transparent text-[11px] font-mono text-desk-text placeholder:text-desk-muted/65 w-36 2xl:w-52 focus:outline-none"
-              />
+            {/* Active-Frame Hold Stepper (replaces 32 tiny 16x16 per-card buttons!) */}
+            {activeFrame && (
+              <div className="hidden lg:inline-flex items-center gap-1 px-1.5 min-h-[38px] rounded-xl console-well border border-desk-border">
+                <button
+                  type="button"
+                  onClick={() => setFrameHold(activeFrameIndex, activeFrame.hold - 1)}
+                  disabled={activeFrame.hold <= 1}
+                  title={t('xsheetHoldDecrease')}
+                  aria-label={t('xsheetHoldDecrease')}
+                  className="min-w-[28px] min-h-[28px] rounded-lg bg-desk-surface border border-desk-border font-mono text-xs font-bold text-desk-muted hover:text-desk-text disabled:opacity-35"
+                >
+                  −
+                </button>
+                <span className="font-mono text-[11px] font-bold text-ink-brass px-1 tabular-nums">
+                  ×{activeFrame.hold}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setFrameHold(activeFrameIndex, activeFrame.hold + 1)}
+                  title={t('xsheetHoldIncrease')}
+                  aria-label={t('xsheetHoldIncrease')}
+                  className="min-w-[28px] min-h-[28px] rounded-lg bg-desk-surface border border-desk-border font-mono text-xs font-bold text-desk-muted hover:text-desk-text"
+                >
+                  +
+                </button>
+              </div>
+            )}
+
+            {activeFrame && (
+              <div className="hidden 2xl:flex items-center gap-1.5 px-2.5 min-h-[38px] rounded-xl console-well border border-desk-border">
+                <StickyNote className="w-3.5 h-3.5 text-ink-brass shrink-0" />
+                <input
+                  type="text"
+                  value={localizeSceneOrNote(activeFrame.note ?? '', locale)}
+                  onChange={(e) => updateFrameNote(activeFrameIndex, e.target.value)}
+                  placeholder={t('xsheetNotePlaceholder')}
+                  className="bg-transparent text-[11px] font-mono text-desk-text placeholder:text-desk-muted/65 w-36 focus:outline-none"
+                />
+              </div>
+            )}
+
+            <div className="hidden lg:flex items-center gap-0.5 p-0.5 rounded-xl console-well border border-desk-border">
+              {([8, 12, 15, 24] as const).map((fps) => (
+                <button
+                  key={fps}
+                  type="button"
+                  onClick={() => {
+                    soundEngine.click(1.05);
+                    updateProjectSettings({ fps });
+                  }}
+                  className={`min-w-[30px] min-h-[30px] px-1.5 rounded-lg font-mono text-[11px] transition-colors ${
+                    project.fps === fps
+                      ? 'bg-desk-panel text-ink-brass font-bold border border-desk-border'
+                      : 'text-desk-muted hover:text-desk-text'
+                  }`}
+                >
+                  {fps}
+                </button>
+              ))}
+              <span className="font-mono text-[11px] text-desk-muted px-1">FPS</span>
             </div>
-          )}
-        </div>
 
-        {/* FPS + Audio Controls */}
-        <div className="flex items-center gap-1.5">
-          <div className="flex items-center gap-1 p-0.5 rounded-lg console-well border border-desk-border">
-            {([8, 12, 15, 24] as const).map((fps) => (
-              <button
-                key={fps}
-                type="button"
-                onClick={() => {
-                  soundEngine.click(1.05);
-                  updateProjectSettings({ fps });
-                }}
-                className={`px-1.5 py-0.5 rounded font-mono text-[10px] transition-colors ${
-                  project.fps === fps
-                    ? 'bg-desk-panel text-ink-brass font-bold border border-desk-border'
-                    : 'text-desk-muted hover:text-desk-text'
-                }`}
-              >
-                {fps}
-              </button>
-            ))}
-            <span className="font-mono text-[10px] text-desk-muted px-1">FPS</span>
+            <span className="font-mono text-[11px] text-desk-muted hidden 2xl:inline px-1">
+              {totalSec}s
+            </span>
+
+            <KeycapButton
+              size="sm"
+              variant={recording ? 'vermilion' : 'graphite'}
+              led={recording ? 'vermilion' : project.audio ? 'emerald' : 'off'}
+              ledPulse={recording}
+              onClick={() => void toggleMicRecord()}
+              title={t('xsheetRecAudio')}
+              aria-label={t('xsheetRecAudio')}
+            >
+              {recording ? (
+                <Square className="w-3.5 h-3.5 fill-current" />
+              ) : (
+                <Mic className="w-3.5 h-3.5" />
+              )}
+              <span className="hidden xl:inline">
+                {recording ? t('xsheetStopRec') : t('xsheetRecAudio')}
+              </span>
+            </KeycapButton>
+
+            <KeycapButton
+              size="sm"
+              onClick={() => audioInputRef.current?.click()}
+              title={t('xsheetUploadAudio')}
+              aria-label={t('xsheetUploadAudio')}
+            >
+              <Upload className="w-3.5 h-3.5" />
+            </KeycapButton>
           </div>
 
-          <span className="font-mono text-[11px] text-desk-muted hidden xl:inline px-1">
-            {totalSec}s
-          </span>
+          {/* Mobile (<768px) Compact 44x44 Frame, Hold, Scene, FPS & Voice Menu */}
+          <div className="relative md:hidden">
+            <button
+              type="button"
+              onClick={() => setMobileMoreOpen((v) => !v)}
+              aria-expanded={mobileMoreOpen}
+              aria-label={t('xsheetMoreTools')}
+              title={t('xsheetMoreTools')}
+              className={`min-w-[44px] min-h-[44px] rounded-xl border flex items-center justify-center transition-colors ${
+                mobileMoreOpen || recording
+                  ? 'bg-ink-brass/20 border-ink-brass text-ink-brass'
+                  : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
+              }`}
+            >
+              <MoreHorizontal className="w-4 h-4" />
+            </button>
 
-          <KeycapButton
-            size="sm"
-            variant={recording ? 'vermilion' : 'graphite'}
-            led={recording ? 'vermilion' : project.audio ? 'emerald' : 'off'}
-            ledPulse={recording}
-            onClick={() => void toggleMicRecord()}
-            title={t('xsheetRecAudio')}
-          >
-            {recording ? <Square className="w-3 h-3 fill-current" /> : <Mic className="w-3.5 h-3.5" />}
-            <span className="hidden lg:inline">
-              {recording ? t('xsheetStopRec') : t('xsheetRecAudio')}
-            </span>
-          </KeycapButton>
+            {mobileMoreOpen && (
+              <>
+                <div
+                  onClick={() => setMobileMoreOpen(false)}
+                  className="fixed inset-0 z-40 bg-black/45"
+                />
+                <div className="fixed left-3 right-3 bottom-28 z-50 rounded-2xl bg-desk-surface border border-desk-border shadow-2xl p-3.5 space-y-3">
+                  <div className="flex items-center justify-between pb-1.5 border-b border-desk-border">
+                    <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass">
+                      {t('xsheetMoreTools')}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setMobileMoreOpen(false)}
+                      aria-label={t('acctCloseAria')}
+                      className="min-w-[44px] min-h-[44px] -my-2 -mr-2 rounded-xl inline-flex items-center justify-center text-desk-muted"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
 
-          <KeycapButton
-            size="sm"
-            onClick={() => audioInputRef.current?.click()}
-            title={t('xsheetUploadAudio')}
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span className="hidden xl:inline">{t('xsheetUploadAudio')}</span>
-          </KeycapButton>
-          <input
-            ref={audioInputRef}
-            type="file"
-            accept="audio/*"
-            className="hidden"
-            onChange={handleAudioFile}
-          />
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void addFrameAfterCurrent(true);
+                        setMobileMoreOpen(false);
+                      }}
+                      className="min-h-[44px] px-3 rounded-xl console-well border border-desk-border text-xs font-bold text-desk-text flex items-center justify-center gap-1.5"
+                    >
+                      <Copy className="w-4 h-4 text-ink-brass" />
+                      <span className="truncate">{t('xsheetDuplicateFrame')}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={project.frames.length <= 1}
+                      onClick={() => {
+                        deleteFrame(activeFrameIndex);
+                        setMobileMoreOpen(false);
+                      }}
+                      className="min-h-[44px] px-3 rounded-xl console-well border border-desk-border text-xs font-bold text-ink-vermilion disabled:opacity-35 flex items-center justify-center gap-1.5"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span className="truncate">{t('xsheetDeleteFrame')}</span>
+                    </button>
+                  </div>
+
+                  {/* Mobile Frame Hold + Loop */}
+                  {activeFrame && (
+                    <div className="flex items-center justify-between gap-2 pt-1 border-t border-desk-border">
+                      <span className="font-mono text-[11px] text-desk-muted">
+                        {t('xsheetHoldShort')}: ×{activeFrame.hold}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={activeFrame.hold <= 1}
+                          onClick={() => setFrameHold(activeFrameIndex, activeFrame.hold - 1)}
+                          className="min-w-[44px] min-h-[44px] rounded-xl console-well border border-desk-border font-mono text-sm font-bold text-desk-text disabled:opacity-35"
+                        >
+                          −
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFrameHold(activeFrameIndex, activeFrame.hold + 1)}
+                          className="min-w-[44px] min-h-[44px] rounded-xl console-well border border-desk-border font-mono text-sm font-bold text-desk-text"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Mobile FPS Picker */}
+                  <div className="grid grid-cols-4 gap-1.5 pt-1 border-t border-desk-border">
+                    {([8, 12, 15, 24] as const).map((fps) => (
+                      <button
+                        key={fps}
+                        type="button"
+                        onClick={() => updateProjectSettings({ fps })}
+                        className={`min-h-[44px] rounded-xl font-mono text-xs font-bold border ${
+                          project.fps === fps
+                            ? 'bg-desk-panel border-ink-brass text-ink-brass'
+                            : 'console-well border-desk-border text-desk-muted'
+                        }`}
+                      >
+                        {fps} FPS
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Mobile Mic + Audio Upload */}
+                  <div className="grid grid-cols-2 gap-2 pt-1 border-t border-desk-border">
+                    <button
+                      type="button"
+                      onClick={() => void toggleMicRecord()}
+                      className={`min-h-[44px] px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 ${
+                        recording
+                          ? 'bg-ink-vermilion text-white border-ink-vermilion'
+                          : 'console-well border-desk-border text-desk-text'
+                      }`}
+                    >
+                      <Mic className="w-4 h-4 text-ink-vermilion" />
+                      <span className="truncate">
+                        {recording ? t('xsheetStopRec') : t('xsheetRecAudio')}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileMoreOpen(false);
+                        audioInputRef.current?.click();
+                      }}
+                      className="min-h-[44px] px-3 rounded-xl console-well border border-desk-border text-xs font-bold text-desk-text flex items-center justify-center gap-1.5"
+                    >
+                      <Upload className="w-4 h-4 text-ink-brass" />
+                      <span className="truncate">{t('xsheetUploadAudio')}</span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Horizontal Drag-and-Drop X-Sheet Film Strip */}
-      <div className="flex items-stretch gap-2 overflow-x-auto pb-0.5 pt-0.5">
+      {/* Horizontal Drag-and-Drop X-Sheet Film Strip (Zero tiny 16px per-card buttons; crisp >=11px badges!) */}
+      <div className="flex items-stretch gap-1.5 sm:gap-2 overflow-x-auto pb-0.5 pt-0.5">
         {project.frames.map((frame, idx) => {
           const isCurrent = idx === displayFrameIdx;
           const isDropTarget = dragOverIndex === idx && dragIndex !== null && dragIndex !== idx;
+          const localizedNote = localizeSceneOrNote(frame.note ?? '', locale);
           return (
-            <div
+            <button
               key={frame.id}
+              type="button"
               draggable
               onDragStart={() => setDragIndex(idx)}
               onDragOver={(e) => {
@@ -462,18 +661,19 @@ export default function XSheetTimeline() {
                 if (idx !== activeFrameIndex) soundEngine.paperFlip();
                 selectFrame(idx);
               }}
-              className={`shrink-0 rounded-xl border transition-all cursor-grab active:cursor-grabbing overflow-hidden flex flex-col ${
+              className={`shrink-0 min-h-[48px] rounded-xl border text-left transition-all cursor-pointer overflow-hidden flex flex-col ${
                 isDropTarget
                   ? 'border-ink-brass ring-2 ring-ink-brass/70 scale-[1.03]'
                   : isCurrent
                     ? 'border-ink-vermilion ring-2 ring-ink-vermilion/35 bg-desk-panel'
                     : 'border-desk-border bg-desk-well hover:border-desk-muted'
               }`}
-              style={{ width: `${Math.min(180, 92 + (frame.hold - 1) * 24)}px` }}
-              title={frame.note ? frame.note : `#${idx + 1}`}
+              style={{ width: `${Math.min(156, 80 + (frame.hold - 1) * 18)}px` }}
+              title={localizedNote ? localizedNote : `#${idx + 1}`}
+              aria-label={`${t('stageFrameLabel')} ${idx + 1}${localizedNote ? ` — ${localizedNote}` : ''}`}
             >
               <div
-                className="relative h-12 overflow-hidden border-b border-desk-border"
+                className="relative h-11 sm:h-12 w-full overflow-hidden"
                 style={{ backgroundColor: project.paperColor || '#F7F3E9' }}
               >
                 {frame.thumbKey ? (
@@ -483,79 +683,52 @@ export default function XSheetTimeline() {
                     className="w-full h-full object-contain pointer-events-none"
                   />
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center font-mono text-[9px] text-neutral-400">
+                  <div className="w-full h-full flex items-center justify-center font-mono text-[11px] text-neutral-500">
                     {t('xsheetEmptyFrame')}
                   </div>
                 )}
-                <span className="absolute top-1 left-1 px-1 rounded bg-neutral-950/75 text-[#F7F3E9] font-mono text-[9px]">
+                <span className="absolute top-0.5 left-1 px-1 rounded bg-neutral-950/75 text-[#F7F3E9] font-mono text-[11px] leading-tight">
                   #{String(idx + 1).padStart(2, '0')}
                 </span>
-                <div className="absolute top-1 right-1 flex items-center gap-0.5">
+                <div className="absolute bottom-0.5 right-1 flex items-center gap-0.5">
+                  {frame.hold > 1 && (
+                    <span className="px-1 rounded bg-neutral-950/80 text-amber-300 font-mono text-[11px] font-bold leading-tight">
+                      ×{frame.hold}
+                    </span>
+                  )}
                   {(frame.cameraShake ?? 0) > 0 && (
                     <span
-                      className="px-1 rounded bg-ink-vermilion text-white text-[8px] font-bold flex items-center"
+                      className="px-1 rounded bg-ink-vermilion text-white text-[11px] font-bold flex items-center"
                       title={`${t('railShakeTitle')}: ${frame.cameraShake}`}
                     >
                       <Zap className="w-2.5 h-2.5" />
                     </span>
                   )}
-                  {frame.note && (
-                    <span
-                      className="w-2 h-2 rounded-full bg-ink-brass shadow ring-1 ring-black/30"
-                      title={frame.note}
-                      aria-label={frame.note}
-                    />
-                  )}
                 </div>
               </div>
-
-              <div
-                className="px-1.5 py-0.5 flex items-center justify-center gap-1 bg-desk-surface"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <button
-                  type="button"
-                  onClick={() => setFrameHold(idx, frame.hold - 1)}
-                  disabled={frame.hold <= 1}
-                  className="w-4 h-4 rounded text-[10px] font-mono bg-desk-well border border-desk-border text-desk-muted hover:text-desk-text disabled:opacity-35"
-                  title={t('xsheetHoldDecrease')}
-                >
-                  -
-                </button>
-                <span className="font-mono text-[10px] font-bold text-ink-brass px-1">
-                  ×{frame.hold}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setFrameHold(idx, frame.hold + 1)}
-                  className="w-4 h-4 rounded text-[10px] font-mono bg-desk-well border border-desk-border text-desk-muted hover:text-desk-text"
-                  title={t('xsheetHoldIncrease')}
-                >
-                  +
-                </button>
-              </div>
-            </div>
+            </button>
           );
         })}
       </div>
 
       {/* Clickable Audio Scrubbing Waveform Bar */}
       {project.audio && (
-        <div className="rounded-xl console-well border border-desk-border px-3 py-1.5 flex items-center gap-3">
+        <div className="rounded-xl console-well border border-desk-border px-2.5 py-1 flex items-center gap-2.5">
           <button
             type="button"
             onClick={() => updateAudioTrack({ muted: !project.audio!.muted })}
-            className="text-desk-muted hover:text-desk-text"
+            className="min-w-[36px] min-h-[36px] inline-flex items-center justify-center text-desk-muted hover:text-desk-text"
             title={t('xsheetAudioMuteTitle')}
+            aria-label={t('xsheetAudioMuteTitle')}
           >
             {project.audio.muted ? (
-              <VolumeX className="w-3.5 h-3.5 text-ink-vermilion" />
+              <VolumeX className="w-4 h-4 text-ink-vermilion" />
             ) : (
-              <Volume2 className="w-3.5 h-3.5 text-ink-emerald" />
+              <Volume2 className="w-4 h-4 text-ink-emerald" />
             )}
           </button>
 
-          <span className="font-mono text-[10px] text-desk-text truncate max-w-[140px]">
+          <span className="font-mono text-[11px] text-desk-text truncate max-w-[120px]">
             {project.audio.name}
           </span>
 
@@ -576,17 +749,18 @@ export default function XSheetTimeline() {
             ))}
           </div>
 
-          <span className="font-mono text-[10px] text-desk-muted">
+          <span className="hidden sm:inline font-mono text-[11px] text-desk-muted whitespace-nowrap">
             {project.audio.durationSec.toFixed(1)}s · {t('xsheetAudioScrubOn')}
           </span>
 
           <button
             type="button"
             onClick={() => setAudioTrack(null)}
-            className="text-desk-muted hover:text-ink-vermilion"
+            className="min-w-[36px] min-h-[36px] inline-flex items-center justify-center text-desk-muted hover:text-ink-vermilion"
             title={t('xsheetAudioRemoveTitle')}
+            aria-label={t('xsheetAudioRemoveTitle')}
           >
-            <Trash2 className="w-3.5 h-3.5" />
+            <Trash2 className="w-4 h-4" />
           </button>
         </div>
       )}

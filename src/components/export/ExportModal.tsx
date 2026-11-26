@@ -25,11 +25,13 @@ import { BlobImage, KeycapButton } from '../ui/KeycapButton';
 import { ToggleLeverSwitch } from '../ui/Studio3DControls';
 import { TrayExportIcon } from '../ui/AnimatedStudioIcons';
 import { PocketFlipbook3DPreview } from '../ui/PocketFlipbook3DPreview';
-import { useT } from '../../i18n/translations';
+import { localizeProjectName, useT } from '../../i18n/translations';
+import { useModalA11y } from '../../hooks/useModalA11y';
 
 export default function ExportModal() {
   const { projects, activeProjectId, exportOpen, setExportOpen, notify } = useStudioStore();
   const t = useT();
+  const locale = useStudioStore((st) => st.locale);
   const project = projects.find((p) => p.id === activeProjectId);
 
   const [hideRoughBlue, setHideRoughBlue] = useState(true);
@@ -39,6 +41,12 @@ export default function ExportModal() {
   const [allScenes, setAllScenes] = useState(true);
   const [videoScale, setVideoScale] = useState<1 | 0.75 | 0.5>(1);
   const [busy, setBusy] = useState(false);
+  const dialogRef = useModalA11y<HTMLDivElement>({
+    open: exportOpen,
+    onClose: () => setExportOpen(false),
+    closeDisabled: busy,
+    modal: true,
+  });
   const [progressLabel, setProgressLabel] = useState('');
   const [progressPct, setProgressPct] = useState(0);
 
@@ -93,11 +101,12 @@ export default function ExportModal() {
       className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="export-console-title"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-3xl max-h-[92vh] overflow-y-auto rounded-3xl bg-desk-surface border border-desk-border shadow-2xl"
+        className="w-full max-w-3xl max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-3xl bg-desk-surface border border-desk-border shadow-2xl"
       >
         {/* Header */}
         <div className="px-6 py-4 border-b border-desk-border flex items-center justify-between">
@@ -106,7 +115,7 @@ export default function ExportModal() {
               {t('exportTitle')}
             </h2>
             <p className="font-mono text-[11px] text-desk-muted">
-              {project.name} · {activeFramesList.length} {t('framesWord')} ({totalExposures}{' '}
+              {localizeProjectName(project.name, locale)} · {activeFramesList.length} {t('framesWord')} ({totalExposures}{' '}
               {t('exportExposureWord')} · {durationSec}s) · {project.fps} FPS · {outW}×{outH}
               {sceneCount > 1
                 ? ` · ${allScenes ? `${sceneCount} ${t('scenesWord')}` : t('exportActiveOnly')}`
@@ -117,7 +126,7 @@ export default function ExportModal() {
             type="button"
             disabled={busy}
             onClick={() => setExportOpen(false)}
-            className="p-2 rounded-xl console-well border border-desk-border text-desk-muted hover:text-desk-text"
+            className="min-w-[44px] min-h-[44px] p-2 rounded-xl inline-flex items-center justify-center console-well border border-desk-border text-desk-muted hover:text-desk-text"
             aria-label={t('exportCloseAria')}
           >
             <X className="w-4 h-4" />
@@ -223,16 +232,15 @@ export default function ExportModal() {
 
               <div
                 className="w-16 h-24 shrink-0 rounded bg-[#FAF8F2] border border-black/20 p-1 grid grid-cols-2 gap-0.5 shadow"
-                title="A4 8'li cep flipbook sayfa önizlemesi"
+                title={t('exportFlipbookIframeTitle')}
+                aria-hidden="true"
               >
-                {activeFramesList.slice(0, 8).map((f, i) => (
+                {activeFramesList.slice(0, 8).map((f) => (
                   <div
                     key={f.id}
                     className="h-4 rounded-[1px] border border-dashed border-neutral-400 flex overflow-hidden bg-white"
                   >
-                    <span className="w-2 bg-neutral-200 border-r border-neutral-300 text-[4px] flex items-center justify-center text-neutral-600 font-mono">
-                      {i + 1}
-                    </span>
+                    <span className="w-2 bg-neutral-200 border-r border-neutral-300" />
                     <div className="flex-1 overflow-hidden">
                       {f.thumbKey && (
                         <BlobImage blobKey={f.thumbKey} className="w-full h-full object-contain" />
