@@ -18,6 +18,9 @@ import {
 } from '../../engine/sampleHeroAsset';
 import { useT } from '../../i18n/translations';
 import { InstantAliveStage } from './InstantAliveStage';
+import type { UniverseHoverTarget } from './AnimatedUniverseCanvas';
+import { PocketFlipbook3DPreview } from '../ui/PocketFlipbook3DPreview';
+import { useStudioStore } from '../../store/useStudioStore';
 
 export type DeskPreviewMode = 'draw' | 'paper' | 'puppet' | 'film';
 
@@ -27,6 +30,8 @@ interface InteractiveLightboxStageProps {
   lightboxDim: number;
   onLightboxDimChange: (val: number) => void;
   previewMode: DeskPreviewMode;
+  hoveredDoor?: UniverseHoverTarget;
+  paused?: boolean;
   onPreviewModeChange: (mode: DeskPreviewMode) => void;
   onOpenDraw: () => void;
   onCommitSketch: (sketchCanvas: HTMLCanvasElement, frameIndex: number) => Promise<void>;
@@ -337,6 +342,8 @@ export function InteractiveLightboxStage({
   lightboxDim,
   onLightboxDimChange,
   previewMode,
+  hoveredDoor = null,
+  paused = false,
   onPreviewModeChange,
   onOpenDraw,
   onCommitSketch,
@@ -346,7 +353,9 @@ export function InteractiveLightboxStage({
   onOpenFilmDemo,
 }: InteractiveLightboxStageProps) {
   const t = useT();
+  const locale = useStudioStore((s) => s.locale);
   const [stageView, setStageView] = useState<'live' | 'showcase'>('live');
+  const [show3DFlip, setShow3DFlip] = useState(false);
 
   // ---- MODE 4: Live Interactive 6-Layer 2.5D Parallax Mini-Cinema ----
   const filmCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -373,13 +382,19 @@ export function InteractiveLightboxStage({
   const activeShowcaseFrame = project?.frames[activeShowcaseIdx] ?? null;
 
   useEffect(() => {
-    if (stageView !== 'showcase' || previewMode !== 'draw' || !showcasePlaying || !project || project.frames.length <= 1) return;
+    if (stageView === 'showcase' && previewMode === 'draw' && project?.starterPendingHydration) {
+      void useStudioStore.getState().ensureStarterProjectHydrated();
+    }
+  }, [stageView, previewMode, project?.starterPendingHydration]);
+
+  useEffect(() => {
+    if (paused || stageView !== 'showcase' || previewMode !== 'draw' || !showcasePlaying || !project || project.frames.length <= 1) return;
     const ms = Math.max(65, Math.round(1000 / project.fps));
     const iv = setInterval(() => {
       setShowcaseIdx((i) => (i + 1) % project.frames.length);
     }, ms);
     return () => clearInterval(iv);
-  }, [stageView, previewMode, showcasePlaying, project]);
+  }, [paused, stageView, previewMode, showcasePlaying, project]);
 
   const clearDeskSketch = useCallback(() => {
     const c = sketchCanvasRef.current;
@@ -530,17 +545,21 @@ export function InteractiveLightboxStage({
 
     let raf = 0;
     const startMs = performance.now();
+    let prevMs = startMs;
+    const reducedMotion = Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
 
-    const loop = () => {
+    const loop = (now = performance.now()) => {
+      const dtSec = Math.min(0.05, Math.max(0.004, (now - prevMs) / 1000));
+      prevMs = now;
+      const decay = Math.pow(0.84, dtSec * 60);
       const c = puppetCanvasRef.current;
       const src = puppetSourceRef.current;
       if (!c || !src) return;
       const ctx = c.getContext('2d')!;
       const W = c.width;
       const H = c.height;
-      const elapsed = (performance.now() - startMs) / 1000;
+      const elapsed = (now - startMs) / 1000;
 
-      // Spring-back relaxation on non-dragged pins!
       const pins = puppetPinsRef.current;
       const curOffsets = puppetOffsetsRef.current;
       const activeDragId = puppetDragRef.current?.pinId ?? null;
@@ -549,8 +568,8 @@ export function InteractiveLightboxStage({
       for (const pin of pins) {
         const stored = curOffsets[pin.id] ?? { dx: 0, dy: 0 };
         if (pin.id !== activeDragId) {
-          stored.dx *= 0.84;
-          stored.dy *= 0.84;
+          stored.dx *= decay;
+          stored.dy *= decay;
           if (Math.abs(stored.dx) < 0.0005) stored.dx = 0;
           if (Math.abs(stored.dy) < 0.0005) stored.dy = 0;
           curOffsets[pin.id] = stored;
@@ -690,15 +709,20 @@ export function InteractiveLightboxStage({
       }
       ctx.restore();
 
-      raf = requestAnimationFrame(loop);
+      if (!cancelled && !paused && !reducedMotion) {
+        raf = requestAnimationFrame(loop);
+      }
     };
 
-    raf = requestAnimationFrame(loop);
+    loop(performance.now());
+    if (!paused && !reducedMotion) {
+      raf = requestAnimationFrame(loop);
+    }
     return () => {
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [stageView, previewMode, project?.paperColor]);
+  }, [paused, stageView, previewMode, project?.paperColor]);
 
   const onPuppetPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const c = puppetCanvasRef.current;
@@ -727,7 +751,7 @@ export function InteractiveLightboxStage({
       }
     }
     if (bestPin) {
-      e.currentTarget.setPointerCapture(e.pointerId);
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
       puppetDragRef.current = { pinId: bestPin.id, startX: x, startY: y };
       setDraggingPinLabel(bestPin.label);
       soundEngine.click(1.18);
@@ -764,21 +788,23 @@ export function InteractiveLightboxStage({
     if (stageView !== 'showcase' || previewMode !== 'film') return;
     let raf = 0;
     const t0 = performance.now();
+    let prevNow = t0;
+    const reducedMotion = Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
 
-    const loop = (now: number) => {
+    const loop = (now = performance.now()) => {
       const c = filmCanvasRef.current;
-      if (!c) {
-        raf = requestAnimationFrame(loop);
-        return;
-      }
+      if (!c) return;
+      const dtSec = Math.min(0.05, Math.max(0.004, (now - prevNow) / 1000));
+      prevNow = now;
+      const lookAlpha = 1 - Math.pow(1 - 0.1, dtSec * 60);
       const ctx = c.getContext('2d')!;
       const W = c.width;
       const H = c.height;
       const sec = (now - t0) / 1000;
 
       const lk = filmLookRef.current;
-      lk.x += (lk.tx - lk.x) * 0.1;
-      lk.y += (lk.ty - lk.y) * 0.1;
+      lk.x += (lk.tx - lk.x) * lookAlpha;
+      lk.y += (lk.ty - lk.y) * lookAlpha;
       const camX = lk.x * 58 + Math.sin(sec * 0.55) * 14;
       const camY = lk.y * 20;
 
@@ -958,22 +984,43 @@ export function InteractiveLightboxStage({
       ctx.fillRect(0, H - 30, W, 30);
       ctx.restore();
 
-      raf = requestAnimationFrame(loop);
+      if (!paused && !reducedMotion) {
+        raf = requestAnimationFrame(loop);
+      }
     };
 
-    raf = requestAnimationFrame(loop);
+    loop(performance.now());
+    if (!paused && !reducedMotion) {
+      raf = requestAnimationFrame(loop);
+    }
     return () => cancelAnimationFrame(raf);
-  }, [stageView, previewMode]);
+  }, [paused, stageView, previewMode]);
 
   const glowIntensity = theme === 'night' ? 0.08 + lightboxDim * 0.16 : 0.14;
 
   return (
     <div className="desk-lightbox-bezel desk-lightbox-warmup rounded-[26px] p-3.5 sm:p-5 flex flex-col gap-3 select-none">
-      {/* Top Bezel Header: Backlit LED + Clean 2-Pill Mode Switcher (No duplicate 4-card clutter!) */}
+      {/* Top Bezel Header: Backlit Dimmer + Clean 2-Pill Mode Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-ink-brass">
-          <span className="hardware-led" data-on="amber" data-pulse="true" />
+        <div className="flex items-center gap-2.5 font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold">
+          <span className="hardware-led" data-on="amber" />
           <span>{t('lightboxLabel')}</span>
+          <label
+            className="hidden md:inline-flex items-center gap-1.5 pl-2 border-l border-desk-border text-desk-muted"
+            title={locale === 'en' ? 'Backlight brightness' : 'Işıklı masa parlaklığı'}
+          >
+            <SunDim className="w-3.5 h-3.5 text-ink-brass shrink-0" />
+            <input
+              type="range"
+              min={0.45}
+              max={1}
+              step={0.05}
+              value={lightboxDim}
+              onChange={(e) => onLightboxDimChange(Number(e.target.value))}
+              aria-label={locale === 'en' ? 'Backlight brightness' : 'Işıklı masa parlaklığı'}
+              className="w-14 accent-[#D99B26] cursor-pointer"
+            />
+          </label>
         </div>
 
         <div
@@ -989,7 +1036,7 @@ export function InteractiveLightboxStage({
               soundEngine.click(1.12);
               setStageView('live');
             }}
-            className={`px-2.5 py-1 rounded-lg font-mono text-[10px] font-bold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
+            className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
               stageView === 'live'
                 ? 'bg-desk-panel text-desk-text border border-desk-border shadow-sm'
                 : 'text-desk-muted hover:text-desk-text border border-transparent'
@@ -1007,7 +1054,7 @@ export function InteractiveLightboxStage({
               soundEngine.click(1.04);
               setStageView('showcase');
             }}
-            className={`px-2.5 py-1 rounded-lg font-mono text-[10px] font-bold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
+            className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
               stageView === 'showcase'
                 ? 'bg-desk-panel text-desk-text border border-desk-border shadow-sm'
                 : 'text-desk-muted hover:text-desk-text border border-transparent'
@@ -1019,78 +1066,54 @@ export function InteractiveLightboxStage({
         </div>
       </div>
 
-      {/* DEFAULT VIEW: 3-Second "Draw -> ANIMATE ⚡" Instant Magic Toy! */}
+      {/* DEFAULT VIEW: Instant Living Lightbox Stage */}
       {stageView === 'live' ? (
         <InstantAliveStage
           theme={theme}
           lightboxDim={lightboxDim}
-          onLightboxDimChange={onLightboxDimChange}
+          hoveredDoor={hoveredDoor}
+          paused={paused}
           onSendToStudio={onSendSketchToStudio}
           onOpenBlankDesk={onOpenDraw}
         />
+      ) : show3DFlip && project ? (
+        <div className="space-y-3">
+          <PocketFlipbook3DPreview
+            frames={project.frames}
+            fps={project.fps}
+            paperColor={project.paperColor}
+            projectName={project.name}
+            onClose={() => setShow3DFlip(false)}
+          />
+        </div>
       ) : (
         <>
-          {/* Compact 4-Demo Sub-Bar (Only visible when user chooses "Örnek Sahneler") */}
-          <div className="flex items-center justify-center">
+          {/* Identical Full-Width Aspect-16/9 Sheet + Shared ACME Pegbar (0.0px tab jump!) */}
+          <div className="relative pt-3">
             <div
-              role="tablist"
-              aria-label="Örnek Sahneler"
-              className="flex items-center gap-0.5 sm:gap-1 p-0.5 rounded-xl console-well border border-desk-border max-w-full overflow-x-auto"
+              className={`absolute top-0 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3.5 px-4 py-1.5 rounded-t-xl border border-b-0 shadow-sm pointer-events-none transition-opacity duration-200 ${
+                previewMode === 'film' ? 'opacity-0' : 'opacity-100'
+              }`}
+              style={{
+                background: theme === 'night' ? '#E4DCCB' : '#FAF6EE',
+                borderColor: 'rgba(120,104,84,0.35)',
+              }}
+              aria-hidden="true"
             >
-              {(
-                [
-                  { id: 'draw', label: t('modeDrawPill'), dot: 'amber' },
-                  { id: 'paper', label: t('modePaperPill'), dot: 'vermilion' },
-                  { id: 'puppet', label: t('modePuppetPill'), dot: 'emerald' },
-                  { id: 'film', label: t('modeFilmPill'), dot: 'blue' },
-                ] as const
-              ).map((m) => {
-                const active = previewMode === m.id;
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => {
-                      soundEngine.click(active ? 0.95 : 1.1);
-                      onPreviewModeChange(m.id);
-                    }}
-                    className={`px-2 sm:px-2.5 py-1 rounded-lg font-mono text-[9.5px] sm:text-[10px] font-bold inline-flex items-center gap-1 sm:gap-1.5 transition-all whitespace-nowrap shrink-0 ${
-                      active
-                        ? 'bg-desk-panel text-desk-text border border-desk-border shadow-sm'
-                        : 'text-desk-muted hover:text-desk-text border border-transparent'
-                    }`}
-                  >
-                    <span className="hardware-led" data-on={active ? m.dot : undefined} />
-                    {m.label}
-                  </button>
-                );
-              })}
+              <span className="w-2.5 h-2.5 rounded-full bg-neutral-800/80 shadow-inner" />
+              <span className="w-7 h-2 rounded-full bg-neutral-800/80 shadow-inner" />
+              <span className="w-2.5 h-2.5 rounded-full bg-neutral-800/80 shadow-inner" />
             </div>
-          </div>
-
-          {/* Physical ACME Pegbar + Glowing Backlit Interactive Glass Sheet */}
-          <div className="relative mx-auto w-full max-w-[740px] aspect-video mt-3">
-        {/* Authentic 3-Hole ACME Pegbar */}
-        <div
-          className="absolute -top-5 left-1/2 -translate-x-1/2 h-5 px-5 rounded-t-lg bg-[#d8d1c2] border border-b-0 border-[#b2a996] flex items-center gap-6 pointer-events-none z-20 shadow-sm"
-          aria-hidden="true"
-        >
-          <span className="w-2.5 h-2.5 rounded-full bg-[#2a2723]" />
-          <span className="w-8 h-2 rounded-full bg-[#2a2723]" />
-          <span className="w-2.5 h-2.5 rounded-full bg-[#2a2723]" />
-        </div>
 
         <div
-          className="relative w-full h-full rounded-xl overflow-hidden border border-black/25 transition-shadow duration-300"
+          className="relative aspect-[16/9] w-full rounded-2xl overflow-hidden border transition-all duration-300"
           style={{
             backgroundColor: project?.paperColor || '#F7F3E9',
-            filter: `brightness(${(0.76 + lightboxDim * 0.24).toFixed(2)})`,
+            borderColor: 'rgba(217,155,38,0.45)',
             boxShadow:
               theme === 'night'
-                ? `0 0 ${Math.round(35 + lightboxDim * 55)}px rgba(247, 234, 198, ${glowIntensity.toFixed(2)}), 0 24px 54px rgba(0,0,0,0.74)`
-                : '0 20px 44px rgba(45, 37, 25, 0.2)',
+                ? `inset 0 0 36px rgba(255,244,214,${(0.28 * lightboxDim).toFixed(2)}), 0 0 ${Math.round(35 + lightboxDim * 45)}px rgba(247, 234, 198, ${glowIntensity.toFixed(2)})`
+                : 'inset 0 1px 0 rgba(255,255,255,0.9), 0 12px 30px rgba(28,25,23,0.1)',
           }}
         >
           {/* ====== LIVE MODE 1: DRAW DIRECTLY ON THE BACKLIT SHEET ====== */}
@@ -1122,7 +1145,7 @@ export function InteractiveLightboxStage({
 
               {/* Subtle floating ink palette & prompt pill */}
               <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between gap-2 pointer-events-none z-20">
-                <div className="px-2.5 py-1 rounded-full bg-neutral-950/75 backdrop-blur-sm text-[#F7F3E9] font-mono text-[10px] flex items-center gap-1.5 shadow min-w-0">
+                <div className="px-2.5 py-1 rounded-full bg-neutral-950/75 backdrop-blur-sm text-[#F7F3E9] font-mono text-[11px] flex items-center gap-1.5 shadow min-w-0">
                   <span className="w-1.5 h-1.5 rounded-full bg-ink-vermilion animate-pulse shrink-0" />
                   <span className="truncate">{t('drawHint')}</span>
                 </div>
@@ -1195,10 +1218,10 @@ export function InteractiveLightboxStage({
             >
               <canvas ref={paperCanvasRef} width={960} height={540} className="w-full h-full block" />
 
-              <span className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-md bg-neutral-950/80 text-[#F7F3E9] font-mono text-[9px] tracking-wider pointer-events-none">
+              <span className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-md bg-neutral-950/80 text-[#F7F3E9] font-mono text-[11px] tracking-wider pointer-events-none">
                 {t('paperBeforeTag')}
               </span>
-              <span className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-md bg-ink-vermilion/90 text-white font-mono text-[9px] tracking-wider pointer-events-none">
+              <span className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-md bg-ink-vermilion/90 text-white font-mono text-[11px] tracking-wider pointer-events-none">
                 {t('paperAfterTag')} · {curtainPct}%
               </span>
 
@@ -1226,7 +1249,7 @@ export function InteractiveLightboxStage({
                 className="w-full h-full block cursor-grab active:cursor-grabbing touch-none"
               />
               {draggingPinLabel && (
-                <div className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-full bg-neutral-950/80 backdrop-blur-sm text-[#F7F3E9] font-mono text-[10px] flex items-center gap-1.5 pointer-events-none">
+                <div className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-full bg-neutral-950/80 backdrop-blur-sm text-[#F7F3E9] font-mono text-[11px] flex items-center gap-1.5 pointer-events-none">
                   <span className="w-1.5 h-1.5 rounded-full bg-ink-emerald animate-pulse" />
                   <span>{draggingPinLabel}</span>
                 </div>
@@ -1249,14 +1272,47 @@ export function InteractiveLightboxStage({
               }}
             >
               <canvas ref={filmCanvasRef} width={960} height={540} className="w-full h-full block" />
-              <div className="absolute top-2 left-2.5 px-2.5 py-0.5 rounded-full bg-neutral-950/80 backdrop-blur-sm text-[#F7F3E9] font-mono text-[9.5px] flex items-center gap-1.5 pointer-events-none">
+              <div className="absolute top-2 left-2.5 px-2.5 py-0.5 rounded-full bg-neutral-950/80 backdrop-blur-sm text-[#F7F3E9] font-mono text-[11px] flex items-center gap-1.5 pointer-events-none">
                 <span className="hardware-led" data-on="blue" data-pulse="true" />
                 <span>{t('filmLiveBadge')}</span>
               </div>
             </div>
           )}
 
-          <div className="absolute inset-0 paper-grain-overlay opacity-35 pointer-events-none z-10" />
+          {/* Compact Single-Pill Demo Switcher + 3D Thumb-Flip Trigger */}
+          <div className="absolute bottom-2.5 right-2.5 z-20 flex items-center gap-1.5 pointer-events-auto">
+            <label className="stage-floating-pill px-2.5 py-1 rounded-full font-mono text-[11px] font-bold inline-flex items-center gap-1.5">
+              <span>{locale === 'en' ? 'Scene:' : 'Sahne:'}</span>
+              <select
+                value={previewMode}
+                onChange={(e) => {
+                  soundEngine.click(1.08);
+                  onPreviewModeChange(e.target.value as DeskPreviewMode);
+                }}
+                aria-label={locale === 'en' ? 'Select sample scene' : 'Örnek sahne seç'}
+                className="bg-transparent font-bold focus:outline-none cursor-pointer"
+              >
+                <option value="draw" className="bg-neutral-900 text-white">{t('modeDrawPill')}</option>
+                <option value="paper" className="bg-neutral-900 text-white">{t('modePaperPill')}</option>
+                <option value="puppet" className="bg-neutral-900 text-white">{t('modePuppetPill')}</option>
+                <option value="film" className="bg-neutral-900 text-white">{t('modeFilmPill')}</option>
+              </select>
+            </label>
+            {previewMode === 'draw' && project && (
+              <button
+                type="button"
+                onClick={() => {
+                  soundEngine.paperFlip();
+                  void useStudioStore.getState().ensureStarterProjectHydrated();
+                  setShow3DFlip(true);
+                }}
+                className="stage-floating-pill px-2.5 py-1 rounded-full font-mono text-[11px] font-bold hover:border-ink-brass transition-colors"
+              >
+                {locale === 'en' ? '3D Flip' : '3B Çevir'}
+              </button>
+            )}
+          </div>
+          <div className="absolute inset-0 paper-grain-overlay opacity-40 pointer-events-none z-10" />
         </div>
       </div>
 
@@ -1265,7 +1321,7 @@ export function InteractiveLightboxStage({
         <div className="rounded-2xl console-well border border-desk-border px-3 py-2.5 flex flex-col sm:flex-row sm:items-center gap-2.5">
           {/* Row 1 on mobile (middle on desktop): Full-width comfortable scrubber + note */}
           <div className="flex-1 flex flex-col gap-1 min-w-0 sm:order-2">
-            <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-desk-muted">
+            <div className="flex items-center justify-between gap-2 font-mono text-[11px] text-desk-muted">
               <span className="truncate">
                 {activeShowcaseFrame?.note || project.name || t('frameScrubFallback')}
               </span>

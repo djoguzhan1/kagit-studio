@@ -147,18 +147,18 @@ export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWhe
         role="menu"
         aria-label={t('radialTitle')}
         onClick={(e) => e.stopPropagation()}
-        className="radial-wheel-pop fixed w-[228px] h-[228px] rounded-full border border-ink-brass/55 bg-desk-surface/95 backdrop-blur-md shadow-[0_18px_52px_rgba(0,0,0,0.68)]"
+        className="radial-wheel-pop fixed -translate-x-1/2 -translate-y-1/2 w-[228px] h-[228px] rounded-full border border-ink-brass/55 bg-desk-surface/95 backdrop-blur-md shadow-[0_18px_52px_rgba(0,0,0,0.68)]"
         style={{ left: cx, top: cy }}
       >
         {/* Center Hub */}
         <button
           type="button"
           onClick={onClose}
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-14 h-14 rounded-full console-well border border-ink-brass/55 flex flex-col items-center justify-center font-mono text-[9px] font-bold text-ink-brass hover:border-ink-vermilion transition-colors cursor-pointer"
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-14 h-14 rounded-full console-well border border-ink-brass/55 flex flex-col items-center justify-center font-mono text-[11px] font-bold text-ink-brass hover:border-ink-vermilion transition-colors cursor-pointer"
           title={`${t('radialClose')} (Q / Esc)`}
         >
           <span>Q</span>
-          <span className="text-[8px] text-desk-muted">{t('radialClose')}</span>
+          <span className="text-[11px] text-desk-muted">{t('radialClose')}</span>
         </button>
 
         {/* 8 Circular Tool Nodes */}
@@ -184,7 +184,7 @@ export function RadialQuickWheel({ open, x, y, onClose, onUndo }: RadialQuickWhe
               style={{ left: bx, top: by }}
             >
               {act.icon}
-              <span className="font-mono text-[8px] font-bold leading-none">{act.label}</span>
+              <span className="font-mono text-[11px] font-bold leading-none">{act.label}</span>
             </button>
           );
         })}

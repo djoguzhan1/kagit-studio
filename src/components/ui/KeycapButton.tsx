@@ -74,9 +74,16 @@ export function KeycapButton({
 
   const { outer, inner } = splitKeycapClasses(className);
 
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
   const handlePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
     onPointerMove?.(e);
     if (!tilt || e.pointerType === 'touch' || rest.disabled) return;
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
     const el = btnRef.current;
     if (!el) return;
 
@@ -179,7 +186,7 @@ export function KeycapButton({
           )}
           {children}
           {shortcut && (
-            <span className="ml-0.5 font-mono text-[10px] opacity-55 hidden sm:inline">
+            <span className="ml-0.5 font-mono text-[11px] opacity-65 hidden sm:inline">
               {shortcut}
             </span>
           )}

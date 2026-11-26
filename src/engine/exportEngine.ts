@@ -648,7 +648,7 @@ export async function exportPortableBackupZip(
   entries.unshift({ name: 'manifest.json', data: new TextEncoder().encode(manifest) });
 
   const zipBlob = buildZipBlob(entries);
-  const filename = `${sanitizeName(project.name)}.kagit.zip`;
+  const filename = `${sanitizeName(project.name)}.inktrope.zip`;
   triggerDownload(zipBlob, filename);
   onProgress?.('Yedek indirildi!', 100);
   return filename;
@@ -661,7 +661,7 @@ export async function importPortableBackupZip(file: File): Promise<StudioProject
   const bytes = new Uint8Array(await file.arrayBuffer());
   const map = parseZipBytes(bytes);
   const manifestBytes = map.get('manifest.json');
-  if (!manifestBytes) throw new Error('Geçersiz .kagit.zip yedeği');
+  if (!manifestBytes) throw new Error('Geçersiz .inktrope.zip yedeği');
 
   const parsed = JSON.parse(new TextDecoder().decode(manifestBytes)) as {
     project: StudioProject;

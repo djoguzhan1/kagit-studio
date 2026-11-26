@@ -89,7 +89,7 @@ export async function generateFlipbookPdfBlob(
   const BINDING_W = 60; // ~21mm left binding margin for thumb flipbook clip/staple
 
   const numPages = Math.max(1, Math.ceil(jpegFrames.length / PER_PAGE));
-  const safeTitle = sanitizePdfText(projectName || 'Kagit Flipbook');
+  const safeTitle = sanitizePdfText(projectName || 'INKTROPE Flipbook');
 
   // PDF Objects builder
   // Obj 1: Catalog, Obj 2: Pages, Obj 3: Helvetica Font

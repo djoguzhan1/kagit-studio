@@ -1,24 +1,28 @@
+import { useId } from 'react';
+
 /**
- * Iconic KÂĞIT Studio Brand Emblem:
+ * Iconic INKTROPE Brand Emblem:
  * Curled warm ivory flipbook sheet + left ACME pegbar perforations +
  * upward-soaring vermilion motion ribbon & crisp origami paper-plane tip.
- * Zero unintentional facial/frown symmetry at any scale (16px favicon to 48px header).
+ * Uses React `useId()` so multiple instances on screen never collide on SVG gradient IDs.
  */
 export function BrandEmblem({ className = 'w-9 h-9' }: { className?: string }) {
+  const rawId = useId().replace(/:/g, '');
+  const gradId = `inktropeSheetGrad_${rawId}`;
+
   return (
     <div
       className={`brand-emblem relative rounded-xl bg-[#F7F3E9] border border-desk-border shadow-md flex items-center justify-center overflow-hidden shrink-0 ${className}`}
       aria-hidden="true"
     >
       <svg viewBox="0 0 40 40" className="w-full h-full">
-        {/* Soft paper sheet subtle warm shading */}
         <defs>
-          <linearGradient id="kagitSheetGrad" x1="0" y1="0" x2="1" y2="1">
+          <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="1">
             <stop offset="0%" stopColor="#FFFDF8" />
             <stop offset="100%" stopColor="#ECE3D0" />
           </linearGradient>
         </defs>
-        <rect width="40" height="40" fill="url(#kagitSheetGrad)" />
+        <rect width="40" height="40" fill={`url(#${gradId})`} />
 
         {/* Left binding margin & vertical animation pegbar holes */}
         <line x1="9.5" y1="0" x2="9.5" y2="40" stroke="#D5CBB8" strokeWidth="1" strokeDasharray="2 2" />
@@ -44,7 +48,6 @@ export function BrandEmblem({ className = 'w-9 h-9' }: { className?: string }) {
           strokeLinecap="round"
           fill="none"
         />
-        {/* Origami plane arrowhead pointing dynamically upward-right */}
         <path
           d="M32.5 12.5 L20.5 16.2 L25 19.3 L27.8 24 Z"
           fill="#E54D2E"

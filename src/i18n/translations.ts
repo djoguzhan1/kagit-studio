@@ -6,7 +6,7 @@ const TR = {
   heroManifesto: '3 saniyede çiz, tek tuşla canlandır, kâğıttan tara ya da mini film yönet.',
   heroBadges: 'Anında Açılır · Hesapsız · Cep Flipbook Baskılı',
   importBackup: 'Yedek Yükle',
-  importBackupTitle: '.kagit.zip proje yedeğini geri yükle',
+  importBackupTitle: '.inktrope.zip proje yedeğini geri yükle',
   soundToggleTitleOn: 'Masa seslerini kapat',
   soundToggleTitleOff: 'Masa seslerini aç',
   themeToDay: 'Gündüz Defterine Geç',
@@ -109,7 +109,7 @@ const TR = {
   paperCardTag: 'KAĞIT MASASI',
   paperCardTitle: 'Kâğıttan Tara',
   paperCardSub: '1 A4 fotoğraftan 4–9 kare kes, gölgeyi temizle',
-  puppetCardTag: '10 SN CANLANDIR',
+  puppetCardTag: '10 SN KUKLA',
   puppetCardTitle: 'Canlı Kukla',
   puppetCardSub: 'Tek çizimi lastik gibi bük ve sesinle konuştur',
   projectorTag: 'MİNİ FİLM STÜDYOSU',
@@ -339,7 +339,7 @@ const TR = {
   exportPngZipBtn: 'PNG ZIP İndir',
   exportSpriteTitle: 'Oyun Kare Şeridi (.zip)',
   exportSpriteBtn: 'Kare Şeridi İndir',
-  exportBackupTitle: 'Proje Yedeği (.kagit.zip)',
+  exportBackupTitle: 'Proje Yedeği (.inktrope.zip)',
   exportBackupBtn: 'Proje Yedeği İndir',
 
   // Mini Film Director Studio (100% TR/EN, Zero-Jargon)
@@ -792,8 +792,8 @@ const TR = {
     'INKTROPE ile çizdiğin tüm animasyon, GIF, MP4 video, sprite ve yazdırılabilir A4 flipbook PDF çıktılarının telif hakkı tamamen sana aittir; kişisel veya ticari olarak özgürce kullanabilirsin.',
   legalTermsTitle2: '2. Yerel Saklama ve Yedekleme Sorumluluğu',
   legalTermsBody2:
-    'Projelerin cihazında saklanır. Tarayıcı geçmişini temizlersen veya iPhone Safari uzun süre açılmayan sitelerin önbelleğini silerse verilerin etkilenebilir; önemli işlerini .kagit.zip olarak yedeklemeni öneririz.',
-  legalTermsTitle3: '3. Paylaşım Linkleri (#kagit=...)',
+    'Projelerin cihazında saklanır. Tarayıcı geçmişini temizlersen veya iPhone Safari uzun süre açılmayan sitelerin önbelleğini silerse verilerin etkilenebilir; önemli işlerini .inktrope.zip olarak yedeklemeni öneririz.',
+  legalTermsTitle3: '3. Paylaşım Linkleri (#inktrope=...)',
   legalTermsBody3:
     'Paylaşım linki çizimini doğrudan bağlantının içine kodlar, sunucuda barındırmaz. Paylaştığın içerikten yalnızca kendin sorumlusun.',
   legalTermsTitle4: '4. Hizmet Kapsamı',
@@ -803,7 +803,7 @@ const TR = {
   legalStoragePersisted: 'Kalıcı Koruma Açık',
   legalStorageStandard: 'Standart Tarayıcı Alanı',
   legalStorageSafariTip:
-    'İpucu: Önemli projelerini Dışa Aktar -> .kagit.zip Yedeği ile cihazına kaydedebilirsin.',
+    'İpucu: Önemli projelerini Dışa Aktar -> .inktrope.zip Yedeği ile cihazına kaydedebilirsin.',
   legalClearAllTitle: 'Tüm Yerel Verileri Temizle (KVKK Silme Hakkı)',
   legalClearAllDesc:
     'Bu işlem cihazındaki tüm projeleri, sesleri ve tercihleri kalıcı olarak siler ve masayı sıfırlar.',
@@ -983,7 +983,7 @@ const EN: Record<TranslationKey, string> = {
   heroManifesto: 'Draw in 3 seconds, bring it to life in one tap, scan A4 paper, or direct a short film.',
   heroBadges: 'Instant Start · No Account · Printable A4 Flipbooks',
   importBackup: 'Load Backup',
-  importBackupTitle: 'Restore a .kagit.zip project backup',
+  importBackupTitle: 'Restore a .inktrope.zip project backup',
   soundToggleTitleOn: 'Mute desk sounds',
   soundToggleTitleOff: 'Enable desk sounds',
   themeToDay: 'Switch to Daylight Sketchbook',
@@ -1316,7 +1316,7 @@ const EN: Record<TranslationKey, string> = {
   exportPngZipBtn: 'Download PNG ZIP',
   exportSpriteTitle: 'Game Sprite Strip (.zip)',
   exportSpriteBtn: 'Download Sprite Strip',
-  exportBackupTitle: 'Project Backup (.kagit.zip)',
+  exportBackupTitle: 'Project Backup (.inktrope.zip)',
   exportBackupBtn: 'Download Backup',
 
   // Mini Film Director Studio (100% TR/EN, Zero-Jargon)
@@ -1769,8 +1769,8 @@ const EN: Record<TranslationKey, string> = {
     'You retain full copyright to every animation, GIF, MP4 video, sprite sheet, and printable A4 flipbook PDF you create — free for personal or commercial use.',
   legalTermsTitle2: '2. Local Storage & Backups',
   legalTermsBody2:
-    'Because your work is stored locally in your browser, clearing browser data or Safari inactivity cleanup can remove unsaved projects. Export .kagit.zip backups for important work.',
-  legalTermsTitle3: '3. Share Links (#kagit=...)',
+    'Because your work is stored locally in your browser, clearing browser data or Safari inactivity cleanup can remove unsaved projects. Export .inktrope.zip backups for important work.',
+  legalTermsTitle3: '3. Share Links (#inktrope=...)',
   legalTermsBody3:
     'Share links encode strokes directly inside the URL hash without server storage. You are solely responsible for anything you choose to share.',
   legalTermsTitle4: '4. Service Notice',
@@ -1780,7 +1780,7 @@ const EN: Record<TranslationKey, string> = {
   legalStoragePersisted: 'Persistent Storage Protected',
   legalStorageStandard: 'Standard Browser Storage',
   legalStorageSafariTip:
-    'Tip: Save important notebooks anytime via Export -> Portable Backup (.kagit.zip).',
+    'Tip: Save important notebooks anytime via Export -> Portable Backup (.inktrope.zip).',
   legalClearAllTitle: 'Delete All Local Data (Right to Erasure)',
   legalClearAllDesc:
     'Permanently deletes all locally stored notebooks, audio clips, and preferences on this device.',

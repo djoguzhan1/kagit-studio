@@ -2652,24 +2652,25 @@ export function renderMultiLayerRiggedCharacter(
       cctx.clearRect(0, 0, cw, ch);
       renderUnifiedLayers(cctx, ox, oy);
 
-      // Tint ENTIRE unified character silhouette to warm hand-cut ivory paper rim (1 single mask — ZERO internal seams!)
-      hctx.globalCompositeOperation = 'source-over';
-      hctx.clearRect(0, 0, cw, ch);
-      hctx.drawImage(scratch.comp, 0, 0);
-      hctx.globalCompositeOperation = 'source-in';
-      hctx.fillStyle = opts?.isReflection ? 'rgba(235, 232, 224, 0.85)' : '#FCF0D4';
-      hctx.fillRect(0, 0, cw, ch);
-      hctx.globalCompositeOperation = 'source-over';
+      if (!opts?.isReflection) {
+        // Subtle warm lantern rim light in dark film scenes (zero crude opaque white sticker!)
+        hctx.globalCompositeOperation = 'source-over';
+        hctx.clearRect(0, 0, cw, ch);
+        hctx.drawImage(scratch.comp, 0, 0);
+        hctx.globalCompositeOperation = 'source-in';
+        hctx.fillStyle = opts?.nightLampPos ? 'rgba(245, 208, 138, 0.36)' : 'rgba(250, 244, 228, 0.45)';
+        hctx.fillRect(0, 0, cw, ch);
+        hctx.globalCompositeOperation = 'source-over';
 
-      // Stamp crisp 2.4px outer hand-cut paper perimeter around WHOLE silhouette
-      const r = 2.4;
-      const offsets: [number, number][] = [
-        [r, 0], [-r, 0], [0, r], [0, -r],
-        [r * 0.72, r * 0.72], [-r * 0.72, r * 0.72],
-        [r * 0.72, -r * 0.72], [-r * 0.72, -r * 0.72],
-      ];
-      for (const [dx, dy] of offsets) {
-        ctx.drawImage(scratch.halo, ox + dx, oy + dy);
+        const r = 1.25;
+        const offsets: [number, number][] = [
+          [r, 0], [-r, 0], [0, r], [0, -r],
+          [r * 0.72, r * 0.72], [-r * 0.72, r * 0.72],
+          [r * 0.72, -r * 0.72], [-r * 0.72, -r * 0.72],
+        ];
+        for (const [dx, dy] of offsets) {
+          ctx.drawImage(scratch.halo, ox + dx, oy + dy);
+        }
       }
       // Draw crisp unbroken unified character right on top!
       ctx.drawImage(scratch.comp, ox, oy);

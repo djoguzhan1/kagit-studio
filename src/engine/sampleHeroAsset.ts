@@ -18,7 +18,7 @@ export function getSampleHeroAssetUrl(): string {
       ? import.meta.env.BASE_URL
       : '/';
   const cleanBase = base.endsWith('/') ? base : `${base}/`;
-  return `${cleanBase}assets/sample-hero.png?v=2`;
+  return `${cleanBase}assets/sample-hero.png?v=3`;
 }
 
 let cachedCanvas: HTMLCanvasElement | null = null;

@@ -92,6 +92,14 @@ export function MotionPlayIcon({ playing, className = 'w-4 h-4' }: { playing: bo
   );
 }
 
+export function SparkBoltIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M13.2 2.8L5.4 13.2h5.8l-1.1 8 8.5-10.6h-5.8l.4-7.8z" fill="currentColor" fillOpacity="0.22" />
+    </svg>
+  );
+}
+
 export function TrayExportIcon({ className = 'w-4 h-4' }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">

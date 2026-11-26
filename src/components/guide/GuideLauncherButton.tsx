@@ -77,7 +77,7 @@ export function GuideLauncherButton({ compact = false }: GuideLauncherButtonProp
         <span
           className="hardware-led"
           data-on={!guideSeen ? 'amber' : currentCompleted ? 'emerald' : undefined}
-          data-pulse={!guideSeen ? 'true' : undefined}
+          
         />
         <HelpCircle className="w-3.5 h-3.5 shrink-0" />
         <span className="hidden sm:inline">{t('guideBtnLabel')}</span>
@@ -93,7 +93,7 @@ export function GuideLauncherButton({ compact = false }: GuideLauncherButtonProp
             <GuideMascotSvg className="w-11 h-11" />
             <div className="min-w-0">
               <div className="text-xs font-extrabold text-desk-text">{t('guideMenuTitle')}</div>
-              <p className="text-[10.5px] text-desk-muted leading-snug">{t('guideMenuSub')}</p>
+              <p className="text-[11px] text-desk-muted leading-snug">{t('guideMenuSub')}</p>
             </div>
           </div>
 
@@ -129,7 +129,7 @@ export function GuideLauncherButton({ compact = false }: GuideLauncherButtonProp
           {/* 5 Studio Tabs Progress & 1-Click Jump */}
           <div className="pt-2 border-t border-desk-border space-y-1">
             <div className="flex items-center justify-between px-1">
-              <span className="font-mono text-[9.5px] font-bold uppercase tracking-wider text-desk-muted">
+              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted">
                 {t('guideSectionsTitle')}
               </span>
               {completedTours.length > 0 && (
@@ -139,7 +139,7 @@ export function GuideLauncherButton({ compact = false }: GuideLauncherButtonProp
                     soundEngine.click(0.94);
                     resetTourProgress();
                   }}
-                  className="font-mono text-[9.5px] text-desk-muted hover:text-ink-vermilion inline-flex items-center gap-0.5"
+                  className="font-mono text-[11px] text-desk-muted hover:text-ink-vermilion inline-flex items-center gap-0.5"
                 >
                   <RotateCcw className="w-2.5 h-2.5" />
                   {t('guideResetProgress')}
@@ -171,7 +171,7 @@ export function GuideLauncherButton({ compact = false }: GuideLauncherButtonProp
                       <Check className="w-3 h-3" />
                     </span>
                   ) : (
-                    <span className="font-mono text-[9.5px] text-ink-brass shrink-0">3 ▶</span>
+                    <span className="font-mono text-[11px] text-ink-brass shrink-0">3 ▶</span>
                   )}
                 </button>
               );
@@ -187,13 +187,13 @@ export function GuideLauncherButton({ compact = false }: GuideLauncherButtonProp
                 setOpen(false);
                 openLegal('privacy');
               }}
-              className="w-full px-2.5 py-1.5 rounded-xl hover:bg-desk-panel/80 text-[10.5px] font-semibold text-desk-muted hover:text-desk-text flex items-center justify-between gap-2 transition-colors"
+              className="w-full px-2.5 py-1.5 rounded-xl hover:bg-desk-panel/80 text-[11px] font-semibold text-desk-muted hover:text-desk-text flex items-center justify-between gap-2 transition-colors"
             >
               <span className="inline-flex items-center gap-1.5 truncate">
                 <ShieldCheck className="w-3.5 h-3.5 text-ink-emerald shrink-0" />
                 <span className="truncate">{t('legalFooterBtn')}</span>
               </span>
-              <span className="font-mono text-[9px] text-desk-muted">→</span>
+              <span className="font-mono text-[11px] text-desk-muted">→</span>
             </button>
           </div>
         </div>

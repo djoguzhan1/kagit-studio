@@ -18,10 +18,11 @@ export default {
           muted: 'rgb(var(--desk-muted-rgb) / <alpha-value>)',
         },
         ink: {
-          vermilion: '#E54D2E',
+          vermilion: 'rgb(var(--ink-vermilion-rgb) / <alpha-value>)',
           blue: '#2563EB',
           rose: '#E11D48',
-          brass: '#D99B26',
+          brass: 'rgb(var(--ink-brass-rgb) / <alpha-value>)',
+          brassBright: '#D99B26',
           emerald: '#16A34A',
         },
       },

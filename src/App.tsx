@@ -4,12 +4,26 @@ import StudioDeskHub from './components/desk/StudioDeskHub';
 import TopConsoleBar from './components/studio/TopConsoleBar';
 import { StudioTransitionOverlay } from './components/ui/StudioTransitionOverlay';
 import { useT } from './i18n/translations';
+import type { StudioMode } from './types/studio';
+
+const studioLoaders = {
+  draw: () => import('./components/studio/DrawWorkspace'),
+  paper: () => import('./components/paper/PaperCameraStudio'),
+  puppet: () => import('./components/puppet/PuppetStudio'),
+  film: () => import('./components/film/FilmDirectorStudio'),
+} as const;
+
+export function preloadStudioModule(target: StudioMode): void {
+  if (target !== 'desk') {
+    void studioLoaders[target]();
+  }
+}
 
 // Code-split every heavy studio workspace & optional modal so initial boot stays fast on mobile!
-const DrawWorkspace = lazy(() => import('./components/studio/DrawWorkspace'));
-const PaperCameraStudio = lazy(() => import('./components/paper/PaperCameraStudio'));
-const PuppetStudio = lazy(() => import('./components/puppet/PuppetStudio'));
-const FilmDirectorStudio = lazy(() => import('./components/film/FilmDirectorStudio'));
+const DrawWorkspace = lazy(studioLoaders.draw);
+const PaperCameraStudio = lazy(studioLoaders.paper);
+const PuppetStudio = lazy(studioLoaders.puppet);
+const FilmDirectorStudio = lazy(studioLoaders.film);
 const ExportModal = lazy(() => import('./components/export/ExportModal'));
 const StudioGuideOverlay = lazy(() => import('./components/guide/StudioGuideOverlay'));
 const StudioOverviewShow = lazy(() => import('./components/guide/StudioOverviewShow'));
@@ -44,7 +58,7 @@ export default function App() {
     void bootstrap();
   }, [bootstrap]);
 
-  if (!ready) {
+  if (!ready && mode !== 'desk') {
     return (
       <div className="min-h-screen desk-workbench-mat flex flex-col items-center justify-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-[#F7F3E9] border border-desk-border shadow-lg flex items-center justify-center">

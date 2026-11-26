@@ -144,18 +144,28 @@ export function GuideMascotSvg({
         />
       )}
 
-      {/* Tilted ochre artist beret */}
+      {/* Unified INKTROPE Atelier Fedora Brim + Striped Paper-Horn Crests */}
       <ellipse
-        cx="39"
-        cy="19"
-        rx="19"
-        ry="6.8"
-        transform="rotate(-8 39 19)"
-        fill="#D99B26"
+        cx="40"
+        cy="20.5"
+        rx="22"
+        ry="4.2"
+        fill="#1E1B18"
         stroke="#1C1917"
-        strokeWidth="2.6"
+        strokeWidth="2.2"
       />
-      <path d="M37 12.5 Q39 8.5 43 9.2" stroke="#1C1917" strokeWidth="2.4" strokeLinecap="round" />
+      <path
+        d="M27 20 L30 10.5 L37 13 L44 9.8 L52 20 Z"
+        fill="#26221E"
+        stroke="#1C1917"
+        strokeWidth="2.2"
+        strokeLinejoin="round"
+      />
+      <path d="M29 18 Q23 12 26 5.5 Q30 10 33 16.5 Z" fill="#FAF6EC" stroke="#1C1917" strokeWidth="2" strokeLinejoin="round" />
+      <path d="M26 11.5 L30.5 12.5" stroke="#1C1917" strokeWidth="1.5" />
+      <path d="M51 18 Q57 12 54 5.5 Q50 10 47 16.5 Z" fill="#FAF6EC" stroke="#1C1917" strokeWidth="2" strokeLinejoin="round" />
+      <path d="M54 11.5 L49.5 12.5" stroke="#1C1917" strokeWidth="1.5" />
+      <path d="M28.5 19.2 Q40 20.8 51.5 19.2" stroke="#D99B26" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }

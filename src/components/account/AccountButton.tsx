@@ -1,10 +1,16 @@
+import { useEffect, useState } from 'react';
 import { Cloud, CloudOff, Loader2, User } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
 import { soundEngine } from '../../engine/soundEngine';
 
 export function AccountButton({ compact = false }: { compact?: boolean }) {
   const { cloudUser, cloudSyncStatus, locale, openAccountModal } = useStudioStore();
+  const [imgFailed, setImgFailed] = useState(false);
   const isEn = locale === 'en';
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [cloudUser?.avatarUrl]);
 
   const handleOpen = () => {
     soundEngine.click(1.06);
@@ -34,7 +40,7 @@ export function AccountButton({ compact = false }: { compact?: boolean }) {
   }
 
   const firstName = (cloudUser.name || cloudUser.email.split('@')[0] || 'Üye').split(' ')[0].slice(0, 14);
-  const initials = firstName.slice(0, 2).toUpperCase();
+  const initials = firstName.slice(0, 2).toLocaleUpperCase(locale === 'en' ? 'en-US' : 'tr-TR');
   const ledTone =
     cloudSyncStatus === 'synced'
       ? 'emerald'
@@ -70,15 +76,16 @@ export function AccountButton({ compact = false }: { compact?: boolean }) {
         data-on={ledTone}
         data-pulse={cloudSyncStatus === 'syncing' ? 'true' : undefined}
       />
-      {cloudUser.avatarUrl ? (
+      {cloudUser.avatarUrl && !imgFailed ? (
         <img
           src={cloudUser.avatarUrl}
           alt={firstName}
           referrerPolicy="no-referrer"
+          onError={() => setImgFailed(true)}
           className="w-5 h-5 rounded-full object-cover border border-desk-border shrink-0"
         />
       ) : (
-        <span className="w-5 h-5 rounded-full bg-ink-brass/25 border border-ink-brass/60 text-ink-brass font-mono text-[10px] font-bold inline-flex items-center justify-center shrink-0">
+        <span className="w-5 h-5 rounded-full bg-ink-brass/20 border border-ink-brass/60 text-ink-brass font-mono text-[11px] font-bold inline-flex items-center justify-center shrink-0">
           {initials}
         </span>
       )}

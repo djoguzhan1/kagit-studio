@@ -734,11 +734,11 @@ function runHaloPassAndBlit(
     gl.uniform2f(state.uTexel, 1 / state.fboW, 1 / state.fboH);
     gl.uniform2f(state.uUvScale, cw / state.fboW, ch / state.fboH);
     if (isRefl) {
-      gl.uniform3f(state.uHaloColor, 0.92, 0.91, 0.88);
-      gl.uniform1f(state.uHaloOpacity, 0.82);
+      gl.uniform3f(state.uHaloColor, 0.0, 0.0, 0.0);
+      gl.uniform1f(state.uHaloOpacity, 0.0);
     } else {
-      gl.uniform3f(state.uHaloColor, 0.988, 0.941, 0.831);
-      gl.uniform1f(state.uHaloOpacity, 0.96);
+      gl.uniform3f(state.uHaloColor, 0.96, 0.815, 0.54);
+      gl.uniform1f(state.uHaloOpacity, 0.34);
     }
 
     gl.bindBuffer(gl.ARRAY_BUFFER, state.quadVbo);
@@ -863,7 +863,7 @@ export function renderConformingMeshWebGLGpuSkinned(
   const vCount = mesh.vertexCount;
   if (vCount < 3) return true;
 
-  const useHalo = Boolean(opts?.nightHalo);
+  const useHalo = Boolean(opts?.nightHalo) && !opts?.isReflection;
   const pad = useHalo ? 10 : 4;
   const ox = Math.floor(screenBbox.minX - pad);
   const oy = Math.floor(screenBbox.minY - pad);
@@ -997,7 +997,7 @@ export function renderConformingMeshWebGL(
   }
   if (!Number.isFinite(minX) || maxX <= minX || maxY <= minY) return true;
 
-  const useHalo = Boolean(opts?.nightHalo);
+  const useHalo = Boolean(opts?.nightHalo) && !opts?.isReflection;
   const pad = useHalo ? 10 : 4;
   const ox = Math.floor(minX - pad);
   const oy = Math.floor(minY - pad);

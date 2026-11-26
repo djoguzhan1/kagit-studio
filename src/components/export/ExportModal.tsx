@@ -152,13 +152,13 @@ export default function ExportModal() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            <span className="font-mono text-[10px] text-desk-muted">{t('exportScale')}</span>
+            <span className="font-mono text-[11px] text-desk-muted">{t('exportScale')}</span>
             {([1, 0.75, 0.5] as const).map((sc) => (
               <button
                 key={sc}
                 type="button"
                 onClick={() => setVideoScale(sc)}
-                className={`px-2 py-0.5 rounded font-mono text-[10px] border ${
+                className={`px-2 py-0.5 rounded font-mono text-[11px] border ${
                   videoScale === sc
                     ? 'border-ink-brass text-ink-brass font-bold'
                     : 'border-desk-border text-desk-muted'
@@ -252,13 +252,14 @@ export default function ExportModal() {
             )}
 
             <div className="flex items-center gap-2">
-              <button
-                type="button"
+              <KeycapButton
+                variant="graphite"
+                size="md"
                 onClick={() => setShow3DFlipbook((v) => !v)}
-                className="px-3 py-2 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-brass text-xs font-mono font-bold text-ink-brass transition-colors shrink-0"
+                className="shrink-0"
               >
                 {show3DFlipbook ? t('exportClose3D') : t('exportPreview3D')}
-              </button>
+              </KeycapButton>
               <KeycapButton
                 variant="brass"
                 size="md"

@@ -1,4 +1,4 @@
-import { clear, get, set, del, keys } from 'idb-keyval';
+import { clear, get, set, setMany, del, keys } from 'idb-keyval';
 import type { StudioProject } from '../types/studio';
 
 const GUEST_PROJECTS_KEY = 'kagit:projects:v1';
@@ -155,10 +155,12 @@ export async function clearAllLocalStudioData(): Promise<void> {
   }
   try {
     const rmKeys = [
+      'kagit:ui-prefs:v1',
       'kagit:prefs:v1',
       'kagit:tour-progress:v1',
       'kagit:perf-pref:v1',
       'kagit:cloud-gpu-url:v1',
+      'inktrope:byok-gemini-key',
     ];
     for (const k of rmKeys) localStorage.removeItem(k);
     sessionStorage.removeItem('kagit:desk-awakened:v3');
@@ -231,6 +233,17 @@ export async function saveBlob(blob: Blob, existingKey?: string): Promise<string
   evictCacheKey(key);
   markBlobDirty(key);
   return key;
+}
+
+export async function saveBlobsBatch(items: { key: string; blob: Blob }[]): Promise<void> {
+  if (items.length === 0) return;
+  const prefix = blobPrefixFor(activeScope);
+  const pairs: [IDBValidKey, Blob][] = items.map((it) => [`${prefix}${it.key}`, it.blob]);
+  await setMany(pairs);
+  for (const it of items) {
+    evictCacheKey(it.key);
+    markBlobDirty(it.key);
+  }
 }
 
 export async function loadBlob(key: string): Promise<Blob | null> {

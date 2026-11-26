@@ -68,12 +68,32 @@ export function drawStorybookWorldBackdrop(
     ctx.fill();
 
     const horizonY = H * 0.58;
+    ctx.save();
+    ctx.fillStyle = lightningFlash > 0.2 ? 'rgba(34, 49, 76, 0.78)' : 'rgba(14, 21, 36, 0.82)';
+    const farWrap = W * 1.18;
+    for (let f = 0; f < 7; f++) {
+      const fx = (((f * (farWrap / 7) - scroll * 0.16 - lx * 11) % farWrap) + farWrap) % farWrap - W * 0.09;
+      const fw = W * (0.14 + (f % 3) * 0.035);
+      const fh = H * (0.24 + ((f * 3) % 4) * 0.05);
+      const fy = horizonY - fh;
+      ctx.beginPath();
+      ctx.moveTo(fx, horizonY);
+      ctx.lineTo(fx, fy + 18);
+      ctx.lineTo(fx + fw * 0.18, fy);
+      ctx.lineTo(fx + fw * 0.82, fy);
+      ctx.lineTo(fx + fw, fy + 18);
+      ctx.lineTo(fx + fw, horizonY);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
     const houses = [
-      { x: 0.0, w: 0.21, h: 0.34, cafe: false },
-      { x: 0.2, w: 0.22, h: 0.39, cafe: true },
-      { x: 0.41, w: 0.19, h: 0.32, cafe: false },
-      { x: 0.59, w: 0.23, h: 0.41, cafe: false },
-      { x: 0.81, w: 0.22, h: 0.36, cafe: true },
+      { x: 0.0, w: 0.21, h: 0.35, cafe: false, roof: 'mansard' as const },
+      { x: 0.2, w: 0.22, h: 0.4, cafe: true, roof: 'gable' as const },
+      { x: 0.41, w: 0.19, h: 0.33, cafe: false, roof: 'stepped' as const },
+      { x: 0.59, w: 0.23, h: 0.42, cafe: false, roof: 'mansard' as const },
+      { x: 0.81, w: 0.22, h: 0.37, cafe: true, roof: 'gable' as const },
     ];
     const wrapW = W * 1.24;
     const cafeXs: number[] = [];
@@ -84,36 +104,79 @@ export function drawStorybookWorldBackdrop(
       const hh = hs.h * H;
       const topY = horizonY - hh + 12;
 
-      ctx.fillStyle = i % 2 === 0 ? '#141B2B' : '#1A2233';
-      ctx.fillRect(hx, topY + 26, hw, hh);
-
-      ctx.fillStyle = '#0F1523';
+      const wallGrad = ctx.createLinearGradient(hx, topY + 20, hx, horizonY);
+      wallGrad.addColorStop(0, i % 2 === 0 ? '#182236' : '#1E2940');
+      wallGrad.addColorStop(1, '#101624');
+      ctx.fillStyle = wallGrad;
       ctx.beginPath();
-      ctx.moveTo(hx - 10, topY + 28);
-      ctx.lineTo(hx + hw * 0.5, topY - 12);
-      ctx.lineTo(hx + hw + 10, topY + 28);
+      ctx.moveTo(hx + 2, topY + 26);
+      ctx.lineTo(hx + hw - 2, topY + 26);
+      ctx.lineTo(hx + hw, horizonY);
+      ctx.lineTo(hx, horizonY);
       ctx.closePath();
       ctx.fill();
-      ctx.fillRect(hx + hw * 0.72, topY - 8, 12, 24);
 
-      for (let wi = 0; wi < 2; wi++) {
-        const wx = hx + hw * (0.2 + wi * 0.44);
-        const wy = topY + 42;
-        const glow = ctx.createRadialGradient(wx + 12, wy + 16, 2, wx + 12, wy + 16, 34);
-        glow.addColorStop(0, 'rgba(255, 206, 114, 0.42)');
-        glow.addColorStop(1, 'rgba(255, 206, 114, 0)');
-        ctx.fillStyle = glow;
-        ctx.fillRect(wx - 18, wy - 14, 60, 60);
+      ctx.fillStyle = '#0D1320';
+      ctx.strokeStyle = 'rgba(150, 176, 218, 0.16)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      if (hs.roof === 'mansard') {
+        ctx.moveTo(hx - 6, topY + 28);
+        ctx.lineTo(hx + 14, topY - 4);
+        ctx.lineTo(hx + hw - 14, topY - 4);
+        ctx.lineTo(hx + hw + 6, topY + 28);
+      } else if (hs.roof === 'stepped') {
+        ctx.moveTo(hx - 4, topY + 28);
+        ctx.lineTo(hx + hw * 0.22, topY + 8);
+        ctx.lineTo(hx + hw * 0.5, topY - 10);
+        ctx.lineTo(hx + hw * 0.78, topY + 8);
+        ctx.lineTo(hx + hw + 4, topY + 28);
+      } else {
+        ctx.moveTo(hx - 8, topY + 28);
+        ctx.quadraticCurveTo(hx + hw * 0.24, topY + 6, hx + hw * 0.5, topY - 14);
+        ctx.quadraticCurveTo(hx + hw * 0.76, topY + 6, hx + hw + 8, topY + 28);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
 
-        ctx.fillStyle = 'rgba(252, 208, 118, 0.88)';
-        ctx.fillRect(wx, wy, 22, 30);
-        ctx.strokeStyle = '#181E2C';
-        ctx.lineWidth = 2;
+      const chimX = hx + hw * (i % 2 === 0 ? 0.74 : 0.24);
+      ctx.fillStyle = '#0E1422';
+      ctx.fillRect(chimX, topY - 14, 11, 22);
+      ctx.fillRect(chimX - 2, topY - 16, 15, 3);
+
+      const winCount = i % 2 === 0 ? 3 : 2;
+      for (let wi = 0; wi < winCount; wi++) {
+        const wx = hx + hw * (winCount === 3 ? 0.14 + wi * 0.3 : 0.22 + wi * 0.42);
+        const wy = topY + 40 + (wi % 2) * 3;
+        const ww = winCount === 3 ? 17 : 21;
+        const wh = 28;
+        const isWarmLit = (i + wi) % 3 !== 1;
+        if (isWarmLit) {
+          const glow = ctx.createRadialGradient(wx + ww * 0.5, wy + wh * 0.55, 2, wx + ww * 0.5, wy + wh * 0.55, 32);
+          glow.addColorStop(0, 'rgba(255, 206, 118, 0.36)');
+          glow.addColorStop(1, 'rgba(255, 206, 118, 0)');
+          ctx.fillStyle = glow;
+          ctx.fillRect(wx - 16, wy - 12, ww + 32, wh + 30);
+        }
+        ctx.fillStyle = isWarmLit ? 'rgba(248, 198, 108, 0.84)' : 'rgba(34, 48, 74, 0.75)';
         ctx.beginPath();
-        ctx.moveTo(wx + 11, wy);
-        ctx.lineTo(wx + 11, wy + 30);
-        ctx.moveTo(wx, wy + 15);
-        ctx.lineTo(wx + 22, wy + 15);
+        ctx.moveTo(wx, wy + wh);
+        ctx.lineTo(wx, wy + 8);
+        ctx.arc(wx + ww * 0.5, wy + 8, ww * 0.5, Math.PI, 0);
+        ctx.lineTo(wx + ww, wy + wh);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#0D1320';
+        ctx.fillRect(wx - 2, wy + wh, ww + 4, 3);
+        ctx.strokeStyle = 'rgba(18, 24, 38, 0.85)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(wx + ww * 0.5, wy + 3);
+        ctx.lineTo(wx + ww * 0.5, wy + wh);
+        ctx.moveTo(wx, wy + wh * 0.56);
+        ctx.lineTo(wx + ww, wy + wh * 0.56);
         ctx.stroke();
       }
 

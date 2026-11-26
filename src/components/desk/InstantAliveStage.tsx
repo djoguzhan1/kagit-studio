@@ -25,13 +25,16 @@ import {
   UserPlus,
   Video,
   Volume2,
+  ChevronDown,
+  SlidersHorizontal,
   Wand2,
   Wind,
   X,
 } from 'lucide-react';
 import type { MeshFrameOffsets, MeshPin, StudioTheme } from '../../types/studio';
 import { KeycapButton } from '../ui/KeycapButton';
-import { SketchNibIcon } from '../ui/AnimatedStudioIcons';
+import { SketchNibIcon, SparkBoltIcon } from '../ui/AnimatedStudioIcons';
+import type { UniverseHoverTarget } from './AnimatedUniverseCanvas';
 import { soundEngine } from '../../engine/soundEngine';
 import { solveGeodesicArapMesh } from '../../engine/arapSolver';
 import { prepareCharacterCanvas } from '../../engine/characterIntakeEngine';
@@ -69,6 +72,7 @@ import {
 import {
   getCachedSampleHeroCanvas,
   preloadSampleHeroCanvas,
+  onSampleHeroReady,
 } from '../../engine/sampleHeroAsset';
 import { drawStorybookWorldBackdrop, drawStorybookWorldForeground } from '../../engine/storybookWorlds';
 import {
@@ -98,7 +102,6 @@ import {
   extractViewAnchorsFromCanvas,
 } from '../../engine/turnaroundSlicer';
 import { MasterRigRuntimeCache, renderMasterRigCharacter } from '../../engine/viewRigBlender';
-import { UNIVERSAL_CREATURE_CATALOG } from '../../engine/universalCreatureRig';
 import CharacterMasterModal from '../rig/CharacterMasterModal';
 
 export type AliveToyMode = 'dance' | 'talk' | 'film' | 'pull';
@@ -106,7 +109,8 @@ export type AliveToyMode = 'dance' | 'talk' | 'film' | 'pull';
 interface InstantAliveStageProps {
   theme: StudioTheme;
   lightboxDim: number;
-  onLightboxDimChange: (val: number) => void;
+  hoveredDoor?: UniverseHoverTarget;
+  paused?: boolean;
   onSendToStudio: (
     sketchCanvas: HTMLCanvasElement,
     destination: 'draw' | 'puppet' | 'film',
@@ -888,10 +892,13 @@ function renderAliveToyFrame(
     if (metrics.hasPuddle) {
       const drawRef = (p: RiggedCharacterPack, ps: ArticulatedCartoonPose, bd: { x: number; y: number; w: number; h: number }) => {
         ctx.save();
-        ctx.translate(0, groundY + 4);
-        ctx.scale(1, -0.44);
+        ctx.beginPath();
+        ctx.rect(0, groundY + 2, W, H - groundY - 6);
+        ctx.clip();
+        ctx.translate(Math.sin(tSec * 3.4) * 1.6, groundY + 4);
+        ctx.scale(1, -0.38);
         ctx.translate(0, -groundY);
-        ctx.globalAlpha = 0.4;
+        ctx.globalAlpha = 0.28;
         renderMultiLayerRiggedCharacter(ctx, p, ps, bd, {
           boilTick,
           nightLampPos: metrics.lampPos,
@@ -1334,7 +1341,8 @@ function renderAliveToyFrame(
         const p = age / leapDur;
         if (p >= 0.18 && p <= 0.76) {
           const u = (p - 0.18) / 0.58;
-          curX = leap.fromX + (leap.toX - leap.fromX) * u;
+          const easedU = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+          curX = leap.fromX + (leap.toX - leap.fromX) * easedU;
           smearX = ((leap.toX - leap.fromX) / 220) * Math.sin(u * Math.PI);
         } else if (p > 0.76) {
           curX = leap.toX;
@@ -1499,6 +1507,8 @@ function renderAliveToyFrame(
 export function InstantAliveStage({
   theme,
   lightboxDim,
+  hoveredDoor = null,
+  paused = false,
   onSendToStudio,
   onOpenBlankDesk,
 }: InstantAliveStageProps) {
@@ -1533,8 +1543,10 @@ export function InstantAliveStage({
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const committedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const guideCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const aliveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [openAliveMenu, setOpenAliveMenu] = useState<'world' | 'cast' | 'fx' | 'export' | null>(null);
 
   const heroStrokesRef = useRef<StrokeRecord[]>([]);
   const heroUnderlayRef = useRef<HTMLCanvasElement | null>(null);
@@ -1548,7 +1560,6 @@ export function InstantAliveStage({
   const masterRigCacheRef = useRef<MasterRigRuntimeCache | null>(null);
   const [heroMasterRig, setHeroMasterRig] = useState<CharacterMasterRig | null>(null);
   const [masterModalOpen, setMasterModalOpen] = useState(false);
-  const [multiViewHintDismissed, setMultiViewHintDismissed] = useState(false);
   const [heroYawManual, setHeroYawManual] = useState<number | null>(null);
   const heroYawManualRef = useRef<number | null>(null);
   heroYawManualRef.current = heroYawManual;
@@ -1607,13 +1618,23 @@ export function InstantAliveStage({
   const redrawAllStrokes = useCallback(() => {
     const c = drawCanvasRef.current;
     if (!c) return;
+    if (!committedCanvasRef.current) {
+      const off = document.createElement('canvas');
+      off.width = c.width;
+      off.height = c.height;
+      committedCanvasRef.current = off;
+    }
+    const off = committedCanvasRef.current;
+    const octx = off.getContext('2d');
     const ctx = c.getContext('2d');
-    if (!ctx) return;
+    if (!ctx || !octx) return;
     paintStrokesOnCanvas(
-      ctx,
+      octx,
       getActiveStrokes(),
       drawTarget === 'hero' ? heroUnderlayRef.current : null
     );
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.drawImage(off, 0, 0);
   }, [getActiveStrokes, drawTarget]);
 
   // Warm-preload official Baron mascot asset on mount so "Örnek Çiz" & empty "CANLANDIR" feel 0ms instant!
@@ -1641,7 +1662,7 @@ export function InstantAliveStage({
     const hydrateFromHash = () => {
       if (typeof window === 'undefined') return;
       const rawHash = window.location.hash;
-      if (!rawHash.startsWith('#kagit=')) return;
+      if (!rawHash.startsWith('#inktrope=') && !rawHash.startsWith('#kagit=')) return;
       if (hydratedHashRef.current === rawHash) return;
       const decoded = decodeSharedStage(rawHash);
       if (!decoded) return;
@@ -1702,12 +1723,184 @@ export function InstantAliveStage({
     if (!gc) return;
     const gctx = gc.getContext('2d');
     if (!gctx) return;
-    if (!activePrompt || drawTarget === 'buddy') {
+    if (phase !== 'draw') {
       gctx.clearRect(0, 0, gc.width, gc.height);
       return;
     }
-    drawGuideSilhouette(gctx, activePrompt.guide);
-  }, [activePrompt, phase, drawTarget]);
+    if (activePrompt && drawTarget === 'hero') {
+      drawGuideSilhouette(gctx, activePrompt.guide);
+      return;
+    }
+    if (strokeCount > 0 || ghostDismissed || drawTarget === 'buddy') {
+      gctx.clearRect(0, 0, gc.width, gc.height);
+      return;
+    }
+
+    let tick = 0;
+    const reduced = Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+
+    const paintAmbientStage = () => {
+      const W = gc.width;
+      const H = gc.height;
+      gctx.clearRect(0, 0, W, H);
+      const tAnim = tick * (1 / 12);
+      const heroImg = getCachedSampleHeroCanvas();
+
+      // 1. Subtle Non-Photo Blue Animator's Field Crosshair & Calligraphic Watermark on Left Half
+      gctx.save();
+      gctx.strokeStyle = 'rgba(37, 99, 235, 0.16)';
+      gctx.lineWidth = 1.4;
+      gctx.setLineDash([6, 8]);
+      gctx.beginPath();
+      gctx.moveTo(96, H * 0.78);
+      gctx.lineTo(W - 96, H * 0.78);
+      gctx.stroke();
+      gctx.setLineDash([]);
+
+      // Left-side frameless editorial ink invitation (zero SaaS box!)
+      gctx.fillStyle = 'rgba(30, 27, 24, 0.78)';
+      gctx.font = '800 30px "Plus Jakarta Sans", system-ui, sans-serif';
+      gctx.fillText(t('magicInviteTitle'), 108, 326);
+      gctx.fillStyle = 'rgba(92, 82, 70, 0.78)';
+      gctx.font = '600 17px "Plus Jakarta Sans", system-ui, sans-serif';
+      gctx.fillText(t('magicInviteSub'), 108, 362);
+
+      // Hand-drawn curved arrow pointing to the living ink character / canvas
+      gctx.strokeStyle = 'rgba(229, 77, 46, 0.65)';
+      gctx.lineWidth = 2.4;
+      gctx.lineCap = 'round';
+      gctx.beginPath();
+      gctx.moveTo(112, 392);
+      gctx.quadraticCurveTo(210, 424, 312, 398);
+      gctx.stroke();
+      gctx.restore();
+
+      // 2. Right-Center Living Sumi-Ink Showcase Character (12 FPS breathing + door-hover reactive!)
+      const cx = 885;
+      const floorY = H * 0.78;
+      const breath = reduced ? 0 : Math.sin(tAnim * 2.8);
+      const sx = 1 - breath * 0.022;
+      const sy = 1 + breath * 0.026;
+      const sway = reduced ? 0 : Math.sin(tAnim * 1.4) * 0.025;
+
+      // Ground shadow under living character
+      gctx.save();
+      gctx.fillStyle = 'rgba(28, 25, 23, 0.12)';
+      gctx.beginPath();
+      gctx.ellipse(cx, floorY + 4, 96 * sx, 13, 0, 0, Math.PI * 2);
+      gctx.fill();
+      gctx.restore();
+
+      if (heroImg && heroImg.width > 0) {
+        const drawH = H * 0.62;
+        const drawW = drawH * (heroImg.width / heroImg.height);
+        // Hover mode 1 ('draw'): Red & Blue Onion-Skin Ghost Frames behind Hero!
+        if (hoveredDoor === 'draw') {
+          for (const [dx, tint] of [[-34, 'rgba(225, 29, 72, 0.24)'], [34, 'rgba(37, 99, 235, 0.24)']] as const) {
+            gctx.save();
+            gctx.translate(cx + dx, floorY);
+            gctx.scale(sx * 0.97, sy * 0.97);
+            gctx.globalAlpha = 0.26;
+            gctx.drawImage(heroImg, -drawW * 0.5, -drawH + 10, drawW, drawH);
+            gctx.fillStyle = tint;
+            gctx.fillRect(-drawW * 0.4, -drawH * 0.85, drawW * 0.8, drawH * 0.8);
+            gctx.restore();
+          }
+        }
+
+        gctx.save();
+        gctx.translate(cx, floorY);
+        gctx.rotate(sway);
+        gctx.scale(sx, sy);
+        gctx.globalAlpha = 0.9;
+        gctx.drawImage(heroImg, -drawW * 0.5, -drawH + 10, drawW, drawH);
+        gctx.restore();
+      }
+
+      // 3. Door-Specific Live Preview Overlays on Lightbox When Hovering Right-Column Doors!
+      if (hoveredDoor === 'paper') {
+        const scanY = 140 + ((tick * 18) % 410);
+        gctx.save();
+        gctx.strokeStyle = '#16A34A';
+        gctx.lineWidth = 3;
+        const bx = cx - 165;
+        const by = 118;
+        const bw = 330;
+        const bh = 456;
+        for (const [px, py, sxDir, syDir] of [
+          [bx, by, 1, 1], [bx + bw, by, -1, 1], [bx, by + bh, 1, -1], [bx + bw, by + bh, -1, -1]
+        ] as const) {
+          gctx.beginPath();
+          gctx.moveTo(px, py + syDir * 28);
+          gctx.lineTo(px, py);
+          gctx.lineTo(px + sxDir * 28, py);
+          gctx.stroke();
+        }
+        gctx.strokeStyle = 'rgba(22, 163, 74, 0.72)';
+        gctx.beginPath();
+        gctx.moveTo(bx + 8, scanY);
+        gctx.lineTo(bx + bw - 8, scanY);
+        gctx.stroke();
+        gctx.restore();
+      } else if (hoveredDoor === 'puppet') {
+        const rigPts = [
+          [cx, floorY - 356, '#2563EB'],
+          [cx, floorY - 235, '#D99B26'],
+          [cx - 96, floorY - 210, '#E54D2E'],
+          [cx + 102, floorY - 210, '#E54D2E'],
+          [cx - 46, floorY - 24, '#16A34A'],
+          [cx + 48, floorY - 24, '#16A34A'],
+        ] as const;
+        gctx.save();
+        gctx.strokeStyle = 'rgba(37, 99, 235, 0.55)';
+        gctx.lineWidth = 2.2;
+        gctx.setLineDash([5, 5]);
+        for (const [px, py] of rigPts.slice(2)) {
+          gctx.beginPath();
+          gctx.moveTo(cx, floorY - 235);
+          gctx.lineTo(px, py);
+          gctx.stroke();
+        }
+        gctx.setLineDash([]);
+        for (const [px, py, col] of rigPts) {
+          gctx.fillStyle = col;
+          gctx.strokeStyle = '#FAF6EE';
+          gctx.lineWidth = 2.5;
+          gctx.beginPath();
+          gctx.arc(px, py, 8, 0, Math.PI * 2);
+          gctx.fill();
+          gctx.stroke();
+        }
+        gctx.restore();
+      } else if (hoveredDoor === 'film') {
+        gctx.save();
+        gctx.fillStyle = 'rgba(15, 20, 34, 0.82)';
+        gctx.fillRect(0, 0, W, 54);
+        gctx.fillRect(0, H - 54, W, 54);
+        const spot = gctx.createRadialGradient(cx, floorY - 260, 18, cx, floorY - 160, 290);
+        spot.addColorStop(0, 'rgba(245, 198, 102, 0.24)');
+        spot.addColorStop(1, 'rgba(245, 198, 102, 0)');
+        gctx.fillStyle = spot;
+        gctx.fillRect(cx - 300, 54, 600, H - 108);
+        gctx.restore();
+      }
+    };
+
+    paintAmbientStage();
+    const unsubHero = onSampleHeroReady(() => paintAmbientStage());
+    if (paused || reduced) {
+      return () => unsubHero();
+    }
+    const iv = window.setInterval(() => {
+      if (document.hidden) return;
+      tick += 1;
+      paintAmbientStage();
+    }, 84);
+    return () => {
+      unsubHero();
+      window.clearInterval(iv);
+    };
+  }, [activePrompt, phase, drawTarget, strokeCount, ghostDismissed, hoveredDoor, paused, t]);
 
   const stopMic = useCallback(() => {
     if (micStreamRef.current) {
@@ -1776,9 +1969,9 @@ export function InstantAliveStage({
     offsetsRef.current = {};
   }, [pullTarget, hasBuddy]);
 
-  // 60 FPS Live Animation & Physics Loop
+  // 60 FPS Live Animation & Physics Loop (Halts cleanly to 0 RAF when modal/drawer pauses stage!)
   useEffect(() => {
-    if (phase !== 'alive') return;
+    if (phase !== 'alive' || paused) return;
     let raf = 0;
     const t0 = performance.now();
     aliveStartPerfRef.current = t0;
@@ -1800,8 +1993,13 @@ export function InstantAliveStage({
     };
 
     let lastRenderAt = 0;
+    const profile = getLiveDeviceProfile(performancePref);
     const loop = (now: number) => {
-      const profile = getLiveDeviceProfile(performancePref);
+      if (document.hidden) {
+        prevNow = now;
+        raf = requestAnimationFrame(loop);
+        return;
+      }
       const minIntervalMs = profile.targetFps >= 55 ? 0 : 1000 / profile.targetFps;
       if (minIntervalMs > 0 && now - lastRenderAt < minIntervalMs) {
         raf = requestAnimationFrame(loop);
@@ -1820,8 +2018,9 @@ export function InstantAliveStage({
           const tSec = (now - t0) / 1000;
           const floorY = toy === 'film' ? c.height * 0.77 : c.height * 0.82;
 
-          lookRef.current.x += (lookRef.current.tx - lookRef.current.x) * 0.1;
-          lookRef.current.y += (lookRef.current.ty - lookRef.current.y) * 0.1;
+          const lookAlpha = 1 - Math.pow(1 - 0.1, dtSec * 60);
+          lookRef.current.x += (lookRef.current.tx - lookRef.current.x) * lookAlpha;
+          lookRef.current.y += (lookRef.current.ty - lookRef.current.y) * lookAlpha;
 
           const fl = flingRef.current;
           if (toy === 'dance' && fl.mode === 'flying') {
@@ -1977,7 +2176,7 @@ export function InstantAliveStage({
 
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [phase, toy, world, mood, prop, cadenceFps, pullTarget, performancePref]);
+  }, [phase, paused, toy, world, mood, prop, cadenceFps, pullTarget, performancePref]);
 
   // --- Drawing Handlers ---
   const toCanvasCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -1990,7 +2189,11 @@ export function InstantAliveStage({
   };
 
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // Synthetic/interrupted pointer safe ignore
+    }
     setGhostDismissed(true);
     const pt = toCanvasCoords(e);
     drawingRef.current = true;
@@ -2002,7 +2205,17 @@ export function InstantAliveStage({
     const hasUnderlay = drawTarget === 'hero' && Boolean(heroUnderlayRef.current);
     setStrokeCount(list.length + (hasUnderlay ? 1 : 0));
     soundEngine.pencilScratch(0.8);
-    redrawAllStrokes();
+
+    const c = drawCanvasRef.current;
+    const ctx = c?.getContext('2d');
+    if (ctx) {
+      ctx.save();
+      ctx.fillStyle = stroke.color;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, stroke.width * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
   };
 
   const onDrawMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -2011,16 +2224,46 @@ export function InstantAliveStage({
     const prev = lastPtRef.current ?? pt;
     const dist = Math.hypot(pt.x - prev.x, pt.y - prev.y);
     if (dist < 2.2) return;
-    activeStrokeRef.current.points.push(pt);
+    const pts = activeStrokeRef.current.points;
+    pts.push(pt);
     lastPtRef.current = pt;
     soundEngine.pencilScratch(dist / 14);
-    redrawAllStrokes();
+
+    // O(1) Incremental Quadratic Segment Draw (< 0.15ms, ZERO clearRect / ZERO past-stroke replay!)
+    const c = drawCanvasRef.current;
+    const ctx = c?.getContext('2d');
+    if (ctx) {
+      const n = pts.length;
+      ctx.save();
+      ctx.strokeStyle = activeStrokeRef.current.color;
+      ctx.lineWidth = activeStrokeRef.current.width;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      if (n === 2) {
+        const midX = (pts[0].x + pts[1].x) * 0.5;
+        const midY = (pts[0].y + pts[1].y) * 0.5;
+        ctx.moveTo(pts[0].x, pts[0].y);
+        ctx.lineTo(midX, midY);
+      } else if (n >= 3) {
+        const p0 = pts[n - 3];
+        const p1 = pts[n - 2];
+        const p2 = pts[n - 1];
+        ctx.moveTo((p0.x + p1.x) * 0.5, (p0.y + p1.y) * 0.5);
+        ctx.quadraticCurveTo(p1.x, p1.y, (p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
   };
 
   const onDrawUp = () => {
-    drawingRef.current = false;
-    activeStrokeRef.current = null;
-    lastPtRef.current = null;
+    if (drawingRef.current) {
+      drawingRef.current = false;
+      activeStrokeRef.current = null;
+      lastPtRef.current = null;
+      redrawAllStrokes();
+    }
   };
 
   const handleUndo = () => {
@@ -2210,7 +2453,6 @@ export function InstantAliveStage({
           sparksRef.current = [];
           setHeroYawManual(null);
           setHeroMasterRig(fullRig);
-          setMultiViewHintDismissed(true);
           useStudioStore.getState().setActiveMasterRig(fullRig);
           if (!masterRigCacheRef.current) {
             masterRigCacheRef.current = new MasterRigRuntimeCache(fullRig);
@@ -2381,7 +2623,6 @@ export function InstantAliveStage({
     setHeroMasterRig(saved);
     useStudioStore.getState().setActiveMasterRig(saved);
     setMasterModalOpen(false);
-    setMultiViewHintDismissed(true);
 
     if (!masterRigCacheRef.current) {
       masterRigCacheRef.current = new MasterRigRuntimeCache(saved);
@@ -2772,7 +3013,7 @@ export function InstantAliveStage({
       prop,
       voiceFx,
     });
-    const hashStr = `#kagit=${token}`;
+    const hashStr = `#inktrope=${token}`;
     hydratedHashRef.current = hashStr;
     const shareUrl = `${window.location.origin}${window.location.pathname}${hashStr}`;
     try {
@@ -2829,14 +3070,17 @@ export function InstantAliveStage({
           if (files.length > 0) void handleUploadImageFiles(files);
         }}
       />
-      {/* Glowing Lightbox Glass Window with Registration Pegbar */}
-      <div className="relative pt-3">
+      {/* Glowing Lightbox Glass Window with Registration Pegbar (Hides cleanly in dark Film Cinema!) */}
+      <div className="relative pt-3" onClick={() => openAliveMenu && setOpenAliveMenu(null)}>
         <div
-          className="absolute top-0 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3.5 px-4 py-1.5 rounded-t-xl border border-b-0 shadow-sm pointer-events-none"
+          className={`absolute top-0 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3.5 px-4 py-1.5 rounded-t-xl border border-b-0 shadow-sm pointer-events-none transition-all duration-200 ${
+            phase === 'alive' && toy === 'film' ? 'opacity-0 -translate-y-2' : 'opacity-100'
+          }`}
           style={{
             background: theme === 'night' ? '#E4DCCB' : '#FAF6EE',
             borderColor: 'rgba(120,104,84,0.35)',
           }}
+          aria-hidden="true"
         >
           <span className="w-2.5 h-2.5 rounded-full bg-neutral-800/80 shadow-inner" />
           <span className="w-7 h-2 rounded-full bg-neutral-800/80 shadow-inner" />
@@ -2877,8 +3121,9 @@ export function InstantAliveStage({
               </div>
             </div>
           )}
+
           {phase === 'draw' ? (
-            /* ====== ZONE 2 & 3 (DRAW PHASE): CLEAN ZERO-GUESSWORK SKETCH PAPER ====== */
+            /* ====== DRAW PHASE: LIVING INK PAPER + ZERO SAAS EMPTY BOX ====== */
             <>
               <canvas
                 ref={guideCanvasRef}
@@ -2887,51 +3132,11 @@ export function InstantAliveStage({
                 className="absolute inset-0 w-full h-full pointer-events-none"
               />
 
-              {strokeCount === 0 && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none select-none px-4 sm:px-6 pt-7 sm:pt-0 text-center gap-1.5 sm:gap-2">
-                  {/* Subtle Non-Blocking 2.5s Ghost Ink Pencil Invitation (vanishes immediately on draw!) */}
-                  {!activePrompt && !ghostDismissed && drawTarget === 'hero' && (
-                    <svg
-                      viewBox="0 0 120 62"
-                      className="hidden sm:block w-24 h-12 overflow-visible opacity-85"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M 42 32 A 18 18 0 1 1 78 32 A 18 18 0 1 1 42 32"
-                        fill="none"
-                        stroke="#2B2622"
-                        strokeWidth="2.8"
-                        strokeLinecap="round"
-                        className="ghost-ink-stroke"
-                      />
-                      <path
-                        d="M 52 28 L 52.5 28.5 M 67 28 L 67.5 28.5 M 52 38 Q 60 44 68 38"
-                        fill="none"
-                        stroke="#E54D2E"
-                        strokeWidth="2.8"
-                        strokeLinecap="round"
-                        className="ghost-ink-stroke"
-                        style={{ animationDelay: '0.45s' }}
-                      />
-                      <path
-                        d="M 30 46 Q 48 56 88 46"
-                        fill="none"
-                        stroke="#D99B26"
-                        strokeWidth="2.2"
-                        strokeLinecap="round"
-                        className="ghost-ink-stroke"
-                        style={{ animationDelay: '0.85s' }}
-                      />
-                    </svg>
-                  )}
-                  <div className="px-4 py-3 rounded-2xl bg-[#F7F3E9]/90 backdrop-blur-sm border border-stone-300/70 shadow-sm max-w-md">
-                    <div className="text-base sm:text-lg font-extrabold tracking-tight text-stone-800">
-                      {drawTarget === 'buddy' ? t('buddyDrawTitle') : t('magicInviteTitle')}
-                    </div>
-                    <p className="text-[11.5px] sm:text-xs text-stone-600 mt-1 leading-relaxed">
-                      {t('magicInviteSub')}
-                    </p>
-                  </div>
+              {strokeCount === 0 && drawTarget === 'buddy' && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none px-6 text-center">
+                  <span className="font-sans text-lg font-extrabold text-stone-700/80">
+                    {t('buddyDrawTitle')}
+                  </span>
                 </div>
               )}
 
@@ -2954,7 +3159,7 @@ export function InstantAliveStage({
                       setDrawTarget('hero');
                       setPhase('alive');
                     }}
-                    className="pointer-events-auto px-2.5 py-1 rounded-full bg-neutral-950/85 hover:bg-neutral-900 text-[#F7F3E9] text-[10.5px] font-bold inline-flex items-center gap-1 shadow"
+                    className="pointer-events-auto stage-floating-pill px-3 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1.5 transition-colors"
                   >
                     <ArrowLeft className="w-3.5 h-3.5" />
                     {locale === 'en' ? 'Back to Scene' : 'Sahneye Dön'}
@@ -2964,10 +3169,10 @@ export function InstantAliveStage({
                     <button
                       type="button"
                       onClick={handleSurpriseIdea}
-                      className="px-2.5 py-1 rounded-full bg-neutral-950/85 hover:bg-neutral-900 backdrop-blur-sm border border-white/15 text-[#F7F3E9] text-[10.5px] font-bold inline-flex items-center gap-1.5 shadow transition-transform active:scale-95"
+                      className="stage-floating-pill px-3 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1.5 transition-transform active:scale-95"
                     >
                       <Dices className="w-3.5 h-3.5 text-ink-brass shrink-0" />
-                      <span className="truncate max-w-[140px] sm:max-w-[220px]">
+                      <span className="truncate max-w-[150px] sm:max-w-[230px]">
                         {activePrompt ? (locale === 'en' ? activePrompt.en : activePrompt.tr) : t('magicSurpriseBtn')}
                       </span>
                     </button>
@@ -2978,7 +3183,7 @@ export function InstantAliveStage({
                           soundEngine.click(0.9);
                           setPromptIdx(null);
                         }}
-                        className="p-1 rounded-full bg-neutral-950/85 hover:bg-ink-vermilion border border-white/15 text-[#F7F3E9] shadow transition-colors"
+                        className="stage-floating-pill p-1.5 rounded-full hover:bg-ink-vermilion hover:text-white transition-colors"
                         title={locale === 'en' ? 'Hide guide' : 'Rehberi gizle'}
                         aria-label={locale === 'en' ? 'Hide guide' : 'Rehberi gizle'}
                       >
@@ -2988,7 +3193,7 @@ export function InstantAliveStage({
                   </div>
                 )}
 
-                <div className="pointer-events-auto flex items-center gap-1 px-2 py-1 rounded-full bg-neutral-950/85 backdrop-blur-sm border border-white/15 shadow">
+                <div className="pointer-events-auto stage-floating-pill flex items-center gap-1.5 px-2.5 py-1 rounded-full">
                   {INK_SWATCHES.map((sw) => (
                     <button
                       key={sw.hex}
@@ -2998,7 +3203,7 @@ export function InstantAliveStage({
                         setInkColor(sw.hex);
                       }}
                       className={`w-4 h-4 rounded-full border transition-transform ${
-                        inkColor === sw.hex ? 'border-white scale-110 ring-1 ring-white/80' : 'border-white/30'
+                        inkColor === sw.hex ? 'border-ink-brass scale-110 ring-1 ring-ink-brass' : 'border-black/25'
                       }`}
                       style={{ backgroundColor: sw.hex }}
                       title={locale === 'en' ? sw.en : sw.tr}
@@ -3006,7 +3211,7 @@ export function InstantAliveStage({
                     />
                   ))}
 
-                  <span className="w-px h-3.5 bg-white/20 mx-0.5" />
+                  <span className="w-px h-3.5 bg-current opacity-20 mx-0.5" />
 
                   <button
                     type="button"
@@ -3014,8 +3219,8 @@ export function InstantAliveStage({
                       soundEngine.click(1.04);
                       setNibBold(false);
                     }}
-                    className={`px-1.5 py-0.5 rounded-full text-[9.5px] font-bold transition-colors ${
-                      !nibBold ? 'bg-ink-brass text-neutral-950' : 'text-[#F7F3E9]/75 hover:text-white'
+                    className={`px-2 py-0.5 rounded-full text-[11px] font-bold transition-colors ${
+                      !nibBold ? 'bg-ink-brassBright text-[#1c1405]' : 'opacity-75 hover:opacity-100'
                     }`}
                   >
                     {t('thinNib')}
@@ -3026,8 +3231,8 @@ export function InstantAliveStage({
                       soundEngine.click(1.04);
                       setNibBold(true);
                     }}
-                    className={`px-1.5 py-0.5 rounded-full text-[9.5px] font-bold transition-colors ${
-                      nibBold ? 'bg-ink-brass text-neutral-950' : 'text-[#F7F3E9]/75 hover:text-white'
+                    className={`px-2 py-0.5 rounded-full text-[11px] font-bold transition-colors ${
+                      nibBold ? 'bg-ink-brassBright text-[#1c1405]' : 'opacity-75 hover:opacity-100'
                     }`}
                   >
                     {t('thickNib')}
@@ -3035,11 +3240,11 @@ export function InstantAliveStage({
 
                   {strokeCount > 0 && (
                     <>
-                      <span className="w-px h-3.5 bg-white/20 mx-0.5" />
+                      <span className="w-px h-3.5 bg-current opacity-20 mx-0.5" />
                       <button
                         type="button"
                         onClick={handleUndo}
-                        className="p-0.5 rounded-full text-[#F7F3E9]/85 hover:text-ink-brass transition-colors"
+                        className="p-0.5 rounded-full opacity-85 hover:text-ink-brass transition-colors"
                         title={t('undoShort')}
                         aria-label={t('undoShort')}
                       >
@@ -3048,7 +3253,7 @@ export function InstantAliveStage({
                       <button
                         type="button"
                         onClick={handleClear}
-                        className="p-0.5 rounded-full text-[#F7F3E9]/85 hover:text-ink-vermilion transition-colors"
+                        className="p-0.5 rounded-full opacity-85 hover:text-ink-vermilion transition-colors"
                         title={t('drawClear')}
                         aria-label={t('drawClear')}
                       >
@@ -3060,7 +3265,7 @@ export function InstantAliveStage({
               </div>
             </>
           ) : (
-            /* ====== ZONE 2 & 3 (ALIVE PHASE): FIXED 4-ZONE CRYSTAL-CLEAR STAGE ====== */
+            /* ====== ALIVE PHASE: CLEAN 2-PILL TOP HUD (ZERO BOTTOM CANVAS OVERLAP!) ====== */
             <>
               <canvas
                 ref={aliveCanvasRef}
@@ -3084,402 +3289,254 @@ export function InstantAliveStage({
                 }`}
               />
 
-              {/* ZONE 2 — TOP BAR: Left = Mode Selector / Tip | Right = Instant Buddy Control */}
-              <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between gap-2 pointer-events-none z-20">
+              {/* Top Bar: Left = Single World/Voice Selector Pill | Right = Single Cast & 360° Pill */}
+              <div
+                className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between gap-2 pointer-events-none z-20"
+                onClick={(e) => e.stopPropagation()}
+              >
                 {toy === 'film' ? (
-                  <div className="pointer-events-auto flex items-center gap-0.5 p-1 rounded-full bg-neutral-950/90 backdrop-blur-sm border border-white/15 shadow">
-                    {(
-                      [
-                        { id: 'rainy', Icon: CloudRain, label: t('worldRainy') },
-                        { id: 'meadow', Icon: Sun, label: t('worldMeadow') },
-                        { id: 'space', Icon: Rocket, label: t('worldSpace') },
-                        { id: 'concert', Icon: Music2, label: t('worldConcert') },
-                        { id: 'escape', Icon: Flame, label: t('worldEscape') },
-                      ] as const
-                    ).map((w) => {
-                      const WIcon = w.Icon;
-                      return (
-                        <button
-                          key={w.id}
-                          type="button"
-                          onClick={() => {
-                            soundEngine.click(1.12);
-                            setWorld(w.id);
-                          }}
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
-                            world === w.id
-                              ? 'bg-ink-vermilion text-white shadow'
-                              : 'text-[#F7F3E9]/85 hover:text-white'
-                          }`}
-                        >
-                          <WIcon className="w-3 h-3 shrink-0" />
-                          {w.label}
-                        </button>
-                      );
-                    })}
+                  <div className="relative pointer-events-auto">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundEngine.click(1.1);
+                        setOpenAliveMenu((m) => (m === 'world' ? null : 'world'));
+                      }}
+                      data-over-dark={world !== 'meadow' ? 'true' : undefined}
+                      className="stage-floating-pill px-3 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1.5"
+                    >
+                      <Film className="w-3.5 h-3.5 text-ink-brass shrink-0" />
+                      <span>
+                        {world === 'rainy'
+                          ? t('worldRainy')
+                          : world === 'meadow'
+                            ? t('worldMeadow')
+                            : world === 'space'
+                              ? t('worldSpace')
+                              : world === 'concert'
+                                ? t('worldConcert')
+                                : t('worldEscape')}
+                      </span>
+                      <ChevronDown className="w-3.5 h-3.5 opacity-75" />
+                    </button>
+
+                    {openAliveMenu === 'world' && (
+                      <div className="toast-pop-in absolute left-0 top-[calc(100%+6px)] w-48 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-desk-border shadow-2xl p-1.5 space-y-0.5 z-30">
+                        {(
+                          [
+                            { id: 'rainy', Icon: CloudRain, label: t('worldRainy') },
+                            { id: 'meadow', Icon: Sun, label: t('worldMeadow') },
+                            { id: 'space', Icon: Rocket, label: t('worldSpace') },
+                            { id: 'concert', Icon: Music2, label: t('worldConcert') },
+                            { id: 'escape', Icon: Flame, label: t('worldEscape') },
+                          ] as const
+                        ).map((w) => {
+                          const WIcon = w.Icon;
+                          return (
+                            <button
+                              key={w.id}
+                              type="button"
+                              onClick={() => {
+                                soundEngine.click(1.12);
+                                setWorld(w.id);
+                                setOpenAliveMenu(null);
+                              }}
+                              className={`w-full px-2.5 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-2 transition-colors ${
+                                world === w.id
+                                  ? 'bg-ink-vermilion text-white'
+                                  : 'text-desk-text hover:bg-desk-surface'
+                              }`}
+                            >
+                              <WIcon className="w-3.5 h-3.5 shrink-0" />
+                              <span>{w.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 ) : toy === 'talk' ? (
-                  <div className="pointer-events-auto flex items-center gap-0.5 p-1 rounded-full bg-neutral-950/90 backdrop-blur-sm border border-white/15 shadow">
-                    {(
-                      [
-                        { id: 'natural', label: t('voiceNatural') },
-                        { id: 'chipmunk', label: t('voiceChipmunk') },
-                        { id: 'giant', label: t('voiceGiant') },
-                        { id: 'robot', label: t('voiceRobot') },
-                      ] as const
-                    ).map((vf) => (
-                      <button
-                        key={vf.id}
-                        type="button"
-                        onClick={() => {
-                          soundEngine.click(1.14);
-                          setVoiceFx(vf.id);
-                        }}
-                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold transition-all whitespace-nowrap ${
-                          voiceFx === vf.id
-                            ? 'bg-ink-brass text-neutral-950 shadow'
-                            : 'text-[#F7F3E9]/85 hover:text-white'
-                        }`}
-                      >
-                        {vf.label}
-                      </button>
-                    ))}
+                  <div className="relative pointer-events-auto">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundEngine.click(1.1);
+                        setOpenAliveMenu((m) => (m === 'world' ? null : 'world'));
+                      }}
+                      className="stage-floating-pill px-3 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1.5"
+                    >
+                      {micActive ? (
+                        <Mic className="w-3.5 h-3.5 text-ink-emerald shrink-0" />
+                      ) : (
+                        <MicOff className="w-3.5 h-3.5 text-ink-brass shrink-0" />
+                      )}
+                      <span>
+                        {voiceFx === 'natural'
+                          ? t('voiceNatural')
+                          : voiceFx === 'chipmunk'
+                            ? t('voiceChipmunk')
+                            : voiceFx === 'giant'
+                              ? t('voiceGiant')
+                              : t('voiceRobot')}
+                      </span>
+                      <ChevronDown className="w-3.5 h-3.5 opacity-75" />
+                    </button>
+
+                    {openAliveMenu === 'world' && (
+                      <div className="toast-pop-in absolute left-0 top-[calc(100%+6px)] w-44 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-desk-border shadow-2xl p-1.5 space-y-0.5 z-30">
+                        {(
+                          [
+                            { id: 'natural', label: t('voiceNatural') },
+                            { id: 'chipmunk', label: t('voiceChipmunk') },
+                            { id: 'giant', label: t('voiceGiant') },
+                            { id: 'robot', label: t('voiceRobot') },
+                          ] as const
+                        ).map((vf) => (
+                          <button
+                            key={vf.id}
+                            type="button"
+                            onClick={() => {
+                              soundEngine.click(1.14);
+                              setVoiceFx(vf.id);
+                              setOpenAliveMenu(null);
+                            }}
+                            className={`w-full px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-left transition-colors ${
+                              voiceFx === vf.id
+                                ? 'bg-ink-brassBright text-[#1c1405]'
+                                : 'text-desk-text hover:bg-desk-surface'
+                            }`}
+                          >
+                            {vf.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : (
-                  <div className="min-w-0 px-2 sm:px-2.5 py-1 rounded-full bg-neutral-950/85 backdrop-blur-sm text-[#F7F3E9] text-[10px] sm:text-[10.5px] font-semibold flex items-center gap-1.5 shadow max-w-[44%] sm:max-w-[58%]">
-                    <span className="hardware-led shrink-0" data-on="emerald" data-pulse="true" />
+                  <div className="stage-floating-pill min-w-0 px-3 py-1 rounded-full text-[11px] font-semibold flex items-center gap-1.5 max-w-[58%]">
+                    <span className="hardware-led shrink-0" data-on="emerald" />
                     <span className="truncate">{toyHint}</span>
                   </div>
                 )}
 
-                {/* Right Slot: Single Compact 2.5D Angles Pill + Instant Buddy Control! */}
-                <div className="pointer-events-auto flex items-center gap-1 shrink-0">
-                  {rigPackRef.current && rigPackRef.current.creatureClass !== 'humanoid' && (
-                    <button
-                      type="button"
-                      onClick={handleOpenMasterAngles}
-                      className="hidden sm:inline-flex px-2 py-1 rounded-full bg-neutral-950/90 hover:bg-neutral-900 border border-ink-brass/40 text-ink-brass text-[10px] font-bold items-center gap-1 shadow transition-all whitespace-nowrap shrink-0"
-                      title={t('v4CreatureTypeLabel')}
-                    >
-                      <span>
-                        {locale === 'en'
-                          ? UNIVERSAL_CREATURE_CATALOG[rigPackRef.current.creatureClass].labelEn
-                          : UNIVERSAL_CREATURE_CATALOG[rigPackRef.current.creatureClass].labelTr}
-                      </span>
-                    </button>
-                  )}
+                {/* Single Unified Cast & 360° Rig Trigger */}
+                <div className="relative pointer-events-auto shrink-0">
                   <button
                     type="button"
-                    onClick={handleOpenMasterAngles}
-                    className={`px-2 sm:px-2.5 py-1 rounded-full text-[9.5px] sm:text-[10px] font-bold inline-flex items-center gap-1 shadow transition-all active:scale-95 border whitespace-nowrap shrink-0 ${
-                      countRigViews(heroMasterRig) >= 3
-                        ? 'bg-emerald-950/90 border-emerald-400/50 text-emerald-200 hover:border-emerald-300'
-                        : 'bg-neutral-950/90 hover:bg-neutral-900 border-ink-brass/45 text-ink-brass hover:border-ink-brass'
-                    }`}
+                    onClick={() => {
+                      soundEngine.click(1.1);
+                      setOpenAliveMenu((m) => (m === 'cast' ? null : 'cast'));
+                    }}
+                    data-over-dark={toy === 'film' && world !== 'meadow' ? 'true' : undefined}
+                    className="stage-floating-pill px-3 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1.5 whitespace-nowrap"
                   >
-                    <Sparkles className="w-3 h-3 shrink-0" />
-                    <span className="sm:hidden">
-                      {countRigViews(heroMasterRig) >= 3
-                        ? `360° (${countRigViews(heroMasterRig)}/4)`
-                        : countRigViews(heroMasterRig) === 2
-                          ? '2.5D · 2/4'
-                          : '2.5D'}
+                    <UserPlus className="w-3.5 h-3.5 text-ink-brass shrink-0" />
+                    <span>
+                      {hasBuddy
+                        ? locale === 'en'
+                          ? '2 Actors · 2.5D'
+                          : '2 Oyuncu · 2.5D'
+                        : `${t('addBuddy')} · 2.5D`}
                     </span>
-                    <span className="hidden sm:inline">
-                      {countRigViews(heroMasterRig) >= 3
-                        ? `${t('v4Ready360')} (${countRigViews(heroMasterRig)}/4)`
-                        : countRigViews(heroMasterRig) === 2
-                          ? `${t('v4AnglesPill')} · 2/4`
-                          : t('v4AnglesPill')}
-                    </span>
+                    <ChevronDown className="w-3.5 h-3.5 opacity-75" />
                   </button>
-                  {!hasBuddy ? (
-                    <button
-                      type="button"
-                      onClick={handleInstantAddBuddy}
-                      className="px-2 sm:px-2.5 py-1 rounded-full bg-neutral-950/90 hover:bg-neutral-900 border border-white/15 hover:border-ink-brass text-[#F7F3E9] text-[9.5px] sm:text-[10px] font-bold inline-flex items-center gap-1 shadow transition-all active:scale-95 whitespace-nowrap shrink-0"
-                    >
-                      <UserPlus className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-ink-brass shrink-0" />
-                      {t('addBuddy')}
-                    </button>
-                  ) : (
-                    <div className="flex items-center p-0.5 rounded-full bg-neutral-950/90 border border-ink-emerald/50 shadow">
+
+                  {openAliveMenu === 'cast' && (
+                    <div className="toast-pop-in absolute right-0 top-[calc(100%+6px)] w-56 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-desk-border shadow-2xl p-2 space-y-1 z-30">
                       <button
                         type="button"
-                        onClick={handleOpenDrawBuddy}
-                        className="px-2 py-0.5 rounded-full text-[10px] font-bold text-[#F7F3E9] hover:text-ink-brass inline-flex items-center gap-1 transition-colors"
+                        onClick={() => {
+                          setOpenAliveMenu(null);
+                          handleOpenMasterAngles();
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-desk-text hover:bg-desk-surface flex items-center justify-between"
                       >
-                        <Pencil className="w-3 h-3 text-ink-emerald" />
-                        {t('editBuddy')}
+                        <span className="inline-flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-ink-brass" />
+                          {t('v4AnglesPill')}
+                        </span>
+                        <span className="font-mono text-[11px] text-ink-brass">
+                          {countRigViews(heroMasterRig)}/4
+                        </span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={handleRemoveBuddy}
-                        title={t('removeBuddy')}
-                        aria-label={t('removeBuddy')}
-                        className="p-1 rounded-full text-[#F7F3E9]/80 hover:bg-ink-vermilion hover:text-white transition-colors"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+
+                      {!hasBuddy ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenAliveMenu(null);
+                            handleInstantAddBuddy();
+                          }}
+                          className="w-full px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-desk-text hover:bg-desk-surface flex items-center gap-1.5"
+                        >
+                          <UserPlus className="w-3.5 h-3.5 text-ink-emerald" />
+                          {t('addBuddy')}
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-1 pt-1 border-t border-desk-border">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOpenAliveMenu(null);
+                              handleOpenDrawBuddy();
+                            }}
+                            className="flex-1 px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-desk-text hover:bg-desk-surface inline-flex items-center gap-1.5"
+                          >
+                            <Pencil className="w-3.5 h-3.5 text-ink-emerald" />
+                            {t('editBuddy')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOpenAliveMenu(null);
+                              handleRemoveBuddy();
+                            }}
+                            className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-ink-vermilion hover:bg-ink-vermilion/15"
+                          >
+                            {t('removeBuddy')}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
               </div>
-
-              {/* ZONE 3 — BOTTOM BAR: Crisp Mode-Specific Live Controls (Desktop floats inside canvas; mobile docks cleanly below so feet & all pills stay 100% unobstructed!) */}
-              {(toy === 'dance' || toy === 'film') && (
-                <div className="hidden sm:flex absolute bottom-2.5 left-1/2 -translate-x-1/2 z-20 items-center gap-1 p-1 rounded-full bg-neutral-950/90 backdrop-blur-sm border border-white/15 shadow-lg">
-                  {(
-                    [
-                      { id: 'natural', label: t('moodNatural') },
-                      { id: 'joy', label: t('moodJoy') },
-                      { id: 'cool', label: t('moodCool') },
-                      { id: 'sneak', label: t('moodSneak') },
-                      { id: 'sprint', label: t('moodSprint') },
-                    ] as const
-                  ).map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => {
-                        soundEngine.click(1.14);
-                        setMood(m.id);
-                      }}
-                      className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold transition-all whitespace-nowrap ${
-                        mood === m.id
-                          ? 'bg-ink-brass text-neutral-950 shadow'
-                          : 'text-[#F7F3E9]/85 hover:text-white'
-                      }`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-
-                  <span className="w-px h-3.5 bg-white/20 mx-0.5" />
-
-                  {(
-                    [
-                      { id: 'umbrella', Icon: Umbrella, label: t('propUmbrella') },
-                      { id: 'cape', Icon: Wind, label: t('propCape') },
-                      { id: 'ball', Icon: CircleDot, label: t('propBall') },
-                    ] as const
-                  ).map((pr) => {
-                    const PIcon = pr.Icon;
-                    const active = prop === pr.id;
-                    return (
-                      <button
-                        key={pr.id}
-                        type="button"
-                        title={pr.label}
-                        aria-label={pr.label}
-                        onClick={() => {
-                          soundEngine.click(1.18);
-                          if (pr.id === 'ball') {
-                            ballRef.current = { x: 640, y: 120, vx: -175, vy: 0, rot: 0, lastKickSec: -10 };
-                          }
-                          setProp((cur) => (cur === pr.id ? 'none' : pr.id));
-                        }}
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
-                          active
-                            ? 'bg-ink-vermilion text-white shadow'
-                            : 'text-[#F7F3E9]/80 hover:text-white hover:bg-white/10'
-                        }`}
-                      >
-                        <PIcon className="w-3 h-3 shrink-0" />
-                        <span className="hidden sm:inline">{pr.label}</span>
-                      </button>
-                    );
-                  })}
-
-                  {toy === 'film' && (
-                    <>
-                      <span className="w-px h-3.5 bg-white/20 mx-0.5" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          soundEngine.click(1.06);
-                          setCadenceFps((f) => (f === 12 ? 24 : 12));
-                        }}
-                        className="px-1.5 py-0.5 rounded-full font-mono text-[9px] font-bold text-ink-brass hover:bg-white/10"
-                        title="12 / 24 FPS"
-                      >
-                        {cadenceFps}
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {toy === 'talk' && (
-                <div className="absolute bottom-2.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-2.5 py-1 rounded-full bg-neutral-950/90 backdrop-blur-sm border border-white/15 shadow-lg">
-                  <div className="flex items-center gap-1 text-[#F7F3E9] text-[10px] font-bold">
-                    {micActive ? (
-                      <Mic className="w-3.5 h-3.5 text-ink-emerald" />
-                    ) : (
-                      <MicOff className="w-3.5 h-3.5 text-ink-brass" />
-                    )}
-                    <div className="flex items-end gap-0.5 h-3 w-8">
-                      {[0.4, 0.85, 1, 0.7, 0.45].map((m, idx) => (
-                        <span
-                          key={idx}
-                          className="w-1 rounded-full bg-ink-emerald transition-all duration-75"
-                          style={{ height: `${Math.max(20, Math.min(100, Math.round(liveAudioBar * 100 * m)))}%` }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-
-                  <span className="w-px h-3.5 bg-white/20" />
-
-                  <button
-                    type="button"
-                    disabled={echoPhase !== 'idle'}
-                    onClick={() => void handleVoiceEcho()}
-                    className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-bold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
-                      echoPhase === 'recording'
-                        ? 'bg-ink-vermilion text-white animate-pulse'
-                        : echoPhase === 'playing'
-                          ? 'bg-ink-emerald text-neutral-950'
-                          : 'bg-ink-brass text-neutral-950 hover:brightness-110'
-                    }`}
-                  >
-                    <Volume2 className="w-3.5 h-3.5" />
-                    {echoPhase === 'recording'
-                      ? t('voiceEchoRec')
-                      : echoPhase === 'playing'
-                        ? t('voiceEchoPlay')
-                        : t('voiceEchoBtn')}
-                  </button>
-                </div>
-              )}
-
-              {toy === 'pull' && (
-                <div className="absolute bottom-2.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 p-1 rounded-full bg-neutral-950/90 backdrop-blur-sm border border-white/15 shadow-lg">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      soundEngine.click(1.08);
-                      springsRef.current = {};
-                      offsetsRef.current = {};
-                    }}
-                    className="px-2.5 py-0.5 rounded-full text-[10px] font-bold text-[#F7F3E9] hover:text-ink-brass inline-flex items-center gap-1 transition-colors"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    {t('pullReset')}
-                  </button>
-                  {hasBuddy && (
-                    <>
-                      <span className="w-px h-3.5 bg-white/20 mx-0.5" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          soundEngine.click(1.12);
-                          setPullTarget((p) => (p === 'hero' ? 'buddy' : 'hero'));
-                        }}
-                        className="px-2.5 py-0.5 rounded-full bg-ink-brass text-neutral-950 text-[10px] font-bold transition-colors"
-                      >
-                        {t('pullSwitch')} ({pullTarget === 'hero' ? '1' : '2'})
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
             </>
           )}
 
-          <div className="absolute inset-0 paper-grain-overlay opacity-30 pointer-events-none z-10" />
+          <div
+            className={`absolute inset-0 paper-grain-overlay pointer-events-none z-10 ${
+              phase === 'alive' && toy === 'film' ? 'opacity-15' : 'opacity-40'
+            }`}
+          />
         </div>
       </div>
 
-      {/* Mobile-only Docked Mood & Prop Bar (< sm): zero clipping & keeps character feet 100% visible */}
-      {phase === 'alive' && (toy === 'dance' || toy === 'film') && (
-        <div className="flex sm:hidden flex-wrap items-center justify-center gap-1 px-2 py-1.5 rounded-2xl bg-neutral-950/90 border border-white/15 shadow-md">
-          {(
-            [
-              { id: 'natural', label: t('moodNatural') },
-              { id: 'joy', label: t('moodJoy') },
-              { id: 'cool', label: t('moodCool') },
-              { id: 'sneak', label: t('moodSneak') },
-              { id: 'sprint', label: t('moodSprint') },
-            ] as const
-          ).map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              onClick={() => {
-                soundEngine.click(1.14);
-                setMood(m.id);
-              }}
-              className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all whitespace-nowrap ${
-                mood === m.id
-                  ? 'bg-ink-brass text-neutral-950 shadow'
-                  : 'text-[#F7F3E9]/85 hover:text-white'
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
-          <span className="w-px h-3.5 bg-white/20 mx-0.5" />
-          {(
-            [
-              { id: 'umbrella', Icon: Umbrella, label: t('propUmbrella') },
-              { id: 'cape', Icon: Wind, label: t('propCape') },
-              { id: 'ball', Icon: CircleDot, label: t('propBall') },
-            ] as const
-          ).map((pr) => {
-            const PIcon = pr.Icon;
-            const active = prop === pr.id;
-            return (
-              <button
-                key={pr.id}
-                type="button"
-                title={pr.label}
-                aria-label={pr.label}
-                onClick={() => {
-                  soundEngine.click(1.18);
-                  if (pr.id === 'ball') {
-                    ballRef.current = { x: 640, y: 120, vx: -175, vy: 0, rot: 0, lastKickSec: -10 };
-                  }
-                  setProp((cur) => (cur === pr.id ? 'none' : pr.id));
-                }}
-                className={`px-2 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
-                  active
-                    ? 'bg-ink-vermilion text-white shadow'
-                    : 'text-[#F7F3E9]/80 hover:text-white hover:bg-white/10'
-                }`}
-              >
-                <PIcon className="w-3 h-3 shrink-0" />
-              </button>
-            );
-          })}
-          {toy === 'film' && (
-            <button
-              type="button"
-              onClick={() => {
-                soundEngine.click(1.06);
-                setCadenceFps((f) => (f === 12 ? 24 : 12));
-              }}
-              className="px-2 py-1 rounded-full font-mono text-[10px] font-bold text-ink-brass hover:bg-white/10"
-              title="12 / 24 FPS"
-            >
-              {cadenceFps}
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* ZONE 4 — BOTTOM CONSOLE: Fixed 2-Row Tactile Controls, Zero Clutter, Zero Hidden CTAs */}
+      {/* ZONE 4 — SINGLE-ROW TACTILE STAGE CONSOLE (Uniform Baseline, Clear CTA Hierarchy, <= 12 Total Controls!) */}
       {phase === 'draw' ? (
         <div className="rounded-2xl console-well border border-desk-border px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
+            {/* Primary Hero CTA: Always Vermilion + Crisp Vector SparkBoltIcon (Zero OS Emoji!) */}
+            <KeycapButton
+              key="animate-now"
+              data-tour="desk-alive-actions"
+              size="sm"
+              variant="vermilion"
+              led="emerald"
+              onClick={handleAnimateNow}
+            >
+              <SparkBoltIcon className="w-3.5 h-3.5" />
+              {drawTarget === 'buddy' ? t('buddyAddDone') : t('magicAnimateBtn')}
+            </KeycapButton>
+
             <KeycapButton
               key="quick-sample"
               data-tour="desk-quick-draw"
               size="sm"
-              variant="brass"
+              variant="graphite"
               onClick={handleQuickSample}
             >
-              <Wand2 className="w-3.5 h-3.5" />
+              <Wand2 className="w-3.5 h-3.5 text-ink-brass" />
               {drawTarget === 'buddy' ? t('buddyQuickSample') : t('magicQuickSketchBtn')}
             </KeycapButton>
 
@@ -3497,139 +3554,315 @@ export function InstantAliveStage({
               <Upload className="w-3.5 h-3.5 text-ink-brass" />
               {locale === 'en' ? 'Upload Drawing' : 'Çizim Yükle'}
             </KeycapButton>
-
-            <KeycapButton
-              key="animate-now"
-              data-tour="desk-alive-actions"
-              size="sm"
-              variant={strokeCount > 0 ? 'vermilion' : 'graphite'}
-              led={strokeCount > 0 ? 'emerald' : 'off'}
-              ledPulse={strokeCount > 0}
-              onClick={handleAnimateNow}
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              {drawTarget === 'buddy' ? t('buddyAddDone') : t('magicAnimateBtn')} ⚡
-            </KeycapButton>
           </div>
 
           <div className="flex items-center gap-2">
             {strokeCount > 0 ? (
               <KeycapButton
                 size="sm"
-                variant="ivory"
+                variant="graphite"
                 disabled={sendingStudio}
                 onClick={() => void handleSendToStudio('draw')}
               >
-                <SketchNibIcon className="w-3.5 h-3.5" />
+                <SketchNibIcon className="w-3.5 h-3.5 text-ink-brass" />
                 {t('magicOpenStudio')}
               </KeycapButton>
             ) : (
-              <KeycapButton size="sm" variant="ivory" onClick={onOpenBlankDesk}>
-                <SketchNibIcon className="w-3.5 h-3.5" />
+              <KeycapButton size="sm" variant="graphite" onClick={onOpenBlankDesk}>
+                <SketchNibIcon className="w-3.5 h-3.5 text-ink-brass" />
                 {t('openOnDesk')}
               </KeycapButton>
             )}
           </div>
         </div>
       ) : (
-        <div className="rounded-2xl console-well border border-desk-border px-3 py-2.5 space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-1.5">
-            <div data-tour="desk-alive-actions" className="flex flex-wrap items-center gap-1">
-              {(
-                [
-                  { id: 'dance', label: t('magicToyDance'), icon: Music },
-                  { id: 'talk', label: t('magicToyTalk'), icon: Mic },
-                  { id: 'film', label: t('magicToyFilm'), icon: Film },
-                  { id: 'pull', label: t('magicToyPull'), icon: Hand },
-                ] as const
-              ).map((item) => {
-                const Icon = item.icon;
-                const active = toy === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => {
-                      soundEngine.click(1.12);
-                      setToy(item.id);
-                    }}
-                    className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold inline-flex items-center gap-1.5 border transition-all ${
-                      active
-                        ? 'bg-ink-vermilion text-white border-ink-vermilion shadow-md'
-                        : 'bg-desk-surface/85 text-desk-text border-desk-border hover:border-ink-brass'
-                    }`}
-                  >
-                    <Icon className="w-3.5 h-3.5" />
-                    {item.label}
-                  </button>
-                );
-              })}
-            </div>
+        <div
+          className="relative rounded-2xl console-well border border-desk-border px-3 py-2.5 flex flex-wrap items-center justify-between gap-2"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Left 6 Uniform Controls: 4 Toy Modes + 1 Scene FX Popover + 1 Back to Draw */}
+          <div data-tour="desk-alive-actions" className="flex flex-wrap items-center gap-1.5">
+            {(
+              [
+                { id: 'dance', label: t('magicToyDance'), icon: Music },
+                { id: 'talk', label: t('magicToyTalk'), icon: Mic },
+                { id: 'film', label: t('magicToyFilm'), icon: Film },
+                { id: 'pull', label: t('magicToyPull'), icon: Hand },
+              ] as const
+            ).map((item) => {
+              const Icon = item.icon;
+              const active = toy === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    soundEngine.click(1.12);
+                    setOpenAliveMenu(null);
+                    setToy(item.id);
+                  }}
+                  className={`h-9 px-2.5 rounded-xl text-[11px] font-bold inline-flex items-center gap-1.5 border transition-all ${
+                    active
+                      ? 'bg-ink-vermilion text-white border-ink-vermilion shadow-sm'
+                      : 'bg-desk-surface/90 text-desk-text border-desk-border hover:border-ink-brass'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5 shrink-0" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
 
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                title={
-                  locale === 'en'
-                    ? 'Pick 1 drawing or 2–4 angle photos at once'
-                    : 'Tek çizim veya 2–4 açı fotoğrafını birden seç'
-                }
-                onClick={() => uploadInputRef.current?.click()}
-                className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-desk-text bg-desk-surface/85 border border-desk-border hover:border-ink-brass inline-flex items-center gap-1 transition-colors"
-              >
-                <Upload className="w-3.5 h-3.5 text-ink-brass" />
-                {locale === 'en' ? 'Upload' : 'Yükle'}
-              </button>
+            {/* Consolidated Scene FX Popover (Mood, Props, Explicit "12 FPS / 24 FPS", Echo, Pin Reset) */}
+            <div className="relative">
               <button
                 type="button"
                 onClick={() => {
-                  soundEngine.paperFlip();
-                  setDrawTarget('hero');
-                  setPhase('draw');
+                  soundEngine.click(1.08);
+                  setOpenAliveMenu((m) => (m === 'fx' ? null : 'fx'));
                 }}
-                className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-desk-muted hover:text-desk-text bg-desk-surface/70 border border-desk-border inline-flex items-center gap-1 transition-colors"
+                className={`h-9 px-2.5 rounded-xl text-[11px] font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                  openAliveMenu === 'fx'
+                    ? 'bg-ink-brass/20 border-ink-brass text-desk-text'
+                    : 'bg-desk-surface/90 text-desk-text border-desk-border hover:border-ink-brass'
+                }`}
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                {t('magicBackToDraw')}
+                <SlidersHorizontal className="w-3.5 h-3.5 text-ink-brass shrink-0" />
+                <span>{locale === 'en' ? 'FX & Props' : 'Sahne Ayarı'}</span>
               </button>
+
+              {openAliveMenu === 'fx' && (
+                <div className="toast-pop-in absolute left-0 bottom-[calc(100%+8px)] w-72 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-desk-border shadow-2xl p-3 space-y-2.5 z-40">
+                  {(toy === 'dance' || toy === 'film') && (
+                    <>
+                      <div className="space-y-1">
+                        <div className="font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold">
+                          {locale === 'en' ? 'Acting Mood' : 'Oyunculuk Hali'}
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {(
+                            [
+                              { id: 'natural', label: t('moodNatural') },
+                              { id: 'joy', label: t('moodJoy') },
+                              { id: 'cool', label: t('moodCool') },
+                              { id: 'sneak', label: t('moodSneak') },
+                              { id: 'sprint', label: t('moodSprint') },
+                            ] as const
+                          ).map((m) => (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => {
+                                soundEngine.click(1.12);
+                                setMood(m.id);
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                                mood === m.id
+                                  ? 'bg-ink-brassBright text-[#1c1405] border-ink-brassBright'
+                                  : 'bg-desk-surface text-desk-text border-desk-border hover:border-ink-brass'
+                              }`}
+                            >
+                              {m.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1 pt-2 border-t border-desk-border">
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold">
+                            {locale === 'en' ? 'Stage Prop' : 'Aksesuar'}
+                          </span>
+                          {toy === 'film' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                soundEngine.click(1.06);
+                                setCadenceFps((f) => (f === 12 ? 24 : 12));
+                              }}
+                              className="px-2 py-0.5 rounded-md bg-desk-well border border-desk-border font-mono text-[11px] font-bold text-ink-brass hover:border-ink-brass"
+                            >
+                              {cadenceFps} FPS
+                            </button>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {(
+                            [
+                              { id: 'umbrella', Icon: Umbrella, label: t('propUmbrella') },
+                              { id: 'cape', Icon: Wind, label: t('propCape') },
+                              { id: 'ball', Icon: CircleDot, label: t('propBall') },
+                            ] as const
+                          ).map((pr) => {
+                            const PIcon = pr.Icon;
+                            const active = prop === pr.id;
+                            return (
+                              <button
+                                key={pr.id}
+                                type="button"
+                                onClick={() => {
+                                  soundEngine.click(1.16);
+                                  if (pr.id === 'ball') {
+                                    ballRef.current = { x: 640, y: 120, vx: -175, vy: 0, rot: 0, lastKickSec: -10 };
+                                  }
+                                  setProp((cur) => (cur === pr.id ? 'none' : pr.id));
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border inline-flex items-center gap-1 transition-colors ${
+                                  active
+                                    ? 'bg-ink-vermilion text-white border-ink-vermilion'
+                                    : 'bg-desk-surface text-desk-text border-desk-border hover:border-ink-brass'
+                                }`}
+                              >
+                                <PIcon className="w-3.5 h-3.5 shrink-0" />
+                                <span>{pr.label}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {toy === 'talk' && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-[11px] font-bold text-desk-text">
+                        <span>{locale === 'en' ? 'Live Mic Level' : 'Canlı Mikrofon'}</span>
+                        <span className="font-mono text-ink-emerald">{Math.round(liveAudioBar * 100)}%</span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={echoPhase !== 'idle'}
+                        onClick={() => void handleVoiceEcho()}
+                        className="w-full py-1.5 px-3 rounded-xl bg-ink-brassBright text-[#1c1405] text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+                      >
+                        <Volume2 className="w-3.5 h-3.5" />
+                        {echoPhase === 'recording'
+                          ? t('voiceEchoRec')
+                          : echoPhase === 'playing'
+                            ? t('voiceEchoPlay')
+                            : t('voiceEchoBtn')}
+                      </button>
+                    </div>
+                  )}
+
+                  {toy === 'pull' && (
+                    <div className="space-y-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          soundEngine.click(1.08);
+                          springsRef.current = {};
+                          offsetsRef.current = {};
+                          setOpenAliveMenu(null);
+                        }}
+                        className="w-full py-1.5 px-3 rounded-xl bg-desk-surface border border-desk-border text-xs font-bold text-desk-text hover:border-ink-brass inline-flex items-center justify-center gap-1.5"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 text-ink-brass" />
+                        {t('pullReset')}
+                      </button>
+                      {hasBuddy && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            soundEngine.click(1.12);
+                            setPullTarget((p) => (p === 'hero' ? 'buddy' : 'hero'));
+                          }}
+                          className="w-full py-1.5 px-3 rounded-xl bg-ink-brassBright text-[#1c1405] text-xs font-bold"
+                        >
+                          {t('pullSwitch')} ({pullTarget === 'hero' ? '1' : '2'})
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                soundEngine.paperFlip();
+                setOpenAliveMenu(null);
+                setDrawTarget('hero');
+                setPhase('draw');
+              }}
+              className="h-9 px-2.5 rounded-xl text-[11px] font-bold text-desk-muted hover:text-desk-text bg-desk-surface/75 border border-desk-border inline-flex items-center gap-1 transition-colors"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>{t('magicBackToDraw')}</span>
+            </button>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-desk-border/70">
-            <div className="flex flex-wrap items-center gap-1.5">
+          {/* Right 2 Matched 3D Keycaps: Export/Share Menu + Open in Studio */}
+          <div className="flex items-center gap-2">
+            <div className="relative">
               <KeycapButton
                 size="sm"
                 variant="brass"
-                disabled={gifExporting}
-                onClick={() => void handleDownloadLiveGif()}
+                onClick={() => setOpenAliveMenu((m) => (m === 'export' ? null : 'export'))}
               >
                 <Download className="w-3.5 h-3.5" />
-                {gifExporting ? t('magicGifBusy') : t('magicDownloadGif')}
+                {locale === 'en' ? 'Export & Share' : 'İndir & Paylaş'}
               </KeycapButton>
 
-              <KeycapButton
-                size="sm"
-                variant="graphite"
-                disabled={videoExporting}
-                onClick={() => void handleDownloadLiveVideo()}
-              >
-                <Video className="w-3.5 h-3.5 text-ink-vermilion" />
-                {videoExporting ? t('magicVideoBusy') : t('magicDownloadVideo')}
-              </KeycapButton>
+              {openAliveMenu === 'export' && (
+                <div className="toast-pop-in absolute right-0 bottom-[calc(100%+8px)] w-56 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-desk-border shadow-2xl p-2 space-y-1 z-40">
+                  <button
+                    type="button"
+                    disabled={gifExporting}
+                    onClick={() => {
+                      setOpenAliveMenu(null);
+                      void handleDownloadLiveGif();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-xl text-xs font-bold text-desk-text hover:bg-desk-surface flex items-center gap-2"
+                  >
+                    <Download className="w-3.5 h-3.5 text-ink-brass" />
+                    {gifExporting ? t('magicGifBusy') : t('magicDownloadGif')}
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => void handleShareRemixLink()}
-                className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-desk-text bg-desk-surface/85 border border-desk-border hover:border-ink-brass inline-flex items-center gap-1 transition-colors"
-              >
-                <Share2 className="w-3.5 h-3.5 text-ink-brass" />
-                {t('shareLink')}
-              </button>
+                  <button
+                    type="button"
+                    disabled={videoExporting}
+                    onClick={() => {
+                      setOpenAliveMenu(null);
+                      void handleDownloadLiveVideo();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-xl text-xs font-bold text-desk-text hover:bg-desk-surface flex items-center gap-2"
+                  >
+                    <Video className="w-3.5 h-3.5 text-ink-vermilion" />
+                    {videoExporting ? t('magicVideoBusy') : t('magicDownloadVideo')}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenAliveMenu(null);
+                      void handleShareRemixLink();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-xl text-xs font-bold text-desk-text hover:bg-desk-surface flex items-center gap-2"
+                  >
+                    <Share2 className="w-3.5 h-3.5 text-ink-brass" />
+                    {t('shareLink')}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenAliveMenu(null);
+                      uploadInputRef.current?.click();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-xl text-xs font-bold text-desk-muted hover:text-desk-text hover:bg-desk-surface flex items-center gap-2 border-t border-desk-border pt-2"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-ink-brass" />
+                    {locale === 'en' ? 'Upload New Drawing' : 'Yeni Çizim Yükle'}
+                  </button>
+                </div>
+              )}
             </div>
 
             <KeycapButton
               size="sm"
-              variant="ivory"
+              variant="vermilion"
               disabled={sendingStudio}
               onClick={() => void handleSendToStudio()}
             >
@@ -3639,32 +3872,10 @@ export function InstantAliveStage({
           </div>
         </div>
       )}
-      {/* Dismissible 1-Time Subtle Multi-Angle Tip (Zero Clutter!) */}
-      {phase === 'alive' && !multiViewHintDismissed && countRigViews(heroMasterRig) === 1 && (
-        <div className="mt-1.5 px-2.5 py-1 rounded-xl bg-desk-surface/75 border border-ink-brass/25 flex items-center justify-between gap-2 text-[10.5px]">
-          <button
-            type="button"
-            onClick={handleOpenMasterAngles}
-            className="flex items-center gap-1.5 text-desk-muted hover:text-ink-brass transition-colors truncate"
-          >
-            <Sparkles className="w-3 h-3 text-ink-brass shrink-0" />
-            <span className="truncate">{t('v4DeskHintMultiView')}</span>
-            <span className="text-ink-brass font-bold shrink-0">{t('v4AnglesPill')} →</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setMultiViewHintDismissed(true)}
-            className="p-0.5 text-desk-muted hover:text-desk-text shrink-0"
-            aria-label={t('exportCloseAria')}
-          >
-            <X className="w-3 h-3" />
-          </button>
-        </div>
-      )}
 
       {/* Optional compact 360° live angle slider ONLY when artist added 2+ angles */}
       {phase === 'alive' && countRigViews(heroMasterRig) >= 2 && (
-        <div className="mt-1.5 px-3 py-1 rounded-xl bg-desk-surface/80 border border-ink-brass/35 flex items-center gap-2 text-[10.5px]">
+        <div className="mt-1.5 px-3 py-1 rounded-xl bg-desk-surface/80 border border-ink-brass/35 flex items-center gap-2 text-[11px]">
           <span className="font-bold text-ink-brass shrink-0">{t('v4TurnPreviewLabel')}</span>
           <input
             type="range"
@@ -3682,7 +3893,7 @@ export function InstantAliveStage({
             <button
               type="button"
               onClick={() => setHeroYawManual(null)}
-              className="text-[10px] text-desk-muted hover:text-ink-brass font-bold"
+              className="text-[11px] text-desk-muted hover:text-ink-brass font-bold"
             >
               Auto
             </button>

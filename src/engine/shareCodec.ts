@@ -131,7 +131,7 @@ export function decodeSharedStage(token: string): SharedStagePayload | null {
     } catch {
       // keep raw if already unencoded
     }
-    const clean = raw.replace(/^#?kagit=/, '');
+    const clean = raw.replace(/^#?(?:inktrope|kagit)=/, '');
     if (!clean || clean.length > 24000) return null;
     const parsed = JSON.parse(fromBase64Url(clean)) as Record<string, unknown>;
     if (!parsed || parsed.v !== 1) return null;

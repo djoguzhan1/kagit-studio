@@ -16,6 +16,7 @@ import {
 import { useStudioStore } from '../../store/useStudioStore';
 import type { StudioProject } from '../../types/studio';
 import { BlobImage, KeycapButton } from '../ui/KeycapButton';
+import { PocketFlipbook3DPreview } from '../ui/PocketFlipbook3DPreview';
 import {
   IrisCameraIcon,
   JointBoneIcon,
@@ -77,7 +78,7 @@ function Flipbook3DCard({
       <div className="flipbook-3d-back1" aria-hidden="true" />
 
       <div className="flipbook-3d-cover flex flex-col">
-        <div className="px-3.5 py-1.5 bg-desk-well/85 border-b border-desk-border flex items-center justify-between font-mono text-[10px] text-desk-muted">
+        <div className="px-3.5 py-1.5 bg-desk-well/85 border-b border-desk-border flex items-center justify-between font-mono text-[11px] text-desk-muted">
           <span className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-ink-brass" />
             {t('notebookTag')} · {project.aspect} · {project.fps} FPS
@@ -116,7 +117,7 @@ function Flipbook3DCard({
             </div>
           )}
 
-          <div className="absolute bottom-2 left-6 px-2 py-0.5 rounded-md bg-neutral-950/85 text-[#F7F3E9] font-mono text-[10px] flex items-center gap-1.5">
+          <div className="absolute bottom-2 left-6 px-2 py-0.5 rounded-md bg-neutral-950/85 text-[#F7F3E9] font-mono text-[11px] flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-ink-vermilion" />
             <span>
               {project.frames.length} {t('framesWord')}
@@ -129,7 +130,7 @@ function Flipbook3DCard({
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <h3 className="font-bold text-sm text-desk-text truncate">{project.name}</h3>
-              <p className="font-mono text-[10px] text-desk-muted mt-0.5">
+              <p className="font-mono text-[11px] text-desk-muted mt-0.5">
                 {project.width}×{project.height} · {(project.meshRigs?.length ?? 0) + project.rigs.length}{' '}
                 {t('puppetsWord')}
               </p>
@@ -165,7 +166,7 @@ function Flipbook3DCard({
             <button
               type="button"
               onClick={() => launch('paper')}
-              className="px-1.5 py-1.5 rounded-lg border border-desk-border bg-desk-well/60 text-[10.5px] font-semibold text-desk-muted hover:text-desk-text hover:border-desk-muted/60 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
+              className="px-1.5 py-1.5 rounded-lg border border-desk-border bg-desk-well/60 text-[11px] font-semibold text-desk-muted hover:text-desk-text hover:border-desk-muted/60 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
               title={t('paperCardTitle')}
             >
               <IrisCameraIcon className="w-3 h-3 shrink-0" />
@@ -173,7 +174,7 @@ function Flipbook3DCard({
             <button
               type="button"
               onClick={() => launch('puppet')}
-              className="px-1.5 py-1.5 rounded-lg border border-desk-border bg-desk-well/60 text-[10.5px] font-semibold text-desk-muted hover:text-desk-text hover:border-desk-muted/60 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
+              className="px-1.5 py-1.5 rounded-lg border border-desk-border bg-desk-well/60 text-[11px] font-semibold text-desk-muted hover:text-desk-text hover:border-desk-muted/60 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
               title={t('puppetCardTitle')}
             >
               <JointBoneIcon className="w-3 h-3 shrink-0" />
@@ -181,7 +182,7 @@ function Flipbook3DCard({
             <button
               type="button"
               onClick={() => launch('film')}
-              className="px-1.5 py-1.5 rounded-lg border border-desk-border bg-desk-well/60 text-[10.5px] font-semibold text-ink-blue hover:border-ink-blue/70 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
+              className="px-1.5 py-1.5 rounded-lg border border-desk-border bg-desk-well/60 text-[11px] font-semibold text-ink-blue hover:border-ink-blue/70 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
               title={t('projectorTitle')}
             >
               <Clapperboard className="w-3 h-3 shrink-0" />
@@ -235,7 +236,7 @@ function StarterTemplateCard({
         onClick={onLaunch}
         className={`flipbook-3d-cover w-full text-left flex flex-col transition-colors ${accentBorder}`}
       >
-        <div className="px-3.5 py-1.5 bg-desk-well/85 border-b border-desk-border flex items-center justify-between font-mono text-[10px] text-desk-muted">
+        <div className="px-3.5 py-1.5 bg-desk-well/85 border-b border-desk-border flex items-center justify-between font-mono text-[11px] text-desk-muted">
           <span className="flex items-center gap-1.5">
             <span className={`w-1.5 h-1.5 rounded-full ${accentDot}`} />
             {badge}
@@ -288,6 +289,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
   const t = useT();
 
   const [shelfFilter, setShelfFilter] = useState<'all' | 'projects' | 'templates'>('all');
+  const [flipPreviewOpen, setFlipPreviewOpen] = useState(false);
   const backupInputRef = useRef<HTMLInputElement>(null);
   const latestProject = projects[0] ?? null;
 
@@ -325,47 +327,47 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
 
   return (
     <>
-      {/* Sleek Bottom Pinned Brass-Handle Dock Strip (44px) */}
+      {/* Sleek Bottom Pinned Brass-Handle Dock Strip (44px — Exact 3-Column Symmetric Center!) */}
       <div className="relative z-30 border-t border-desk-border bg-desk-surface/92 backdrop-blur-md shrink-0">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-11 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5 min-w-0">
+        <div className="w-full px-4 sm:px-6 h-11 grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] items-center gap-2">
+          <div className="hidden sm:flex items-center gap-2 min-w-0 justify-self-start max-w-full overflow-hidden">
             <button
               type="button"
               onClick={() => {
                 soundEngine.click(1.04);
                 openLegal('privacy');
               }}
-              className="inline-flex items-center gap-1.5 font-mono text-[10px] font-semibold text-desk-muted hover:text-ink-brass transition-colors shrink-0"
+              className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold text-desk-muted hover:text-ink-brass transition-colors shrink-0"
               title={t('legalFooterBtn')}
             >
               <ShieldCheck className="w-3.5 h-3.5 text-ink-emerald shrink-0" />
-              <span className="truncate max-w-[140px] sm:max-w-none">{t('legalFooterBtn')}</span>
+              <span className="truncate max-w-[160px] lg:max-w-[220px]">{t('legalFooterBtn')}</span>
             </button>
-            <span className="hidden xl:inline font-mono text-[10px] text-desk-muted/75 truncate">
+            <span className="hidden 2xl:inline font-mono text-[11px] text-desk-muted truncate">
               · {t('shelfMeta')}
             </span>
           </div>
 
-          {/* Tactile Brass Drawer Pull Handle */}
+          {/* Tactile Brass Drawer Pull Handle — Locked to Viewport Center (0.0px deviation!) */}
           <button
             type="button"
             onClick={() => setOpenWithSound(!open)}
             aria-expanded={open}
-            className="mx-auto md:mx-0 group inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full console-well border border-ink-brass/45 hover:border-ink-brass text-xs font-bold text-desk-text transition-all shadow-sm cursor-pointer"
+            className="justify-self-center group inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full console-well border border-ink-brass/50 hover:border-ink-brass text-xs font-bold text-desk-text transition-all shadow-sm cursor-pointer whitespace-nowrap"
           >
             <span
-              className="w-7 h-1.5 rounded-full bg-gradient-to-r from-[#8f671e] via-[#f2c86b] to-[#8f671e] shadow-inner group-hover:scale-x-110 transition-transform"
+              className="w-6 h-1.5 rounded-full bg-gradient-to-r from-[#8f671e] via-[#f2c86b] to-[#8f671e] shadow-inner group-hover:scale-x-110 transition-transform"
               aria-hidden="true"
             />
-            <BookOpen className="w-3.5 h-3.5 text-ink-brass" />
+            <BookOpen className="w-3.5 h-3.5 text-ink-brass shrink-0" />
             <span>{t('drawerHandle')}</span>
-            <span className="font-mono text-[10px] text-desk-muted">
-              ({projects.length} · 3)
+            <span className="px-1.5 py-0.5 rounded-md bg-desk-panel border border-desk-border font-mono text-[11px] text-desk-muted">
+              {locale === 'en' ? `${projects.length} Books · 3 Demos` : `${projects.length} Defter · 3 Sahne`}
             </span>
             {open ? (
-              <ChevronDown className="w-3.5 h-3.5 text-ink-brass" />
+              <ChevronDown className="w-3.5 h-3.5 text-ink-brass shrink-0" />
             ) : (
-              <ChevronUp className="w-3.5 h-3.5 text-ink-brass" />
+              <ChevronUp className="w-3.5 h-3.5 text-ink-brass shrink-0" />
             )}
           </button>
 
@@ -377,16 +379,16 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
                 soundEngine.paperFlip();
                 openProject(latestProject.id, 'draw');
               }}
-              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-desk-border bg-desk-well/70 hover:border-ink-brass text-[11px] font-semibold text-desk-text transition-colors max-w-[230px]"
+              className="hidden sm:inline-flex justify-self-end items-center gap-1.5 px-2.5 py-1 rounded-lg border border-desk-border bg-desk-well/75 hover:border-ink-brass text-[11px] font-semibold text-desk-text transition-colors max-w-[230px]"
             >
-              <span className="font-mono text-[9.5px] uppercase text-ink-brass shrink-0">
+              <span className="font-mono text-[11px] uppercase text-ink-brass font-bold shrink-0">
                 {t('drawerContinue')}:
               </span>
               <span className="truncate">{latestProject.name}</span>
               <ArrowRight className="w-3 h-3 text-ink-brass shrink-0" />
             </button>
           ) : (
-            <span className="hidden sm:block w-16" />
+            <span className="hidden sm:block justify-self-end w-16" />
           )}
         </div>
       </div>
@@ -420,7 +422,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
                   <BookOpen className="w-4 h-4 text-ink-brass" />
                   <h2 className="text-base font-extrabold text-desk-text">{t('shelfHeading')}</h2>
 
-                  <div className="flex items-center gap-1 p-0.5 rounded-lg console-well border border-desk-border font-mono text-[10px]">
+                  <div className="flex items-center gap-1 p-0.5 rounded-lg console-well border border-desk-border font-mono text-[11px]">
                     {(
                       [
                         { id: 'all', label: `${t('shelfTabAll')} (${projects.length + 3})` },
@@ -448,6 +450,23 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
                 </div>
 
                 <div className="flex items-center gap-2">
+                  {latestProject && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundEngine.paperFlip();
+                        void useStudioStore.getState().ensureStarterProjectHydrated();
+                        setFlipPreviewOpen((v) => !v);
+                      }}
+                      className={`px-2.5 py-1.5 rounded-lg border text-xs font-bold inline-flex items-center gap-1.5 transition-colors ${
+                        flipPreviewOpen
+                          ? 'bg-ink-brass/20 border-ink-brass text-desk-text'
+                          : 'border-desk-border bg-desk-well/70 text-ink-brass hover:border-ink-brass'
+                      }`}
+                    >
+                      <span>{locale === 'en' ? '3D Pocket Flipbook' : '3B Cep Flipbook'}</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => backupInputRef.current?.click()}
@@ -460,7 +479,7 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
                   <input
                     ref={backupInputRef}
                     type="file"
-                    accept=".zip,.kagit.zip"
+                    accept=".inktrope.zip,.kagit.zip,.zip"
                     className="hidden"
                     onChange={handleImportBackup}
                   />
@@ -478,7 +497,18 @@ export function StudioDrawer({ open, onToggle, onCreateFirst }: StudioDrawerProp
             </div>
 
             {/* Scrollable Drawer Body */}
-            <div className="overflow-y-auto px-4 sm:px-6 py-5">
+            <div className="overflow-y-auto px-4 sm:px-6 py-5 space-y-4">
+              {flipPreviewOpen && latestProject && (
+                <div className="max-w-2xl mx-auto">
+                  <PocketFlipbook3DPreview
+                    frames={latestProject.frames}
+                    fps={latestProject.fps}
+                    paperColor={latestProject.paperColor}
+                    projectName={latestProject.name}
+                    onClose={() => setFlipPreviewOpen(false)}
+                  />
+                </div>
+              )}
               <div className="max-w-7xl mx-auto">
                 {shelfFilter === 'projects' && projects.length === 0 ? (
                   <div className="rounded-3xl console-well border border-dashed border-desk-border p-10 text-center space-y-3">

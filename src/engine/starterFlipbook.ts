@@ -1,5 +1,5 @@
 import type { CelFrame, StudioProject } from '../types/studio';
-import { canvasToPngBlob, canvasToWebpOrJpegBlob, makeId, saveBlob } from './db';
+import { canvasToPngBlob, canvasToWebpOrJpegBlob, makeId, saveBlob, saveBlobsBatch } from './db';
 
 /**
  * Calligraphic variable-weight ink curve (simulating a hand-inked G-Pen dip nib).
@@ -47,6 +47,7 @@ export async function createStarterFlipbookProject(): Promise<StudioProject> {
   const H = 720;
   const frameCount = 16;
   const frames: CelFrame[] = [];
+  const pendingBlobs: { key: string; blob: Blob }[] = [];
 
   const roughCanvas = document.createElement('canvas');
   roughCanvas.width = W;
@@ -119,8 +120,16 @@ export async function createStarterFlipbookProject(): Promise<StudioProject> {
     rctx.setLineDash([7, 7]);
     rctx.beginPath();
     rctx.moveTo(planePath[0].x, planePath[0].y);
-    for (let k = 1; k < planePath.length; k++) {
-      rctx.lineTo(planePath[k].x, planePath[k].y);
+    for (let k = 0; k < planePath.length - 1; k++) {
+      const p0 = planePath[Math.max(0, k - 1)];
+      const p1 = planePath[k];
+      const p2 = planePath[k + 1];
+      const p3 = planePath[Math.min(planePath.length - 1, k + 2)];
+      const cp1x = p1.x + (p2.x - p0.x) / 6;
+      const cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp2x = p2.x - (p3.x - p1.x) / 6;
+      const cp2y = p2.y - (p3.y - p1.y) / 6;
+      rctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
     }
     rctx.stroke();
     rctx.setLineDash([]);
@@ -385,21 +394,28 @@ export async function createStarterFlipbookProject(): Promise<StudioProject> {
     // Hillside contour + dynamic wind-bent grass blades
     drawInkStroke(ictx, 30, 594, 310, 496, 650, 586, 2.2, 5.4, 28);
     drawInkStroke(ictx, 650, 586, 960, 648, 1250, 560, 1.8, 4.4, 26);
-    for (let g = 0; g < 9; g++) {
-      const gx = 95 + g * 120;
-      const gy = 556 - Math.sin(g * 0.62) * 26;
-      drawInkStroke(
-        ictx,
-        gx,
-        gy,
-        gx + 11 + windWave * 8,
-        gy - 18,
-        gx + 22 + windWave * 13,
-        gy - 30,
-        2.5,
-        0.8,
-        8
-      );
+    const tuftClusters = [78, 164, 298, 412, 548, 694, 832, 978, 1116, 1210];
+    for (let g = 0; g < tuftClusters.length; g++) {
+      const baseGx = tuftClusters[g];
+      const baseGy = 564 + Math.sin(baseGx * 0.011) * 16 + (g % 3) * 4;
+      const bladeCount = 2 + (g % 3);
+      for (let b = 0; b < bladeCount; b++) {
+        const bx = baseGx + (b - 1) * 6.5;
+        const bh = 16 + ((g * 7 + b * 5) % 13);
+        const sway = (12 + b * 5) * (0.55 + 0.45 * windWave) + (b - 1) * 4;
+        drawInkStroke(
+          ictx,
+          bx,
+          baseGy,
+          bx + sway * 0.45,
+          baseGy - bh * 0.62,
+          bx + sway,
+          baseGy - bh,
+          2.2,
+          0.55,
+          10
+        );
+      }
     }
 
     // Calligraphic air-stream ribbon trailing the paper plane
@@ -488,18 +504,29 @@ export async function createStarterFlipbookProject(): Promise<StudioProject> {
 
     ictx.restore();
 
-    const [roughKey, colorKey, inkKey] = await Promise.all([
-      canvasToPngBlob(roughCanvas).then((b) => saveBlob(b)),
-      canvasToPngBlob(colorCanvas).then((b) => saveBlob(b)),
-      canvasToPngBlob(inkCanvas).then((b) => saveBlob(b)),
-    ]);
+    const roughKey = makeId('blob');
+    const colorKey = makeId('blob');
+    const inkKey = makeId('blob');
+    const thumbKey = makeId('blob');
 
     tctx.fillStyle = '#F7F3E9';
     tctx.fillRect(0, 0, 512, 288);
     tctx.drawImage(roughCanvas, 0, 0, 512, 288);
     tctx.drawImage(colorCanvas, 0, 0, 512, 288);
     tctx.drawImage(inkCanvas, 0, 0, 512, 288);
-    const thumbKey = await saveBlob(await canvasToWebpOrJpegBlob(thumbCanvas, 0.88));
+
+    const [roughBlob, colorBlob, inkBlob, thumbBlob] = await Promise.all([
+      canvasToPngBlob(roughCanvas),
+      canvasToPngBlob(colorCanvas),
+      canvasToPngBlob(inkCanvas),
+      canvasToWebpOrJpegBlob(thumbCanvas, 0.88),
+    ]);
+    pendingBlobs.push(
+      { key: roughKey, blob: roughBlob },
+      { key: colorKey, blob: colorBlob },
+      { key: inkKey, blob: inkBlob },
+      { key: thumbKey, blob: thumbBlob }
+    );
 
     frames.push({
       id: makeId('frm'),
@@ -540,6 +567,8 @@ export async function createStarterFlipbookProject(): Promise<StudioProject> {
       ],
     });
   }
+
+  await saveBlobsBatch(pendingBlobs);
 
   const sceneId = makeId('scn');
   const now = new Date().toISOString();
@@ -586,6 +615,82 @@ export async function createStarterFlipbookProject(): Promise<StudioProject> {
     recentColors: ['#1C1917', '#E54D2E', '#2563EB', '#D99B26'],
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+/**
+ * 0ms Synchronous Starter Shell (Zero cold-boot PNG/IDB blocking!).
+ * Hydrates full 16-frame cels cleanly in idle background or on-demand when opened in Draw/Export.
+ */
+export function createStarterFlipbookShellProject(): StudioProject {
+  const W = 1280;
+  const H = 720;
+  const notes = [
+    'Hazırlık (Nişan)', 'Geri Çekme', 'Fırlatma!', '',
+    'Yükseliş', '', 'Tepe Kavis', 'Döngü Girişi',
+    '', 'Ters Süzülüş', '', 'Loop Çıkışı',
+    '', 'Rüzgar Hızı', '', 'Ufka Süzülüş',
+  ];
+  const frames: CelFrame[] = notes.map((note) => ({
+    id: makeId('frm'),
+    hold: 1,
+    thumbKey: null,
+    note,
+    layers: [
+      { id: makeId('lyr'), name: 'Eskiz (Mavi)', role: 'rough', visible: true, locked: false, opacity: 0.65, blendMode: 'source-over', blobKey: null },
+      { id: makeId('lyr'), name: 'Boya', role: 'color', visible: true, locked: false, opacity: 1, blendMode: 'source-over', blobKey: null },
+      { id: makeId('lyr'), name: 'Mürekkep', role: 'ink', visible: true, locked: false, opacity: 1, blendMode: 'multiply', blobKey: null },
+    ],
+  }));
+  const sceneId = makeId('scn');
+  const now = new Date().toISOString();
+  return {
+    id: makeId('prj'),
+    name: 'Kağıt Uçak & Rüzgar',
+    aspect: '16:9',
+    width: W,
+    height: H,
+    fps: 12,
+    paperColor: '#F7F3E9',
+    paperStyle: 'bristol',
+    paperGrain: 0.35,
+    starterPendingHydration: true,
+    frames,
+    scenes: [
+      {
+        id: sceneId,
+        name: 'Sahne 1 · Tepe',
+        frames,
+        backgroundBlobKey: null,
+        backgroundParallax: 0.35,
+        cameraKeyframes: [],
+        atmosphere: 'none',
+      },
+    ],
+    activeSceneId: sceneId,
+    backgroundBlobKey: null,
+    backgroundParallax: 0.35,
+    cameraKeyframes: [],
+    atmosphere: 'none',
+    rigs: [],
+    meshRigs: [],
+    audio: null,
+    references: [],
+    palette: ['#1C1917', '#E54D2E', '#2563EB', '#D99B26', '#16A34A', '#8B5E3C', '#EFE6D5'],
+    recentColors: ['#1C1917', '#E54D2E', '#2563EB', '#D99B26'],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export async function hydrateStarterFlipbookProject(shell: StudioProject): Promise<StudioProject> {
+  const generated = await createStarterFlipbookProject();
+  return {
+    ...generated,
+    id: shell.id,
+    name: shell.name,
+    createdAt: shell.createdAt,
+    starterPendingHydration: false,
   };
 }
 

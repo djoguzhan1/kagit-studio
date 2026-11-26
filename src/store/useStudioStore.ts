@@ -52,7 +52,7 @@ import {
   type CloudSyncStatus,
   type CloudUser,
 } from '../engine/cloudSync';
-import { createBounceExerciseProject, createStarterFlipbookProject } from '../engine/starterFlipbook';
+import { createBounceExerciseProject, createStarterFlipbookProject, createStarterFlipbookShellProject, hydrateStarterFlipbookProject } from '../engine/starterFlipbook';
 import { soundEngine } from '../engine/soundEngine';
 import { timelapseRecorder } from '../engine/timelapseRecorder';
 import { loadTourProgress, saveTourProgress } from '../engine/tourConfig';
@@ -505,6 +505,7 @@ interface StudioState {
   /** Shared V4 360° 2.5D multi-view character rig carried across Desk, Puppet & Film studios */
   activeMasterRig: CharacterMasterRig | null;
   setActiveMasterRig: (rig: CharacterMasterRig | null) => void;
+  ensureStarterProjectHydrated: () => Promise<void>;
 }
 
 const initialPrefs = loadUiPrefs();
@@ -512,7 +513,10 @@ const initialTour = loadTourProgress();
 soundEngine.setEnabled(initialPrefs.soundEnabled);
 if (typeof document !== 'undefined') {
   document.documentElement.setAttribute('data-theme', initialPrefs.theme);
+  document.documentElement.setAttribute('lang', initialPrefs.locale);
 }
+
+let starterHydrationPromise: Promise<void> | null = null;
 
 export const useStudioStore = create<StudioState>((set, get) => ({
   ready: false,
@@ -545,6 +549,27 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   guestImportableCount: 0,
   activeMasterRig: null,
   setActiveMasterRig: (rig) => set({ activeMasterRig: rig }),
+  ensureStarterProjectHydrated: async () => {
+    const pending = get().projects.find((p) => p.starterPendingHydration);
+    if (!pending) return;
+    if (starterHydrationPromise) return starterHydrationPromise;
+    starterHydrationPromise = (async () => {
+      try {
+        const hydrated = normalizeProject(await hydrateStarterFlipbookProject(pending));
+        const curProjects = get().projects.map((p) => (p.id === pending.id ? hydrated : p));
+        await saveAllProjects(curProjects);
+        const isCurrent = get().activeProjectId === pending.id;
+        const inkLyr = hydrated.frames[0]?.layers.find((l) => l.role === 'ink') ?? hydrated.frames[0]?.layers[0];
+        set({
+          projects: curProjects,
+          ...(isCurrent ? { activeLayerId: inkLyr?.id ?? null } : {}),
+        });
+      } finally {
+        starterHydrationPromise = null;
+      }
+    })();
+    return starterHydrationPromise;
+  },
 
   theme: initialPrefs.theme,
   locale: initialPrefs.locale,
@@ -595,10 +620,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     void requestPersistentStorage();
     setActiveStorageScope('guest');
     let projects = (await loadAllProjects()).map(normalizeProject);
+    let createdShell = false;
     if (projects.length === 0) {
-      const starter = normalizeProject(await createStarterFlipbookProject());
+      const starter = normalizeProject(createStarterFlipbookShellProject());
       projects = [starter];
-      await saveAllProjects(projects);
+      createdShell = true;
     } else {
       void sweepUnreferencedBlobs(projects).catch(() => {});
     }
@@ -646,6 +672,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       activeFrameIndex: 0,
       activeLayerId: inkLayer?.id ?? null,
     });
+
+    if (createdShell && initialMode !== 'desk') {
+      void get().ensureStarterProjectHydrated();
+    }
 
     // Non-blocking first-party cloud session check (zero delay for guests or offline devices)
 
@@ -988,6 +1018,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (get().mode === 'draw' && mode !== 'draw') {
       void flushActiveCanvasNow();
     }
+    if (mode !== 'desk') {
+      const active = get().projects.find((p) => p.id === get().activeProjectId);
+      if (active?.starterPendingHydration) {
+        void get().ensureStarterProjectHydrated();
+      }
+    }
     set({
       mode,
       isPlaying: false,
@@ -998,7 +1034,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     });
   },
   setExportOpen: (open) => {
-    if (open) void flushActiveCanvasNow();
+    if (open) {
+      void flushActiveCanvasNow();
+      void get().ensureStarterProjectHydrated();
+    }
     set({ exportOpen: open, isPlaying: false, playbackFrameIndex: null });
   },
   setFilmExportOpen: (open) => {

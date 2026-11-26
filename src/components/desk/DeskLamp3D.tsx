@@ -1,6 +1,5 @@
-import { useState } from 'react';
-import type { StudioTheme } from '../../types/studio';
 import { soundEngine } from '../../engine/soundEngine';
+import type { StudioTheme } from '../../types/studio';
 
 interface DeskLamp3DProps {
   theme: StudioTheme;
@@ -11,10 +10,9 @@ interface DeskLamp3DProps {
 }
 
 /**
- * Signature 3D Articulated Brass Architect Desk Lamp
- * - Replaces the ordinary Day/Night toggle on the Studio Desk Hub.
- * - Night = Warm tungsten bulb lit illuminating the Ink & Paper Cosmos.
- * - Day = Lamp tilted upright & switched off, revealing the Sunlit Sky Sketchbook.
+ * Signature Articulated Brass Architect Desk Lamp
+ * - Zero layout shift between Night & Day labels (CSS grid overlay stack).
+ * - Smooth spring articulation between lit (0deg) and daylight upright (22deg) without post-keyframe snap.
  */
 export function DeskLamp3D({
   theme,
@@ -23,62 +21,63 @@ export function DeskLamp3D({
   nightLabel,
   dayLabel,
 }: DeskLamp3DProps) {
-  const [swinging, setSwinging] = useState(false);
   const isNight = theme === 'night';
 
   const handleClick = () => {
-    const nextIsNight = !isNight;
-    soundEngine.lampSwitch(nextIsNight);
-    setSwinging(true);
-    window.setTimeout(() => setSwinging(false), 520);
+    soundEngine.lampSwitch(!isNight);
     onToggle();
   };
 
   return (
     <button
       type="button"
+      data-desk-lamp="true"
       onClick={handleClick}
       title={title}
       aria-label={title}
       aria-pressed={isNight}
       data-lit={isNight ? 'true' : 'false'}
-      data-swinging={swinging ? 'true' : undefined}
-      className="desk-lamp-btn group relative inline-flex items-center gap-2 pl-2 pr-2.5 py-1 rounded-xl border border-desk-border bg-desk-well/80 hover:border-ink-brass/70 transition-all cursor-pointer select-none"
+      className="desk-lamp-btn group relative inline-flex items-center gap-2 pl-2 pr-3 py-1 rounded-xl border border-desk-border bg-desk-well/85 hover:border-ink-brass/75 transition-colors cursor-pointer select-none shrink-0"
     >
-      {/* Articulated Brass Arm + Dome Shade SVG */}
+      {/* Articulated Brass Arm + Sculpted Dome Shade SVG */}
       <span className="relative w-9 h-8 flex items-center justify-center shrink-0 overflow-visible">
         {isNight && (
           <span
-            className="pointer-events-none absolute -bottom-2 -left-1 w-9 h-7 rounded-full blur-md opacity-80 transition-opacity"
+            className="pointer-events-none absolute -bottom-1.5 -left-1 w-9 h-7 rounded-full opacity-85 transition-opacity"
             style={{
               background:
-                'radial-gradient(circle, rgba(255,214,120,0.75) 0%, rgba(229,145,58,0.22) 55%, transparent 80%)',
+                'radial-gradient(circle, rgba(255,214,120,0.62) 0%, rgba(229,145,58,0.18) 58%, transparent 82%)',
             }}
             aria-hidden="true"
           />
         )}
         <svg viewBox="0 0 42 36" className="w-9 h-8 overflow-visible" aria-hidden="true">
+          <defs>
+            <linearGradient id="lampBrassShade" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stopColor={isNight ? '#F5D37E' : '#AFA391'} />
+              <stop offset="55%" stopColor={isNight ? '#D99B26' : '#857968'} />
+              <stop offset="100%" stopColor={isNight ? '#8C5E0B' : '#5E5549'} />
+            </linearGradient>
+          </defs>
           {/* Machined Clamp Base on Right */}
           <rect x="30" y="27" width="10" height="5" rx="1.8" fill="#6F5320" stroke="#1C1917" strokeWidth="1.2" />
           {/* Lower Brass Arm */}
-          <line x1="35" y1="27" x2="29" y2="12" stroke="#D99B26" strokeWidth="2.4" strokeLinecap="round" />
+          <line x1="35" y1="27" x2="29" y2="12" stroke="#C88B1E" strokeWidth="2.4" strokeLinecap="round" />
           {/* Elbow Pivot Joint */}
           <circle cx="29" cy="12" r="2.6" fill="#F5D37E" stroke="#1C1917" strokeWidth="1.2" />
           {/* Upper Arm + Pivoting Shade Head */}
           <g className="desk-lamp-head">
             <line x1="29" y1="12" x2="17" y2="11" stroke="#E5B24B" strokeWidth="2.2" strokeLinecap="round" />
             <circle cx="17" cy="11" r="2.1" fill="#F5D37E" stroke="#1C1917" strokeWidth="1.1" />
-            {/* Iconic Architect Dome Shade */}
+            {/* Iconic Architect Dome Shade with 3D metallic sheen */}
             <path
               d="M17 11 C12 10, 7 15, 5 22 L19 24 C20 17, 19.5 13, 17 11 Z"
-              fill={isNight ? '#D99B26' : '#8C8172'}
+              fill="url(#lampBrassShade)"
               stroke="#1C1917"
               strokeWidth="1.3"
               strokeLinejoin="round"
             />
-            {/* Rim Highlight */}
             <line x1="6.5" y1="22.2" x2="18.2" y2="23.8" stroke="#FAF2DE" strokeWidth="1.2" strokeLinecap="round" />
-            {/* Glowing Warm Bulb when Night / Cool Off Bulb when Day */}
             <ellipse
               cx="12.2"
               cy="24.2"
@@ -92,14 +91,25 @@ export function DeskLamp3D({
         </svg>
       </span>
 
-      <span className="hidden sm:flex flex-col items-start leading-tight">
-        <span className="font-mono text-[9px] uppercase tracking-widest text-ink-brass font-bold flex items-center gap-1">
-          <span
-            className="hardware-led"
-            data-on={isNight ? 'amber' : undefined}
-            data-pulse={isNight ? 'true' : undefined}
-          />
-          {isNight ? nightLabel : dayLabel}
+      {/* Zero-Shift Dual-Label Stack: reserves exact max width of Night/Day labels! */}
+      <span className="hidden sm:inline-grid items-center leading-tight">
+        <span
+          aria-hidden={!isNight}
+          className={`col-start-1 row-start-1 font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold inline-flex items-center gap-1.5 whitespace-nowrap ${
+            isNight ? 'visible' : 'invisible pointer-events-none'
+          }`}
+        >
+          <span className="hardware-led" data-on="amber" />
+          {nightLabel}
+        </span>
+        <span
+          aria-hidden={isNight}
+          className={`col-start-1 row-start-1 font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold inline-flex items-center gap-1.5 whitespace-nowrap ${
+            !isNight ? 'visible' : 'invisible pointer-events-none'
+          }`}
+        >
+          <span className="hardware-led" />
+          {dayLabel}
         </span>
       </span>
     </button>

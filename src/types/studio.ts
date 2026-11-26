@@ -207,6 +207,8 @@ export interface StudioProject {
   paperStyle?: PaperStyleId;
   /** Paper tooth grain intensity 0..1 */
   paperGrain: number;
+  /** True when lightweight starter metadata is in memory awaiting idle/on-demand blob hydration */
+  starterPendingHydration?: boolean;
   /** Active scene's frames (always kept in sync with scenes[activeSceneIndex].frames) */
   frames: CelFrame[];
   /** Multi-scene storyboard array (auto-migrated cleanly for legacy single-scene projects) */

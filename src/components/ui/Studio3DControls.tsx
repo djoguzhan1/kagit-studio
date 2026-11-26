@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { SlidersHorizontal } from 'lucide-react';
 import { soundEngine } from '../../engine/soundEngine';
 
@@ -7,8 +7,15 @@ function useMechTilt(maxDeg = 10) {
   const ref = useRef<HTMLButtonElement>(null);
   const rafRef = useRef<number | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
   const onPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
     if (e.pointerType === 'touch') return;
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
@@ -99,25 +106,25 @@ export function Clapperboard3DButton({
           </div>
 
           {/* Machined Slate Body */}
-          <div className="clapper-slate relative rounded-2xl overflow-hidden text-[#F3EEE5]">
+          <div className="clapper-slate relative rounded-2xl overflow-hidden">
             <div className="clapper-bar-base" />
             <div className="mech-glare" />
             {snapping && <div className="clapper-flash" />}
 
             <div className="relative z-10 px-4 py-3.5 flex items-center justify-between gap-3">
-              <div className="min-w-0 pr-8">
-                <div className="flex items-center gap-2 font-mono text-[10px] tracking-widest uppercase text-[#D99B26]">
-                  <span className="hardware-led" data-on="vermilion" data-pulse="true" />
+              <div className="min-w-0 pr-12">
+                <div className="flex items-center gap-2 font-mono text-[11px] tracking-wider uppercase text-ink-brass font-bold">
+                  <span className="hardware-led" data-on="vermilion" />
                   <span className="truncate">{sceneStamp}</span>
-                  {active && <span className="text-[#F7F3E9]/80">· {activeBadge}</span>}
+                  {active && <span className="text-desk-text/80">· {activeBadge}</span>}
                 </div>
-                <div className="text-[16px] font-extrabold tracking-tight mt-0.5 text-[#FAF6EE]">
+                <div className="text-[16px] font-extrabold tracking-tight mt-0.5 text-desk-text">
                   {title}
                 </div>
-                <div className="text-[11px] text-[#B8AFA0] mt-0.5 leading-snug">{subtitle}</div>
+                <div className="text-xs text-desk-muted mt-0.5 leading-snug">{subtitle}</div>
               </div>
 
-              <div className="w-10 h-10 rounded-xl bg-[#E54D2E] text-white flex items-center justify-center shadow-lg border border-[#ff8b70] shrink-0 font-mono text-lg font-extrabold">
+              <div className="w-10 h-10 rounded-xl bg-ink-vermilion text-white flex items-center justify-center shadow-md border border-white/25 shrink-0 font-mono text-lg font-extrabold">
                 +
               </div>
             </div>
@@ -136,13 +143,13 @@ export function Clapperboard3DButton({
           title={settingsTitle}
           aria-label={settingsTitle}
           aria-expanded={active}
-          className={`absolute top-[42px] right-16 z-30 p-1.5 rounded-lg border transition-colors ${
+          className={`absolute bottom-3.5 right-[62px] h-10 w-9 z-30 rounded-xl border inline-flex items-center justify-center transition-colors ${
             active
-              ? 'bg-ink-brass text-[#1c1405] border-[#fae098] shadow'
-              : 'bg-[#1a1815]/90 text-[#D99B26] border-[#4c453c] hover:border-ink-brass hover:text-[#FAF6EE]'
+              ? 'bg-ink-brassBright text-[#1c1405] border-[#fae098] shadow'
+              : 'bg-desk-well/90 text-ink-brass border-desk-border hover:border-ink-brass hover:text-desk-text'
           }`}
         >
-          <SlidersHorizontal className="w-3.5 h-3.5" />
+          <SlidersHorizontal className="w-4 h-4" />
         </button>
       )}
     </div>
@@ -198,14 +205,14 @@ export function ShutterLens3DButton({
         >
           <div className={compact ? 'flex items-start justify-between gap-2' : 'min-w-0'}>
             <div className="min-w-0">
-              <div className="flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-widest opacity-65">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#E54D2E]" />
-                {badge}
+              <div className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-ink-vermilion shrink-0" />
+                <span className="truncate">{badge}</span>
               </div>
-              <div className={`${compact ? 'text-[13px]' : 'text-sm'} font-extrabold tracking-tight mt-1 leading-snug`}>
+              <div className={`${compact ? 'text-[14px]' : 'text-sm'} font-extrabold tracking-tight mt-1 text-desk-text leading-snug`}>
                 {title}
               </div>
-              {!compact && <div className="text-[11px] opacity-70 mt-0.5 leading-snug">{subtitle}</div>}
+              {!compact && <div className="text-xs text-desk-muted mt-0.5 leading-snug">{subtitle}</div>}
             </div>
 
             {compact && (
@@ -228,7 +235,7 @@ export function ShutterLens3DButton({
           </div>
 
           {compact ? (
-            <div className="text-[10.5px] opacity-75 leading-snug">{subtitle}</div>
+            <div className="text-[11px] opacity-75 leading-snug">{subtitle}</div>
           ) : (
             <div className="lens-barrel shrink-0" aria-hidden="true">
               <svg viewBox="0 0 44 44" className="w-10 h-10">
@@ -270,19 +277,19 @@ export function Marionette3DButton({
   const { ref, onPointerMove, onPointerLeave } = useMechTilt(10);
 
   const marionetteSvg = (
-    <svg viewBox="0 0 56 56" className={`${compact ? 'w-11 h-11' : 'w-14 h-14'} shrink-0`} aria-hidden="true">
+    <svg viewBox="0 0 56 56" className={`${compact ? 'w-9 h-9' : 'w-14 h-14'} shrink-0 text-desk-text`} aria-hidden="true">
       <g className="marionette-crossbar">
-        <line x1="10" y1="10" x2="46" y2="10" stroke="#1c1405" strokeWidth="3.5" strokeLinecap="round" />
+        <line x1="10" y1="10" x2="46" y2="10" stroke="#D99B26" strokeWidth="3.5" strokeLinecap="round" />
         <circle cx="28" cy="10" r="3" fill="#FAF6EE" stroke="#1c1405" strokeWidth="1.6" />
       </g>
       <g className="marionette-dangler">
-        <line x1="16" y1="11" x2="18" y2="33" stroke="#1c1405" strokeWidth="1" strokeDasharray="2 2" opacity="0.65" />
-        <line x1="40" y1="11" x2="38" y2="33" stroke="#1c1405" strokeWidth="1" strokeDasharray="2 2" opacity="0.65" />
-        <line x1="28" y1="12" x2="28" y2="23" stroke="#1c1405" strokeWidth="1.1" opacity="0.7" />
-        <circle cx="28" cy="24" r="5.5" fill="#FAF6EE" stroke="#1c1405" strokeWidth="2.2" />
-        <path d="M28 30v10M18 33l10 1 10-1M28 40l-6 10M28 40l6 10" stroke="#1c1405" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
-        <circle cx="18" cy="33" r="2.2" fill="#E54D2E" />
-        <circle cx="38" cy="33" r="2.2" fill="#E54D2E" />
+        <line x1="16" y1="11" x2="18" y2="33" stroke="currentColor" strokeWidth="1.1" strokeDasharray="2 2" opacity="0.62" />
+        <line x1="40" y1="11" x2="38" y2="33" stroke="currentColor" strokeWidth="1.1" strokeDasharray="2 2" opacity="0.62" />
+        <line x1="28" y1="12" x2="28" y2="23" stroke="currentColor" strokeWidth="1.2" opacity="0.68" />
+        <circle cx="28" cy="24" r="5.5" fill="#FAF6EE" stroke="#1c1405" strokeWidth="2.1" />
+        <path d="M28 30v10M18 33l10 1 10-1M28 40l-6 10M28 40l6 10" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="18" cy="33" r="2.3" fill="#E54D2E" />
+        <circle cx="38" cy="33" r="2.3" fill="#E54D2E" />
         <circle cx="28" cy="40" r="2" fill="#FAF6EE" stroke="#1c1405" strokeWidth="1.4" />
       </g>
     </svg>
@@ -310,20 +317,20 @@ export function Marionette3DButton({
         >
           <div className={compact ? 'flex items-start justify-between gap-2' : 'min-w-0'}>
             <div className="min-w-0">
-              <div className="flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-widest opacity-70">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#1c1405]" />
-                {badge}
+              <div className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-ink-emerald shrink-0" />
+                <span className="truncate">{badge}</span>
               </div>
-              <div className={`${compact ? 'text-[13px]' : 'text-sm'} font-extrabold tracking-tight mt-1 leading-snug`}>
+              <div className={`${compact ? 'text-[14px]' : 'text-sm'} font-extrabold tracking-tight mt-1 text-desk-text leading-snug`}>
                 {title}
               </div>
-              {!compact && <div className="text-[11px] opacity-80 mt-0.5 leading-snug">{subtitle}</div>}
+              {!compact && <div className="text-xs text-desk-muted mt-0.5 leading-snug">{subtitle}</div>}
             </div>
             {compact && marionetteSvg}
           </div>
 
           {compact ? (
-            <div className="text-[10.5px] opacity-80 leading-snug">{subtitle}</div>
+            <div className="text-xs text-desk-muted leading-snug">{subtitle}</div>
           ) : (
             marionetteSvg
           )}
@@ -371,20 +378,20 @@ export function Projector3DButton({
       onPointerLeave={onPointerLeave}
       className="mech-obj w-full"
     >
-      <div className="mech-body projector-chassis px-4 py-3.5 overflow-hidden text-[#F3EEE5]">
+      <div className="mech-body projector-chassis px-4 py-3.5 overflow-hidden">
         <div className="mech-glare" />
         <div className="projector-beam" aria-hidden="true" />
 
         <div className="relative z-10 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-1.5 font-mono text-[9.5px] uppercase tracking-widest text-[#8BB9FF]">
-              <span className="hardware-led" data-on="blue" data-pulse="true" />
+            <div className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-ink-brass font-bold">
+              <span className="hardware-led" data-on="blue" />
               <span className="truncate">{badge}</span>
             </div>
-            <div className="text-[15px] font-extrabold tracking-tight mt-0.5 text-[#FAF6EE] leading-snug">
+            <div className="text-[15px] font-extrabold tracking-tight mt-0.5 text-desk-text leading-snug">
               {title}
             </div>
-            <div className="text-[11px] text-[#B8AFA0] mt-0.5 leading-snug">{subtitle}</div>
+            <div className="text-xs text-desk-muted mt-0.5 leading-snug">{subtitle}</div>
           </div>
 
           {/* Twin Spinning 16mm Perforated Film Reels + Brass Projector Lens */}
@@ -450,7 +457,7 @@ export function ToggleLeverSwitch({
       className="inline-flex items-center gap-2 group cursor-pointer"
     >
       {label && (
-        <span className="font-mono text-[10px] uppercase tracking-wider text-desk-muted group-hover:text-desk-text transition-colors">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted group-hover:text-desk-text transition-colors">
           {label}
         </span>
       )}

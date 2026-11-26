@@ -24,6 +24,8 @@
   --desk-text: #f3eee5;
   --desk-muted: #9e9689;
   --desk-dot: rgba(243, 238, 229, 0.048);
+  --ink-brass-rgb: 217 155 38;
+  --ink-vermilion-rgb: 229 77 46;
 
   /* Keycap: Graphite */
   --key-graphite-top: #342f2a;
@@ -81,31 +83,33 @@
   --desk-well-rgb: 214 207 192;
   --desk-border-rgb: 201 191 173;
   --desk-text-rgb: 30 27 24;
-  --desk-muted-rgb: 96 89 78;
+  --desk-muted-rgb: 80 72 62;
   --desk-bg: #e5dfd2;
   --desk-surface: #eee9de;
   --desk-panel: #f6f2e9;
   --desk-well: #d6cfc0;
   --desk-border: #c9bfad;
   --desk-text: #1e1b18;
-  --desk-muted: #60594e;
+  --desk-muted: #50483e;
   --desk-dot: rgba(28, 25, 23, 0.065);
+  --ink-brass-rgb: 110 70 6;
+  --ink-vermilion-rgb: 196 52 24;
 
-  --key-graphite-top: #faf6ee;
-  --key-graphite-bottom: #e7dfd0;
-  --key-graphite-lip: #b4a995;
-  --key-graphite-border: #ffffff;
-  --key-graphite-spec: rgba(255, 255, 255, 0.94);
-  --key-graphite-glare: rgba(255, 255, 255, 0.65);
-  --key-graphite-text: #221f1b;
+  --key-graphite-top: #ece5d7;
+  --key-graphite-bottom: #dad1bf;
+  --key-graphite-lip: #9e927d;
+  --key-graphite-border: #f8f4eb;
+  --key-graphite-spec: rgba(255, 255, 255, 0.78);
+  --key-graphite-glare: rgba(255, 255, 255, 0.5);
+  --key-graphite-text: #24201b;
 
-  --key-ivory-top: #322e2a;
-  --key-ivory-bottom: #201e1b;
-  --key-ivory-lip: #0a0908;
-  --key-ivory-border: #4d4841;
-  --key-ivory-spec: rgba(255, 250, 240, 0.2);
-  --key-ivory-glare: rgba(255, 246, 230, 0.2);
-  --key-ivory-text: #f7f2e8;
+  --key-ivory-top: #fffdf8;
+  --key-ivory-bottom: #eee6d5;
+  --key-ivory-lip: #b3a68f;
+  --key-ivory-border: #ffffff;
+  --key-ivory-spec: rgba(255, 255, 255, 0.96);
+  --key-ivory-glare: rgba(255, 255, 255, 0.68);
+  --key-ivory-text: #1c1917;
 
   --key-vermilion-top: #f05c3d;
   --key-vermilion-bottom: #d44123;
@@ -220,7 +224,8 @@
   color: var(--k-text);
   font-weight: 700;
   perspective: 520px;
-  margin-top: var(--k-raise);
+  margin-top: 0;
+  padding-top: var(--k-raise);
   outline: none;
 }
 
@@ -236,27 +241,26 @@
   --k-radius: 16px;
 }
 
-/* Layer 1: Optical floor shadow shifting opposite to 3D tilt */
+/* Layer 1: Optical floor shadow shifting opposite to 3D tilt (zero blur filter GPU cost!) */
 .k3d-shadow {
   position: absolute;
-  inset: 2px 3px -3px 3px;
-  border-radius: calc(var(--k-radius) + 1px);
-  background: rgba(0, 0, 0, 0.56);
-  filter: blur(6px);
-  transform: translate3d(calc(var(--tx) * -0.9), calc(3px + var(--ty) * -0.5), 0);
+  inset: calc(var(--k-raise) + 1px) 1px -4px 1px;
+  border-radius: calc(var(--k-radius) + 3px);
+  background: radial-gradient(ellipse at 50% 60%, rgba(0, 0, 0, 0.52) 0%, rgba(0, 0, 0, 0.22) 58%, transparent 82%);
+  transform: translate3d(calc(var(--tx) * -0.9), calc(2px + var(--ty) * -0.5), 0);
   transition: transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 180ms ease;
   pointer-events: none;
   z-index: 0;
 }
 
 [data-theme='day'] .k3d-shadow {
-  background: rgba(38, 30, 18, 0.28);
+  background: radial-gradient(ellipse at 50% 60%, rgba(38, 30, 18, 0.26) 0%, rgba(38, 30, 18, 0.1) 58%, transparent 82%);
 }
 
 /* Layer 2: Solid 3D Extruded Mechanical Wall / Skirt with cylindrical bevel shading */
 .k3d-wall {
   position: absolute;
-  inset: 0;
+  inset: var(--k-raise) 0 0 0;
   border-radius: var(--k-radius);
   background: linear-gradient(
     90deg,
@@ -294,10 +298,14 @@
   transform: translate3d(0, calc(var(--k-raise) * -1), 0) rotateX(var(--rx)) rotateY(var(--ry));
   transition:
     transform 300ms cubic-bezier(0.34, 1.65, 0.64, 1),
-    filter 140ms ease,
     box-shadow 180ms ease;
-  will-change: transform;
   z-index: 2;
+}
+
+.k3d:hover .k3d-cap,
+.k3d:active .k3d-cap,
+.k3d[data-tilting='true'] .k3d-cap {
+  will-change: transform;
 }
 
 /* Zero-lag tilt response while pointer glides across the cap */
@@ -849,8 +857,25 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
 }
 
 .paper-grain-overlay {
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 140 140' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.055'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 160 160' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/%3E%3C/svg%3E");
+  box-shadow: inset 0 0 44px rgba(138, 116, 82, 0.09);
+  mix-blend-mode: multiply;
   pointer-events: none;
+}
+
+/* Theme-Aware Stage Floating Pill (Warm Smoked Glass in Night / Warm Parchment in Day) */
+.stage-floating-pill {
+  background-color: rgba(20, 18, 16, 0.88);
+  color: #f7f3e9;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+[data-theme='day'] .stage-floating-pill:not([data-over-dark='true']) {
+  background-color: rgba(248, 244, 234, 0.94);
+  color: #1e1b18;
+  border-color: rgba(168, 154, 132, 0.72);
+  box-shadow: 0 6px 18px rgba(45, 37, 25, 0.14);
 }
 
 /* ==========================================================================
@@ -919,7 +944,11 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
   border-radius: 20px;
   transform-style: preserve-3d;
   transform: rotateX(var(--rx)) rotateY(var(--ry)) translate3d(0, 0, 0);
-  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 220ms ease;
+  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 220ms ease, border-color 180ms ease;
+}
+
+.mech-obj:hover .mech-body,
+.mech-obj[data-tilting='true'] .mech-body {
   will-change: transform;
 }
 
@@ -950,14 +979,25 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
   opacity: 1;
 }
 
-/* 1. 3D CINEMA CLAPPERBOARD BUTTON */
+/* 1. 3D CINEMA CLAPPERBOARD BUTTON — Unified Brushed Atelier Instrument Family */
 .clapper-slate {
-  background: linear-gradient(175deg, #2b2723 0%, #1a1815 100%);
-  border: 1px solid #4c453c;
+  background: linear-gradient(175deg, #26231f 0%, #181614 100%);
+  color: #faf6ee;
+  border: 1px solid #474038;
   box-shadow:
-    inset 0 1px 0 rgba(255, 250, 240, 0.16),
-    0 9px 0 #0c0b0a,
-    0 18px 34px rgba(0, 0, 0, 0.58);
+    inset 0 1px 0 rgba(255, 250, 240, 0.14),
+    0 7px 0 #0d0c0b,
+    0 14px 28px rgba(0, 0, 0, 0.48);
+}
+
+[data-theme='day'] .clapper-slate {
+  background: linear-gradient(175deg, #f8f4eb 0%, #eae2d3 100%);
+  color: #1e1b18;
+  border-color: #c5baa6;
+  box-shadow:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.92),
+    0 6px 0 #aea28d,
+    0 12px 24px rgba(45, 37, 25, 0.16);
 }
 
 .clapper-arm {
@@ -1022,25 +1062,25 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
   animation: clapper-flash-ring 380ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* 2. 3D MACHINED CAMERA LENS SHUTTER BUTTON */
+/* 2. 3D MACHINED CAMERA LENS SHUTTER BUTTON — Unified Brushed Atelier Instrument Family */
 .shutter-chassis {
-  background: linear-gradient(175deg, #fbf7ee 0%, #e5dcc9 100%);
-  color: #1c1917;
-  border: 1px solid #ffffff;
+  background: linear-gradient(175deg, #26231f 0%, #181614 100%);
+  color: #faf6ee;
+  border: 1px solid #474038;
   box-shadow:
-    inset 0 1.5px 0 rgba(255, 255, 255, 0.95),
-    0 8px 0 #a99d85,
-    0 16px 30px rgba(0, 0, 0, 0.45);
+    inset 0 1px 0 rgba(255, 250, 240, 0.14),
+    0 7px 0 #0d0c0b,
+    0 14px 28px rgba(0, 0, 0, 0.46);
 }
 
 [data-theme='day'] .shutter-chassis {
-  background: linear-gradient(175deg, #2d2925 0%, #1c1a17 100%);
-  color: #f7f3e9;
-  border-color: #4f4840;
+  background: linear-gradient(175deg, #f8f4eb 0%, #eae2d3 100%);
+  color: #1e1b18;
+  border-color: #c5baa6;
   box-shadow:
-    inset 0 1px 0 rgba(255, 250, 240, 0.2),
-    0 8px 0 #0c0b0a,
-    0 14px 26px rgba(35, 28, 18, 0.25);
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.92),
+    0 6px 0 #aea28d,
+    0 12px 24px rgba(45, 37, 25, 0.16);
 }
 
 .lens-barrel {
@@ -1093,15 +1133,25 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
   transition: transform 80ms ease;
 }
 
-/* 3. 3D MARIONETTE CROSS & PENDULUM PUPPET BUTTON */
+/* 3. 3D MARIONETTE CROSS & PENDULUM PUPPET BUTTON — Unified Brushed Atelier Instrument Family */
 .marionette-chassis {
-  background: linear-gradient(175deg, #ebb03c 0%, #c68615 100%);
-  color: #1c1405;
-  border: 1px solid #fae098;
+  background: linear-gradient(175deg, #2a251f 0%, #1b1713 100%);
+  color: #faf6ee;
+  border: 1px solid rgba(217, 155, 38, 0.42);
   box-shadow:
-    inset 0 1.5px 0 rgba(255, 252, 232, 0.65),
-    0 8px 0 #734b07,
-    0 16px 30px rgba(0, 0, 0, 0.45);
+    inset 0 1px 0 rgba(255, 244, 214, 0.16),
+    0 7px 0 #0d0b09,
+    0 14px 28px rgba(0, 0, 0, 0.46);
+}
+
+[data-theme='day'] .marionette-chassis {
+  background: linear-gradient(175deg, #f8f4eb 0%, #eae2d3 100%);
+  color: #1e1b18;
+  border-color: #c5baa6;
+  box-shadow:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.92),
+    0 6px 0 #aea28d,
+    0 12px 24px rgba(45, 37, 25, 0.16);
 }
 
 @keyframes marionette-sway {
@@ -1423,20 +1473,34 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
    V3.5 10/10 — 3D 16MM PROJECTOR · 3D BRASS LAMP · AWAKENING · DRAWER · TRANSITIONS
    ========================================================================== */
 
-/* 3D 16mm Twin-Reel Cinema Projector Chassis */
+/* 3D 16mm Twin-Reel Cinema Projector Chassis — Unified Brushed Atelier Instrument Family */
 .projector-chassis {
   position: relative;
-  border-radius: 16px;
-  background: linear-gradient(155deg, #252220 0%, #161413 58%, #100f0e 100%);
-  border: 1px solid rgba(139, 185, 255, 0.26);
+  border-radius: 20px;
+  background: linear-gradient(175deg, #26231f 0%, #181614 100%);
+  color: #faf6ee;
+  border: 1px solid #474038;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    0 5px 0 #0a0908,
-    0 12px 24px rgba(0, 0, 0, 0.42);
+    inset 0 1px 0 rgba(255, 250, 240, 0.14),
+    0 7px 0 #0d0c0b,
+    0 14px 28px rgba(0, 0, 0, 0.46);
 }
 
-.mech-obj:hover .projector-chassis {
-  border-color: rgba(217, 155, 38, 0.65);
+[data-theme='day'] .projector-chassis {
+  background: linear-gradient(175deg, #f8f4eb 0%, #eae2d3 100%);
+  color: #1e1b18;
+  border-color: #c5baa6;
+  box-shadow:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.92),
+    0 6px 0 #aea28d,
+    0 12px 24px rgba(45, 37, 25, 0.16);
+}
+
+.mech-obj:hover .projector-chassis,
+.mech-obj:hover .clapper-slate,
+.mech-obj:hover .shutter-chassis,
+.mech-obj:hover .marionette-chassis {
+  border-color: rgb(var(--ink-brass-rgb) / 0.72);
 }
 
 .projector-beam {
@@ -1467,48 +1531,28 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
 }
 
 .projector-reel {
-  animation: projector-reel-spin 9s linear infinite;
+  animation: projector-reel-spin 2.4s linear infinite;
+  animation-play-state: paused;
 }
 
 .projector-reel-rev {
-  animation-duration: 7.4s;
+  animation-duration: 1.9s;
 }
 
-.mech-obj:hover .projector-reel {
-  animation-duration: 1.8s;
+.mech-obj:hover .projector-reel,
+.mech-obj:focus-visible .projector-reel {
+  animation-play-state: running;
 }
 
-.mech-obj:hover .projector-reel-rev {
-  animation-duration: 1.5s;
-}
-
-/* 3D Articulated Brass Desk Lamp */
+/* 3D Articulated Brass Desk Lamp — Smooth Spring Articulation (Zero Snap!) */
 .desk-lamp-head {
   transform-origin: 29px 12px;
-  transition: transform 340ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform: rotate(0deg);
+  transition: transform 460ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .desk-lamp-btn[data-lit='false'] .desk-lamp-head {
   transform: rotate(22deg);
-}
-
-@keyframes lamp-head-nod {
-  0% {
-    transform: rotate(0deg);
-  }
-  32% {
-    transform: rotate(-14deg);
-  }
-  65% {
-    transform: rotate(7deg);
-  }
-  100% {
-    transform: rotate(0deg);
-  }
-}
-
-.desk-lamp-btn[data-swinging='true'] .desk-lamp-head {
-  animation: lamp-head-nod 480ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* 1.0s Non-Blocking Opening Awakening Stagger */
@@ -1543,73 +1587,79 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
   animation: drawer-slide-up 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* 350ms Classic Cartoon Studio Room Transitions */
+/* Two-Phase Pure-GPU Studio Room Transitions (Transform + Opacity Only) */
 @keyframes studio-trans-iris {
   0% {
-    clip-path: circle(0% at 50% 50%);
+    transform: scale(1.08);
+    opacity: 0;
+  }
+  32% {
+    transform: scale(1);
     opacity: 0.96;
   }
-  42% {
-    clip-path: circle(22% at 50% 50%);
-    opacity: 1;
-  }
   100% {
-    clip-path: circle(120% at 50% 50%);
+    transform: scale(0.92);
     opacity: 0;
   }
 }
 
 @keyframes studio-trans-page {
   0% {
-    transform: translateX(-8%) scaleX(1.06);
+    transform: perspective(1100px) rotateY(0deg) translateX(0%);
+    opacity: 0.96;
+  }
+  40% {
+    transform: perspective(1100px) rotateY(-18deg) translateX(6%);
     opacity: 0.92;
   }
-  50% {
-    transform: translateX(0%) scaleX(1);
-    opacity: 0.85;
-  }
   100% {
-    transform: translateX(102%) scaleX(0.95);
+    transform: perspective(1100px) rotateY(-68deg) translateX(92%);
     opacity: 0;
   }
 }
 
 @keyframes studio-trans-curtain-l {
   0% {
-    transform: translateX(0%);
+    transform: translateX(-18%);
+    opacity: 0;
   }
-  35% {
+  30% {
     transform: translateX(0%);
+    opacity: 1;
   }
   100% {
     transform: translateX(-104%);
+    opacity: 0.95;
   }
 }
 
 @keyframes studio-trans-curtain-r {
   0% {
-    transform: translateX(0%);
+    transform: translateX(18%);
+    opacity: 0;
   }
-  35% {
+  30% {
     transform: translateX(0%);
+    opacity: 1;
   }
   100% {
     transform: translateX(104%);
+    opacity: 0.95;
   }
 }
 
 @keyframes studio-trans-gate {
   0% {
-    opacity: 0.96;
-    filter: brightness(1.35);
+    transform: scale(1.02);
+    opacity: 0;
   }
-  45% {
-    opacity: 0.85;
-    filter: brightness(0.9);
+  30% {
+    transform: scale(1);
+    opacity: 0.94;
   }
   100% {
+    transform: scale(0.985);
     opacity: 0;
-    filter: brightness(1);
   }
 }
 
@@ -1636,11 +1686,11 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
 /* Radial Quick Wheel Pop (Draw Workspace Q / Right-Click) */
 @keyframes radial-wheel-pop {
   0% {
-    transform: translate(-50%, -50%) scale(0.76);
+    scale: 0.76;
     opacity: 0;
   }
   100% {
-    transform: translate(-50%, -50%) scale(1);
+    scale: 1;
     opacity: 1;
   }
 }
@@ -1828,5 +1878,9 @@ input[type='range'].studio-fader::-webkit-slider-thumb:active {
   .ghost-ink-stroke {
     transition: none !important;
     animation: none !important;
+  }
+
+  .pocket-leaf-turning {
+    display: none !important;
   }
 }

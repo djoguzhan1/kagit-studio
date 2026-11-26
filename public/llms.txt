@@ -10,7 +10,7 @@
 - **360° 2.5D Multi-Angle Turnaround & A4 Multi-Pose Slicer:** Combine front, side (left/right), back, and 3/4 hand-drawn views into one unified 2.5D character rig, or scan/upload a single A4 page with multiple angles and slice them automatically.
 - **Frame-by-Frame 2D Lightbox & A4 Paper Camera:** Multi-layer backlit drawing desk with onion skinning, pressure-sensitive brushes, perspective guides, and an A4 paper scanner with automatic corner correction and shadow removal.
 - **1–6 Actor Mini Film Director & Live Talking Puppets:** Stage up to 6 hand-drawn characters together with camera choreography, microphone lip-sync, voice effects, and optional one-command screenplay direction.
-- **Universal Export (100% User Copyright):** Export H.264 MP4 video, animated GIF, transparent PNG ZIP, sprite sheets, printable A4 flipbook PDFs, and portable `.kagit.zip` project backups.
+- **Universal Export (100% User Copyright):** Export H.264 MP4 video, animated GIF, transparent PNG ZIP, sprite sheets, printable A4 flipbook PDFs, and portable `.inktrope.zip` project backups.
 
 ## Türkçe Özet
 

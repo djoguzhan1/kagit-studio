@@ -18,6 +18,7 @@ import { GuideLauncherButton } from '../guide/GuideLauncherButton';
 import { AccountButton } from '../account/AccountButton';
 import { soundEngine } from '../../engine/soundEngine';
 import { useT } from '../../i18n/translations';
+import { preloadStudioModule } from '../../App';
 
 const AWAKEN_SESSION_KEY = 'kagit:desk-awakened:v3';
 
@@ -40,6 +41,11 @@ export default function StudioDeskHub() {
     openFilmDirectorDemo,
     commitDeskSketchToProject,
     commitDeskSketchToStudio,
+    overviewShowOpen,
+    activeTourMode,
+    legalOpen,
+    accountModalOpen,
+    exportOpen,
     notify,
   } = useStudioStore();
 
@@ -104,11 +110,18 @@ export default function StudioDeskHub() {
   const awakenStyle = (delayMs: number): React.CSSProperties | undefined =>
     firstAwaken ? { animationDelay: `${delayMs}ms` } : undefined;
   const awakenCls = firstAwaken ? 'desk-awaken' : '';
+  const anyOverlayOpen =
+    drawerOpen ||
+    overviewShowOpen ||
+    Boolean(activeTourMode) ||
+    legalOpen ||
+    accountModalOpen ||
+    exportOpen;
 
   return (
     <div className="min-h-full lg:h-full desk-workbench-mat flex flex-col relative overflow-x-hidden">
-      {/* 12 FPS Hand-Drawn Living Ink & Paper Universe (Night Cosmos <-> Day Sky Sketchbook) */}
-      <AnimatedUniverseCanvas theme={theme} hoveredTarget={hoveredObj} active />
+      {/* 12 FPS Hand-Drawn Living Ink & Paper Universe (Halts to 0 RAF when any modal/drawer opens!) */}
+      <AnimatedUniverseCanvas theme={theme} hoveredTarget={hoveredObj} active={!anyOverlayOpen} />
 
       {/* Minimal 4-Element Frosted Header Rail */}
       <header className="sticky top-0 z-40 border-b border-desk-border/85 bg-desk-surface/88 backdrop-blur-md shrink-0">
@@ -121,7 +134,7 @@ export default function StudioDeskHub() {
                 <h1 className="hidden min-[460px]:block text-base font-extrabold tracking-tight text-desk-text whitespace-nowrap">
                   INKTROPE
                 </h1>
-                <span className="font-mono text-[10px] uppercase tracking-wider text-desk-muted hidden sm:inline truncate">
+                <span className="font-mono text-[11px] uppercase tracking-wider text-desk-muted hidden sm:inline truncate">
                   {t('brandSub')}
                 </span>
               </div>
@@ -134,7 +147,7 @@ export default function StudioDeskHub() {
             <GuideLauncherButton />
 
             <div
-              className="flex items-center p-0.5 rounded-lg console-well border border-desk-border font-mono text-[10px]"
+              className="flex items-center p-0.5 rounded-lg console-well border border-desk-border font-mono text-[11px]"
               role="group"
               aria-label="Language"
             >
@@ -196,6 +209,8 @@ export default function StudioDeskHub() {
               lightboxDim={lightboxDim}
               onLightboxDimChange={setLightboxDim}
               previewMode={previewMode}
+              hoveredDoor={hoveredObj}
+              paused={anyOverlayOpen}
               onPreviewModeChange={setPreviewMode}
               onOpenDraw={() =>
                 showcaseProject ? openProject(showcaseProject.id, 'draw') : handleCreate('draw')
@@ -220,6 +235,7 @@ export default function StudioDeskHub() {
                 activeBadge={t('clapperOpen')}
                 settingsTitle={t('sceneSettingsTitle')}
                 onHover={() => {
+                  preloadStudioModule('draw');
                   setPreviewMode('draw');
                   setHoveredObj('draw');
                 }}
@@ -235,7 +251,7 @@ export default function StudioDeskHub() {
                   className="toast-pop-in absolute left-0 right-0 top-[calc(100%+8px)] z-30 rounded-2xl bg-desk-panel/95 backdrop-blur-md border border-ink-brass/50 p-4 space-y-3 shadow-2xl"
                 >
                   <div className="flex items-center justify-between">
-                    <span className="font-mono text-[10px] uppercase tracking-widest text-ink-brass font-bold">
+                    <span className="font-mono text-[11px] uppercase tracking-widest text-ink-brass font-bold">
                       {t('sceneSettingsTitle')}
                     </span>
                     <button
@@ -320,6 +336,7 @@ export default function StudioDeskHub() {
                 title={t('paperCardTitle')}
                 subtitle={t('paperCardSub')}
                 onHover={() => {
+                  preloadStudioModule('paper');
                   setPreviewMode('paper');
                   setHoveredObj('paper');
                 }}
@@ -336,6 +353,7 @@ export default function StudioDeskHub() {
                 title={t('puppetCardTitle')}
                 subtitle={t('puppetCardSub')}
                 onHover={() => {
+                  preloadStudioModule('puppet');
                   setPreviewMode('puppet');
                   setHoveredObj('puppet');
                 }}
@@ -350,6 +368,7 @@ export default function StudioDeskHub() {
                 title={t('projectorTitle')}
                 subtitle={t('projectorSub')}
                 onHover={() => {
+                  preloadStudioModule('film');
                   setPreviewMode('film');
                   setHoveredObj('film');
                 }}
