@@ -1,6 +1,7 @@
 import type { DrawingAnatomy } from './cartoonMotionEngine';
 import {
   buildConformingSkinnedMeshRGBA,
+  normalizeCanonicalJointOverrides,
   type ConformingMeshBuildOptions,
   type ConformingSkinnedMesh,
   type RestBoneSpec,
@@ -411,7 +412,7 @@ function buildCreatureSkeletonBones(
   const dir = b.headOnRight ? 1 : -1;
   const uAt = (t: number) => (dir > 0 ? b.minU + t * uSpan : b.maxU - t * uSpan);
   const vAt = (t: number) => b.minV + t * vSpan;
-  const ov = overrides ?? {};
+  const ov = normalizeCanonicalJointOverrides(overrides);
   const pt = (key: string, fx: number, fy: number): Vec2 => {
     const p = ov[key];
     return p ? { x: Math.max(0.02, Math.min(0.98, p.x)), y: Math.max(0.02, Math.min(0.98, p.y)) } : { x: fx, y: fy };
@@ -998,6 +999,28 @@ export function buildUniversalCreatureMeshRGBA(
     nextW = tmp;
   }
 
+  // Apply optional user weightStrokes while strictly preserving Σw = 1
+  if (options?.weightStrokes && options.weightStrokes.length > 0) {
+    for (const stroke of options.weightStrokes) {
+      const rad = Math.max(0.008, Math.min(0.6, stroke.radius));
+      const str = Math.max(0, Math.min(1, stroke.strength));
+      if (str <= 1e-4) continue;
+      const targetBi = Math.max(0, Math.min(boneCount - 1, Math.round(stroke.region)));
+      for (let v = 0; v < vertexCount; v++) {
+        const d = Math.hypot(restUV[v * 2] - stroke.x, restUV[v * 2 + 1] - stroke.y);
+        if (d >= rad) continue;
+        const t = 1 - d / rad;
+        const alpha = str * t * t * (3 - 2 * t);
+        const base = v * boneCount;
+        let s = 0;
+        for (let bi = 0; bi < boneCount; bi++) s += fullW[base + bi];
+        const inv = s > 1e-8 ? (1 - alpha) / s : 0;
+        for (let bi = 0; bi < boneCount; bi++) fullW[base + bi] *= inv;
+        fullW[base + targetBi] += alpha;
+      }
+    }
+  }
+
   // Keep top-4 bone influences per vertex & precompute SIGGRAPH CoR pivots!
   const boneIndices = new Uint8Array(vertexCount * 4);
   const boneWeights = new Float32Array(vertexCount * 4);
@@ -1144,17 +1167,105 @@ export function evaluateUniversalCreatureMesh(
     scaleY = 1 + breathe;
   }
 
+  const restCenterX = bounds.x + bounds.w * 0.5;
+  const restGroundY = bounds.y + bounds.h;
+  const yawRad = ((pose.yawDeg ?? 0) * Math.PI) / 180;
+  const yawSquashX = 0.74 + 0.26 * Math.abs(Math.cos(yawRad));
+
+  // Analytical 2-Bone Ground-Locking IK helper: locks paw/claw to ground plane during stance phase
+  // while keeping swing phase smooth and rotation deltas bounded for guaranteed 0 inversions!
+  const solveCreatureGroundLegIK = (
+    uIdx: number,
+    lIdx: number,
+    pawIdx: number,
+    parentRotEst: number,
+    phase: number,
+    strideFrac: number,
+    liftFrac: number,
+    bendSign: 1 | -1
+  ) => {
+    const bU = bones[uIdx];
+    const bL = bones[lIdx];
+    if (!bU || !bL) return;
+    const ux0 = (bU.end.x - bU.start.x) * bounds.w * scaleX * yawSquashX;
+    const uy0 = (bU.end.y - bU.start.y) * bounds.h * scaleY;
+    const lx0 = (bL.end.x - bL.start.x) * bounds.w * scaleX * yawSquashX;
+    const ly0 = (bL.end.y - bL.start.y) * bounds.h * scaleY;
+    const L1 = Math.max(4, Math.hypot(ux0, uy0));
+    const L2 = Math.max(4, Math.hypot(lx0, ly0));
+    const restAng1 = Math.atan2(uy0, ux0);
+    const restAng2 = Math.atan2(ly0, lx0);
+
+    const hipRestWx = bounds.x + bU.start.x * bounds.w;
+    const hipRestWy = bounds.y + bU.start.y * bounds.h;
+    const liveHipX = restCenterX + (hipRestWx - restCenterX) * scaleX * yawSquashX + rootDx;
+    const liveHipY = restGroundY + (hipRestWy - restGroundY) * scaleY + rootDy;
+
+    const ankRestWx = bounds.x + bL.end.x * bounds.w;
+    const ankRestWy = bounds.y + bL.end.y * bounds.h;
+    const groundAnkleY = restGroundY + (ankRestWy - restGroundY) * scaleY;
+    const baseAnkleX = restCenterX + (ankRestWx - restCenterX) * scaleX * yawSquashX + rootDx;
+
+    const cyc = (((phase / (Math.PI * 2)) % 1) + 1) % 1;
+    let stride = 0;
+    let lift = 0;
+    if (cyc < 0.52) {
+      // Ground-locked stance phase: paw/claw stays planted at groundAnkleY!
+      const uSt = cyc / 0.52;
+      stride = 1 - 2 * uSt;
+      lift = 0;
+    } else {
+      const uSw = (cyc - 0.52) / 0.48;
+      stride = -1 + 2 * (uSw * uSw * (3 - 2 * uSw));
+      lift = Math.sin(uSw * Math.PI);
+    }
+
+    const totalLen = L1 + L2;
+    const targetX = baseAnkleX + stride * totalLen * strideFrac * amp;
+    const targetY = groundAnkleY - lift * totalLen * liftFrac * amp;
+
+    const dx = targetX - liveHipX;
+    const dy = targetY - liveHipY;
+    const rawD = Math.hypot(dx, dy);
+    const minD = Math.max(Math.abs(L1 - L2) + 2, totalLen * 0.68);
+    const maxD = totalLen * 0.992;
+    const d = Math.max(minD, Math.min(maxD, rawD || minD));
+
+    const baseAng = Math.atan2(dy, dx);
+    const cosA = Math.max(-1, Math.min(1, (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d)));
+    const upAng = baseAng + bendSign * Math.acos(cosA);
+    const midX = liveHipX + Math.cos(upAng) * L1;
+    const midY = liveHipY + Math.sin(upAng) * L1;
+    const endX = liveHipX + Math.cos(baseAng) * d;
+    const endY = liveHipY + Math.sin(baseAng) * d;
+    const loAng = Math.atan2(endY - midY, endX - midX);
+
+    const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+    const d1 = Math.max(-0.36, Math.min(0.36, wrap(upAng - restAng1 - parentRotEst)));
+    const d2 = Math.max(-0.40, Math.min(0.40, wrap(loAng - restAng2 - (parentRotEst + d1))));
+    localRot[uIdx] = d1;
+    localRot[lIdx] = d2;
+    if (pawIdx >= 0 && pawIdx < boneCount) {
+      if (lift < 0.05) {
+        // Counter-rotate paw during ground contact so sole stays flush on ground plane
+        localRot[pawIdx] = Math.max(-0.32, Math.min(0.32, -(parentRotEst + d1 + d2) * 0.85));
+      } else {
+        localRot[pawIdx] = (bendSign > 0 ? -0.18 : 0.18) * lift * amp;
+      }
+    }
+  };
+
   // Class-specific biomechanical joint kinematics (clamped for 0 inverted triangles!)
   if (cls === 'quadruped' && boneCount >= 19) {
     const speed =
       action === 'gallop' || action === 'sprint'
-        ? 11.0
+        ? 9.6
         : action === 'trot'
-          ? 8.0
+          ? 7.2
           : action === 'sneak-tiptoe'
-            ? 3.8
+            ? 3.6
             : action === 'walk-natural'
-              ? 5.6
+              ? 5.2
               : 2.2;
     const p = t * speed;
     const isMoving =
@@ -1183,35 +1294,42 @@ export function evaluateUniversalCreatureMesh(
       localRot[11] = (0.34 * leap - 0.22 * crouch) * amp;
       localRot[14] = (0.30 * leap - 0.20 * crouch) * amp;
       localRot[17] = Math.sin(t * 6.0) * 0.22 * amp;
+      localRot[18] = Math.sin(t * 6.0 - 0.65) * 0.25 * amp;
     } else if (isMoving) {
-      const stride = action === 'gallop' || action === 'sprint' ? 0.34 : action === 'sneak-tiptoe' ? 0.18 : 0.26;
-      // Diagonal trot vs 4-beat walk vs bounding gallop phase offsets!
+      const isGallop = action === 'gallop' || action === 'sprint';
+      const isTrot = action === 'trot';
+      const strideFrac = isGallop ? 0.30 : action === 'sneak-tiptoe' ? 0.16 : 0.23;
+      const liftFrac = isGallop ? 0.24 : action === 'sneak-tiptoe' ? 0.20 : 0.18;
+
+      // Phase-lagged flexible spine wave + weight transfer BEFORE solving ground-locked leg IK!
+      rootDy = -Math.abs(Math.sin(p)) * bounds.h * (isGallop ? 0.042 : 0.018) * amp;
+      rootDx = Math.cos(p) * bounds.w * 0.012 * amp;
+      localRot[0] = Math.sin(p) * 0.048 * amp;
+      localRot[1] = Math.sin(p - 0.45) * 0.055 * amp;
+      localRot[2] = Math.sin(p - 0.90) * 0.045 * amp;
+      localRot[3] = Math.sin(p - 1.25) * 0.048 * amp;
+      localRot[4] = (pose.headTiltRad ?? 0) * 0.5 + Math.sin(p - 1.55) * 0.04;
+      // Phase-lagged 2-segment tail wave
+      localRot[17] = Math.sin(p - 0.65) * 0.19 * amp;
+      localRot[18] = Math.sin(p - 1.35) * 0.25 * amp;
+
+      const pelvisRotEst = localRot[0];
+      const chestRotEst = localRot[0] + localRot[1] + localRot[2];
+      // Canonical gait phases: 4-beat walk [0, π, π/2, 3π/2], diagonal trot [0, π, π, 0], gallop [0, 0.45, π, π+0.45]
       const pFL = p;
-      const pFR = action === 'gallop' ? p + 0.45 : p + Math.PI;
-      const pBL = action === 'gallop' ? p + Math.PI : p + Math.PI * 0.5;
-      const pBR = action === 'gallop' ? p + Math.PI + 0.45 : p + Math.PI * 1.5;
+      const pFR = isGallop ? p + 0.45 : p + Math.PI;
+      const pBL = isGallop ? p + Math.PI : isTrot ? p + Math.PI : p + Math.PI * 0.5;
+      const pBR = isGallop ? p + Math.PI + 0.45 : isTrot ? p : p + Math.PI * 1.5;
 
-      const setQuadLeg = (uIdx: number, lIdx: number, pawIdx: number, ph: number, isFront: boolean) => {
-        const swing = Math.sin(ph);
-        const lift = Math.max(0, Math.cos(ph));
-        localRot[uIdx] = swing * stride * amp;
-        localRot[lIdx] = (isFront ? -0.34 : 0.32) * lift * amp;
-        localRot[pawIdx] = (isFront ? 0.18 : -0.16) * lift * amp;
-      };
-      setQuadLeg(5, 6, 7, pFL, true);
-      setQuadLeg(8, 9, 10, pFR, true);
-      setQuadLeg(11, 12, 13, pBL, false);
-      setQuadLeg(14, 15, 16, pBR, false);
-
-      localRot[0] = Math.sin(p) * 0.05 * amp;
-      localRot[1] = Math.cos(p) * 0.06 * amp;
-      localRot[3] = Math.sin(p - 0.6) * 0.05 * amp;
-      localRot[4] = (pose.headTiltRad ?? 0) * 0.5 + Math.sin(p - 0.9) * 0.04;
-      localRot[17] = Math.sin(p - 0.8) * 0.20 * amp;
-      localRot[18] = Math.sin(p - 1.5) * 0.26 * amp;
-      rootDy = -Math.abs(Math.sin(p)) * bounds.h * (action === 'gallop' ? 0.055 : 0.022) * amp;
+      const headRight = bones[4].end.x >= bones[0].start.x;
+      const frontBend: 1 | -1 = headRight ? 1 : -1;
+      const backBend: 1 | -1 = headRight ? -1 : 1;
+      solveCreatureGroundLegIK(5, 6, 7, chestRotEst, pFL, strideFrac, liftFrac, frontBend);
+      solveCreatureGroundLegIK(8, 9, 10, chestRotEst, pFR, strideFrac, liftFrac, frontBend);
+      solveCreatureGroundLegIK(11, 12, 13, pelvisRotEst, pBL, strideFrac, liftFrac, backBend);
+      solveCreatureGroundLegIK(14, 15, 16, pelvisRotEst, pBR, strideFrac, liftFrac, backBend);
     } else {
-      // Expressive idle / talk / roar / wave
+      localRot[1] = Math.sin(t * 2.4 - 0.4) * 0.03 * amp;
       localRot[3] = Math.sin(t * 3.0) * 0.06 * amp;
       localRot[4] = (action === 'roar-angry' ? -0.18 : Math.sin(t * 4.2) * 0.07) * amp;
       localRot[17] = Math.sin(t * 3.5) * 0.18 * amp;
@@ -1224,11 +1342,12 @@ export function evaluateUniversalCreatureMesh(
   } else if (cls === 'avian_winged' && boneCount >= 16) {
     const isFlying = action === 'fly-flap' || action === 'soar-glide' || action === 'dive' || action === 'sprint';
     const flapFreq = action === 'dive' ? 2.5 : action === 'soar-glide' ? 1.8 : 7.8;
-    const flapAmp = action === 'soar-glide' ? 0.12 : action === 'dive' ? 0.18 : isFlying ? 0.42 : 0.14;
+    const flapAmp = action === 'soar-glide' ? 0.12 : action === 'dive' ? 0.18 : isFlying ? 0.42 : 0.12;
     const ph = t * flapFreq;
     const wingDown = Math.sin(ph);
-    const wingFold = Math.cos(ph); // Aerodynamic upstroke feathering lag!
+    const wingFold = Math.cos(ph);
 
+    // Aerodynamic phase-lagged 3-segment wing fold + glide camber
     localRot[4] = -wingDown * flapAmp * amp;
     localRot[5] = -wingFold * flapAmp * 0.55 * amp;
     localRot[6] = -Math.sin(ph - 0.8) * flapAmp * 0.45 * amp;
@@ -1237,18 +1356,26 @@ export function evaluateUniversalCreatureMesh(
     localRot[9] = Math.sin(ph - 0.8) * flapAmp * 0.45 * amp;
     localRot[14] = Math.sin(ph - 0.5) * 0.10 * amp;
     localRot[15] = Math.sin(ph - 1.0) * 0.14 * amp;
+    localRot[2] = Math.sin(t * 3.4 - 0.3) * 0.05 * amp;
     localRot[3] = Math.sin(t * 3.4) * 0.08 * amp + (pose.headTiltRad ?? 0) * 0.4;
     if (isFlying) {
       rootDy = -bounds.h * (0.08 + 0.045 * Math.cos(ph)) * amp;
       if (action === 'dive') localRot[0] = 0.24 * amp;
-    } else if (action === 'walk-natural') {
-      const hp = t * 6.5;
-      rootDy = -Math.abs(Math.sin(hp)) * bounds.h * 0.045 * amp;
-      localRot[10] = Math.sin(hp) * 0.24 * amp;
-      localRot[12] = -Math.sin(hp) * 0.24 * amp;
+      // Tuck talons cleanly during flight
+      localRot[10] = 0.18 * amp;
+      localRot[11] = -0.22 * amp;
+      localRot[12] = 0.18 * amp;
+      localRot[13] = -0.22 * amp;
+    } else if (action === 'walk-natural' || action === 'sneak-tiptoe') {
+      const hp = t * (action === 'sneak-tiptoe' ? 4.2 : 6.2);
+      rootDy = -Math.abs(Math.sin(hp)) * bounds.h * 0.028 * amp;
+      rootDx = Math.sin(hp) * bounds.w * 0.012 * amp;
+      localRot[0] = Math.sin(hp) * 0.04 * amp;
+      // Ground-locked 2-bone claw IK for avian walking/hopping!
+      solveCreatureGroundLegIK(10, 11, -1, localRot[0], hp, 0.22, 0.22, -1);
+      solveCreatureGroundLegIK(12, 13, -1, localRot[0], hp + Math.PI, 0.22, 0.22, 1);
     }
   } else if (cls === 'aquatic_fish' && boneCount >= 11) {
-    // Carangiform phase-lagged S-wave spine propulsion!
     const freq = action === 'sprint' || action === 'dive' ? 9.5 : 5.4;
     const sAmp = action === 'sleep-breathe' ? 0.05 : 0.16 * amp;
     localRot[0] = Math.sin(t * freq) * sAmp * 0.35;
@@ -1274,44 +1401,50 @@ export function evaluateUniversalCreatureMesh(
     }
   } else if (cls === 'biped_tailed' && boneCount >= 24) {
     const isMoving = action === 'walk-natural' || action === 'sprint' || action === 'sneak-tiptoe';
-    const freq = action === 'sprint' ? 9.0 : action === 'sneak-tiptoe' ? 3.8 : 5.4;
+    const freq = action === 'sprint' ? 8.4 : action === 'sneak-tiptoe' ? 3.8 : 5.2;
     const p = t * freq;
     if (isMoving) {
-      const st = action === 'sprint' ? 0.34 : 0.25;
-      localRot[7] = Math.sin(p) * st * amp;
-      localRot[8] = Math.max(0, Math.cos(p)) * 0.36 * amp;
-      localRot[9] = -Math.sin(p) * st * amp;
-      localRot[10] = Math.max(0, -Math.cos(p)) * 0.36 * amp;
-      localRot[0] = Math.sin(p) * 0.05 * amp;
-      localRot[2] = Math.sin(p - 0.5) * 0.06 * amp;
-      // Heavy 3-segment tail counter-balances every giant stride!
-      localRot[21] = -Math.sin(p - 0.4) * 0.14 * amp;
-      localRot[22] = -Math.sin(p - 1.0) * 0.18 * amp;
-      localRot[23] = -Math.sin(p - 1.6) * 0.22 * amp;
-      rootDy = -Math.abs(Math.sin(p)) * bounds.h * 0.032 * amp;
+      const st = action === 'sprint' ? 0.28 : 0.22;
+      const lf = action === 'sprint' ? 0.24 : 0.19;
+      rootDy = -Math.abs(Math.sin(p)) * bounds.h * 0.026 * amp;
+      rootDx = Math.sin(p) * bounds.w * 0.015 * amp;
+      localRot[0] = Math.sin(p) * 0.045 * amp;
+      localRot[11] = Math.sin(p - 0.35) * 0.04 * amp;
+      localRot[1] = Math.sin(p - 0.70) * 0.045 * amp;
+      localRot[2] = Math.sin(p - 0.95) * 0.055 * amp;
+      // Heavy 3-segment counter-balancing tail with exact Δφ = -0.38 * i phase lag!
+      localRot[21] = -Math.sin(p - 0.38) * 0.14 * amp;
+      localRot[22] = -Math.sin(p - 0.76) * 0.18 * amp;
+      localRot[23] = -Math.sin(p - 1.14) * 0.22 * amp;
+
+      const headRight = bones[2].end.x >= bones[0].start.x;
+      const kneeBend: 1 | -1 = headRight ? -1 : 1;
+      solveCreatureGroundLegIK(7, 8, 17, localRot[0], p, st, lf, kneeBend);
+      solveCreatureGroundLegIK(9, 10, 19, localRot[0], p + Math.PI, st, lf, kneeBend);
     } else if (action === 'roar-angry') {
       localRot[1] = -0.14 * amp;
       localRot[2] = -0.22 * amp + Math.sin(t * 14.0) * 0.04;
       localRot[21] = 0.16 * amp;
-      localRot[22] = Math.sin(t * 6.0) * 0.18 * amp;
+      localRot[22] = Math.sin(t * 6.0 - 0.38) * 0.18 * amp;
+      localRot[23] = Math.sin(t * 6.0 - 0.76) * 0.20 * amp;
     } else if (action === 'hand-over-prop' || action === 'wave-greet') {
       localRot[3] = -0.34 * amp;
       localRot[4] = Math.sin(t * 6.5) * 0.20 * amp;
       localRot[21] = Math.sin(t * 2.8) * 0.12 * amp;
-      localRot[22] = Math.sin(t * 2.8 - 0.7) * 0.16 * amp;
+      localRot[22] = Math.sin(t * 2.8 - 0.38) * 0.16 * amp;
+      localRot[23] = Math.sin(t * 2.8 - 0.76) * 0.18 * amp;
     } else {
       localRot[21] = Math.sin(t * 2.6) * 0.12 * amp;
-      localRot[22] = Math.sin(t * 2.6 - 0.7) * 0.15 * amp;
-      localRot[23] = Math.sin(t * 2.6 - 1.4) * 0.18 * amp;
+      localRot[22] = Math.sin(t * 2.6 - 0.38) * 0.15 * amp;
+      localRot[23] = Math.sin(t * 2.6 - 0.76) * 0.18 * amp;
     }
   } else if (cls === 'amorphous_vehicle' && boneCount >= 9) {
     if (action === 'roll-drive' || action === 'sprint' || action === 'walk-natural') {
       const freq = action === 'sprint' ? 12.0 : 7.5;
-      // Cartoon chassis suspension hum + rubber wheel bounce (bounded rotation so continuous fender mesh NEVER folds/inverts!)
       rootDy = Math.sin(t * freq * 2) * bounds.h * 0.018 * amp;
       scaleY *= 1 + Math.sin(t * freq * 2) * 0.028 * amp;
       scaleX = 1 / scaleY;
-      localRot[0] = Math.sin(t * 2.6) * 0.045 * amp; // gentle acceleration pitch
+      localRot[0] = Math.sin(t * 2.6) * 0.045 * amp;
       localRot[1] = Math.sin(t * 4.2 - 0.4) * 0.055 * amp;
       localRot[2] = Math.sin(t * 5.2) * 0.14 * amp;
       localRot[3] = Math.sin(t * 5.2 - 0.6) * 0.12 * amp;
@@ -1326,26 +1459,22 @@ export function evaluateUniversalCreatureMesh(
     }
   }
 
-  // Forward-kinematic 2D world bone matrices (exact affine m00,m01,tx,m10,m11,ty + rotRad!)
+  // Forward-kinematic 2D bone matrices in ACTOR-LOCAL pixel space [0..bounds.w, 0..bounds.h]
+  // Exact 1:1 contract with dualQuatSkinning.ts and VERT_GPU_SKIN_SRC (`worldPos = u_bounds.xy + deformed`)!
   const worldPivotX = new Float32Array(boneCount);
   const worldPivotY = new Float32Array(boneCount);
   const worldRot = new Float32Array(boneCount);
   const gpuBones: GpuBoneTransform2D[] = [];
   let maxBoneAngleDeg = 0;
 
-  const restCenterX = bounds.x + bounds.w * 0.5;
-  const restGroundY = bounds.y + bounds.h;
-  const yawRad = ((pose.yawDeg ?? 0) * Math.PI) / 180;
-  // Subtle 2.5D horizontal foreshortening for intermediate yaw transitions (never collapses below 0.72!)
-  const yawSquashX = 0.74 + 0.26 * Math.abs(Math.cos(yawRad));
-
   for (let i = 0; i < boneCount; i++) {
     const bn = bones[i];
-    const rx = bounds.x + bn.start.x * bounds.w;
-    const ry = bounds.y + bn.start.y * bounds.h;
+    const lx = bn.start.x * bounds.w;
+    const ly = bn.start.y * bounds.h;
+    const rx = bounds.x + lx;
+    const ry = bounds.y + ly;
     const pIdx = bn.parent;
 
-    // Clamp every bone rotation uniformly to guarantee 0 triangle inversions on continuous meshes!
     const lRot = Math.max(-0.58, Math.min(0.58, localRot[i]));
     const deg = Math.abs((lRot * 180) / Math.PI);
     if (deg > maxBoneAngleDeg) maxBoneAngleDeg = deg;
@@ -1375,12 +1504,12 @@ export function evaluateUniversalCreatureMesh(
     const m01 = -sinR * scaleY;
     const m10 = sinR * scaleX * yawSquashX;
     const m11 = cosR * scaleY;
-    const tx = worldPivotX[i] - (m00 * rx + m01 * ry);
-    const ty = worldPivotY[i] - (m10 * rx + m11 * ry);
+    const tx = (worldPivotX[i] - bounds.x) - (m00 * lx + m01 * ly);
+    const ty = (worldPivotY[i] - bounds.y) - (m10 * lx + m11 * ly);
     gpuBones.push({ m00, m01, tx, m10, m11, ty, rotRad: r });
   }
 
-  // Evaluate CoR-skinned vertex positions (matches VERT_GPU_SKIN_SRC 1:1!)
+  // Evaluate CoR-skinned vertex positions — 0.000 px identical to VERT_GPU_SKIN_SRC!
   const vCount = mesh.vertexCount;
   const positions = new Float32Array(vCount * 2);
   let minX = Infinity;
@@ -1395,46 +1524,58 @@ export function evaluateUniversalCreatureMesh(
     const corUV = mesh.corUV;
 
     for (let v = 0; v < vCount; v++) {
-      const rx = bounds.x + restUV[v * 2] * bounds.w;
-      const ry = bounds.y + restUV[v * 2 + 1] * bounds.h;
+      const restPxX = restUV[v * 2] * bounds.w;
+      const restPxY = restUV[v * 2 + 1] * bounds.h;
       const o4 = v * 4;
-      const hasCor = corUV && corUV[v * 2] >= 0;
+      const w0 = bWt[o4];
+      const b0 = gpuBones[bIdx[o4]] ?? gpuBones[0];
 
-      let px = 0;
-      let py = 0;
-      if (hasCor) {
-        const corX = bounds.x + corUV[v * 2] * bounds.w;
-        const corY = bounds.y + corUV[v * 2 + 1] * bounds.h;
-        let corOutX = 0;
-        let corOutY = 0;
-        let sumCos = 0;
-        let sumSin = 0;
-        for (let k = 0; k < 4; k++) {
+      let defX = 0;
+      let defY = 0;
+      if (w0 >= 0.998) {
+        defX = b0.m00 * restPxX + b0.m01 * restPxY + b0.tx;
+        defY = b0.m10 * restPxX + b0.m11 * restPxY + b0.ty;
+      } else if (corUV && corUV[v * 2] >= -0.5) {
+        const corX = corUV[v * 2] * bounds.w;
+        const corY = corUV[v * 2 + 1] * bounds.h;
+        let corDefX = (b0.m00 * corX + b0.m01 * corY + b0.tx) * w0;
+        let corDefY = (b0.m10 * corX + b0.m11 * corY + b0.ty) * w0;
+        const refC = Math.cos(b0.rotRad);
+        const refS = Math.sin(b0.rotRad);
+        let sumCos = refC * w0;
+        let sumSin = refS * w0;
+
+        for (let k = 1; k < 4; k++) {
           const w = bWt[o4 + k];
-          if (w <= 1e-5) continue;
+          if (w <= 0.0001) continue;
           const b = gpuBones[bIdx[o4 + k]] ?? gpuBones[0];
-          corOutX += (b.m00 * corX + b.m01 * corY + b.tx) * w;
-          corOutY += (b.m10 * corX + b.m11 * corY + b.ty) * w;
-          sumCos += Math.cos(b.rotRad) * w;
-          sumSin += Math.sin(b.rotRad) * w;
+          corDefX += (b.m00 * corX + b.m01 * corY + b.tx) * w;
+          corDefY += (b.m10 * corX + b.m11 * corY + b.ty) * w;
+          const ck = Math.cos(b.rotRad);
+          const sk = Math.sin(b.rotRad);
+          const sign = refC * ck + refS * sk < 0 ? -1 : 1;
+          sumCos += sign * ck * w;
+          sumSin += sign * sk * w;
         }
-        const rLen = Math.hypot(sumCos, sumSin) || 1;
+        const rLen = Math.max(0.0001, Math.hypot(sumCos, sumSin));
         const rc = sumCos / rLen;
         const rs = sumSin / rLen;
-        const lx = (rx - corX) * scaleX * yawSquashX;
-        const ly = (ry - corY) * scaleY;
-        px = corOutX + lx * rc - ly * rs;
-        py = corOutY + lx * rs + ly * rc;
+        const dx = restPxX - corX;
+        const dy = restPxY - corY;
+        defX = corDefX + dx * rc - dy * rs;
+        defY = corDefY + dx * rs + dy * rc;
       } else {
         for (let k = 0; k < 4; k++) {
           const w = bWt[o4 + k];
-          if (w <= 1e-5) continue;
+          if (w <= 0.0001) continue;
           const b = gpuBones[bIdx[o4 + k]] ?? gpuBones[0];
-          px += (b.m00 * rx + b.m01 * ry + b.tx) * w;
-          py += (b.m10 * rx + b.m11 * ry + b.ty) * w;
+          defX += (b.m00 * restPxX + b.m01 * restPxY + b.tx) * w;
+          defY += (b.m10 * restPxX + b.m11 * restPxY + b.ty) * w;
         }
       }
 
+      const px = bounds.x + defX;
+      const py = bounds.y + defY;
       positions[v * 2] = px;
       positions[v * 2 + 1] = py;
       if (px < minX) minX = px;
@@ -1450,7 +1591,6 @@ export function evaluateUniversalCreatureMesh(
     maxY = bounds.y + bounds.h + pad;
   }
 
-  // Count inverted triangles (proof metric: target = 0!)
   let invertedTriangles = 0;
   if (!skipCpuVertices) {
     const tris = mesh.triangles;
@@ -1469,13 +1609,17 @@ export function evaluateUniversalCreatureMesh(
     }
   }
 
-  const hb = gpuBones[Math.min(boneCount - 1, cls === 'quadruped' ? 4 : cls === 'avian_winged' ? 3 : cls === 'biped_tailed' ? 2 : 0)];
-  const headRest = bones[Math.min(boneCount - 1, cls === 'quadruped' ? 4 : cls === 'avian_winged' ? 3 : cls === 'biped_tailed' ? 2 : 0)];
-  const hrx = bounds.x + headRest.end.x * bounds.w;
-  const hry = bounds.y + headRest.end.y * bounds.h;
+  const headIdx = Math.min(
+    boneCount - 1,
+    cls === 'quadruped' ? 4 : cls === 'avian_winged' ? 3 : cls === 'biped_tailed' ? 2 : 0
+  );
+  const hb = gpuBones[headIdx];
+  const headRest = bones[headIdx];
+  const hlx = headRest.end.x * bounds.w;
+  const hly = headRest.end.y * bounds.h;
   const headAnchor: Vec2 = {
-    x: hb ? hb.m00 * hrx + hb.m01 * hry + hb.tx : bounds.x + bounds.w * 0.5,
-    y: hb ? hb.m10 * hrx + hb.m11 * hry + hb.ty : bounds.y + bounds.h * 0.25,
+    x: hb ? bounds.x + (hb.m00 * hlx + hb.m01 * hly + hb.tx) : bounds.x + bounds.w * 0.5,
+    y: hb ? bounds.y + (hb.m10 * hlx + hb.m11 * hly + hb.ty) : bounds.y + bounds.h * 0.25,
   };
 
   return {

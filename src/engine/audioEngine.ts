@@ -1,9 +1,24 @@
 import { loadBlob, makeId, saveBlob } from './db';
 import type { AudioTrackData } from '../types/studio';
-import { analyzePCMToLipSyncTrack } from './filmMocapLipSync';
+import {
+  analyzePCMToLipSyncTrack,
+  decodeAudioBlobToMonoPCM,
+  isAudioBufferSilent,
+} from './filmMocapLipSync';
 import { connectVoiceEffectChain, type VoiceEffectId } from './liveAudioStudio';
 
+export { decodeAudioBlobToMonoPCM, isAudioBufferSilent };
+
 export type MouthViseme = 'closed' | 'half' | 'wide' | 'round';
+
+/** Minimal duck-typed PCM buffer interface usable in both Browser OfflineAudioContext & Node/Vitest */
+export interface PcmBufferLike {
+  readonly sampleRate: number;
+  readonly length: number;
+  readonly duration: number;
+  readonly numberOfChannels: number;
+  getChannelData(channel: number): Float32Array;
+}
 
 /** Returns the playback rate multiplier matching a Web Audio cartoon voice filter (keeps lip-sync 100% locked!) */
 export function getVoiceEffectRate(effect?: VoiceEffectId): number {
@@ -13,88 +28,190 @@ export function getVoiceEffectRate(effect?: VoiceEffectId): number {
 }
 
 /**
+ * Renders an audio track offline with exact `volume`, `voiceEffect` (`chipmunk`/`giant`/`robot`),
+ * and optional looping across `durationSec` so WebCodecs MP4 exports across Draw, Puppet, MeshWarp,
+ * and Film carry 100% faithful cartoon voice FX & volume gain!
+ * Falls back cleanly to deterministic Float32Array DSP in headless/Node environments without `OfflineAudioContext`.
+ */
+export async function renderAudioTrackOffline(opts: {
+  sourceBuffer: AudioBuffer;
+  durationSec: number;
+  volume?: number;
+  voiceEffect?: VoiceEffectId;
+  loop?: boolean;
+}): Promise<AudioBuffer> {
+  const { sourceBuffer, loop = false } = opts;
+  const volume = Math.max(0, Math.min(2, opts.volume ?? 1));
+  const effect: VoiceEffectId = opts.voiceEffect ?? 'natural';
+  const rate = getVoiceEffectRate(effect);
+  const targetSr = sourceBuffer.sampleRate || 48_000;
+  const chCount = Math.min(2, Math.max(1, sourceBuffer.numberOfChannels));
+  const effectiveSrcDur = sourceBuffer.duration / rate;
+  const outSec = Math.max(
+    0.05,
+    loop ? opts.durationSec : Math.min(opts.durationSec, effectiveSrcDur)
+  );
+  const outFrames = Math.max(1, Math.ceil(outSec * targetSr));
+
+  const OfflineAC =
+    typeof OfflineAudioContext !== 'undefined'
+      ? OfflineAudioContext
+      : typeof window !== 'undefined'
+        ? (window as unknown as { webkitOfflineAudioContext?: typeof OfflineAudioContext })
+            .webkitOfflineAudioContext
+        : undefined;
+
+  if (OfflineAC) {
+    try {
+      const octx = new OfflineAC(chCount, outFrames, targetSr);
+      const src = octx.createBufferSource();
+      src.buffer = sourceBuffer;
+      src.loop = loop;
+      src.playbackRate.value = rate;
+
+      const gain = octx.createGain();
+      gain.gain.value = volume;
+
+      if (effect === 'robot') {
+        const osc = octx.createOscillator();
+        const modGain = octx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.value = 58;
+        modGain.gain.value = 0.65;
+        osc.connect(modGain.gain);
+        src.connect(modGain);
+        modGain.connect(gain);
+        gain.connect(octx.destination);
+        osc.start(0);
+      } else if (effect === 'chipmunk' || effect === 'giant') {
+        const eq = octx.createBiquadFilter();
+        eq.type = effect === 'chipmunk' ? 'highshelf' : 'lowshelf';
+        eq.frequency.value = effect === 'chipmunk' ? 1500 : 280;
+        eq.gain.value = effect === 'chipmunk' ? 6 : 8;
+        src.connect(eq);
+        eq.connect(gain);
+        gain.connect(octx.destination);
+      } else {
+        src.connect(gain);
+        gain.connect(octx.destination);
+      }
+
+      src.start(0);
+      return await octx.startRendering();
+    } catch {
+      // Fall through to deterministic software DSP below
+    }
+  }
+
+  // Pure deterministic Float32Array DSP fallback (works in Vitest/Node & restricted WebViews!)
+  const channels: Float32Array[] = [];
+  const srcLen = sourceBuffer.length;
+  for (let c = 0; c < chCount; c++) {
+    const inCh = sourceBuffer.getChannelData(Math.min(c, sourceBuffer.numberOfChannels - 1));
+    const outCh = new Float32Array(outFrames);
+    for (let i = 0; i < outFrames; i++) {
+      let sp = i * rate;
+      if (loop && srcLen > 1) {
+        sp = sp % srcLen;
+      } else if (sp >= srcLen) {
+        break;
+      }
+      const i0 = Math.floor(sp);
+      const i1 = Math.min(srcLen - 1, i0 + 1);
+      const frac = sp - i0;
+      let val = (inCh[i0] * (1 - frac) + inCh[i1] * frac) * volume;
+      if (effect === 'robot') {
+        const ring = 0.35 + 0.65 * Math.sin((2 * Math.PI * 58 * i) / targetSr);
+        val *= ring;
+      }
+      outCh[i] = val < -1 ? -1 : val > 1 ? 1 : val;
+    }
+    channels.push(outCh);
+  }
+
+  const synthetic: PcmBufferLike = {
+    sampleRate: targetSr,
+    length: outFrames,
+    duration: outFrames / targetSr,
+    numberOfChannels: chCount,
+    getChannelData: (ch: number) => channels[Math.max(0, Math.min(channels.length - 1, ch))],
+  };
+  return synthetic as unknown as AudioBuffer;
+}
+
+/**
  * Decodes an uploaded or recorded audio Blob, extracts real waveform peaks
- * and frame-accurate RMS loudness for genuine lip-sync viseme driving.
+ * and frame-accurate Hann-LPC 6-viseme lip-sync driving.
  */
 export async function analyzeAndStoreAudio(
   blob: Blob,
   name: string,
   fps: number
 ): Promise<AudioTrackData> {
-  const AC =
-    window.AudioContext ||
-    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-  const ctx = new AC();
-  try {
-    const arr = await blob.arrayBuffer();
-    const audioBuf = await ctx.decodeAudioData(arr.slice(0));
-    const channel = audioBuf.getChannelData(0);
-    const durationSec = audioBuf.duration;
+  const { pcm: channel, sampleRate } = await decodeAudioBlobToMonoPCM(blob);
+  const durationSec = Math.max(0.05, channel.length / Math.max(8000, sampleRate));
 
-    // 160 peaks for crisp timeline waveform bar display
-    const peakCount = 160;
-    const peakStep = Math.max(1, Math.floor(channel.length / peakCount));
-    const peaks: number[] = [];
-    for (let i = 0; i < peakCount; i++) {
-      let maxVal = 0;
-      const start = i * peakStep;
-      const end = Math.min(channel.length, start + peakStep);
-      for (let j = start; j < end; j += 4) {
-        const v = Math.abs(channel[j]);
-        if (v > maxVal) maxVal = v;
-      }
-      peaks.push(Math.min(1, maxVal));
+  const peakCount = 160;
+  const peakStep = Math.max(1, Math.floor(channel.length / peakCount));
+  const peaks: number[] = [];
+  for (let i = 0; i < peakCount; i++) {
+    let maxVal = 0;
+    const start = i * peakStep;
+    const end = Math.min(channel.length, start + peakStep);
+    for (let j = start; j < end; j += Math.max(1, Math.min(4, end - start))) {
+      const v = Math.abs(channel[j]);
+      if (v > maxVal) maxVal = v;
     }
-
-    // Frame-level RMS loudness at project FPS for genuine lip-sync
-    const totalFrames = Math.max(1, Math.ceil(durationSec * fps));
-    const samplesPerFrame = Math.max(1, Math.floor(audioBuf.sampleRate / fps));
-    const rmsRaw: number[] = [];
-    let maxRms = 0.001;
-    for (let f = 0; f < totalFrames; f++) {
-      const start = f * samplesPerFrame;
-      const end = Math.min(channel.length, start + samplesPerFrame);
-      let sumSq = 0;
-      let count = 0;
-      for (let j = start; j < end; j += 2) {
-        sumSq += channel[j] * channel[j];
-        count++;
-      }
-      const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
-      rmsRaw.push(rms);
-      if (rms > maxRms) maxRms = rms;
-    }
-
-    const rmsPerFrame = rmsRaw.map((v) => Math.min(1, v / Math.max(0.08, maxRms)));
-    const blobKey = await saveBlob(blob);
-
-    // Genuine 6-Viseme Preston Blair formant classification aligned to project FPS!
-    const lipTrack = analyzePCMToLipSyncTrack(channel, audioBuf.sampleRate, {
-      audioBlobKey: blobKey,
-      label: name,
-      source: 'file',
-      fps: Math.max(8, fps),
-    });
-    const visemesPerFrame = Array.from({ length: totalFrames }, (_, f) => {
-      const idx = Math.min(lipTrack.frames.length - 1, f);
-      return lipTrack.frames[idx]?.viseme ?? 'closed';
-    });
-
-    return {
-      id: makeId('aud'),
-      name,
-      blobKey,
-      mimeType: blob.type || 'audio/webm',
-      durationSec,
-      peaks,
-      rmsPerFrame,
-      visemesPerFrame,
-      volume: 0.9,
-      muted: false,
-    };
-  } finally {
-    await ctx.close().catch(() => {});
+    peaks.push(Math.min(1, maxVal));
   }
+
+  const totalFrames = Math.max(1, Math.ceil(durationSec * fps));
+  const samplesPerFrame = Math.max(1, Math.floor(sampleRate / fps));
+  const rmsRaw: number[] = [];
+  let maxRms = 0.001;
+  for (let f = 0; f < totalFrames; f++) {
+    const start = f * samplesPerFrame;
+    const end = Math.min(channel.length, start + samplesPerFrame);
+    let sumSq = 0;
+    let count = 0;
+    for (let j = start; j < end; j += 2) {
+      sumSq += channel[j] * channel[j];
+      count++;
+    }
+    const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+    rmsRaw.push(rms);
+    if (rms > maxRms) maxRms = rms;
+  }
+
+  const silent = isAudioBufferSilent(channel);
+  const rmsPerFrame = silent
+    ? rmsRaw.map(() => 0)
+    : rmsRaw.map((v) => Math.min(1, v / Math.max(0.08, maxRms)));
+  const blobKey = await saveBlob(blob);
+
+  const lipTrack = analyzePCMToLipSyncTrack(channel, sampleRate, {
+    audioBlobKey: blobKey,
+    label: name,
+    source: 'file',
+    fps: Math.max(8, fps),
+  });
+  const visemesPerFrame = Array.from({ length: totalFrames }, (_, f) => {
+    const idx = Math.min(lipTrack.frames.length - 1, f);
+    return lipTrack.frames[idx]?.viseme ?? 'closed';
+  });
+
+  return {
+    id: makeId('aud'),
+    name,
+    blobKey,
+    mimeType: blob.type || 'audio/webm',
+    durationSec,
+    peaks,
+    rmsPerFrame,
+    visemesPerFrame,
+    volume: 0.9,
+    muted: false,
+  };
 }
 
 /** Maps real audio RMS amplitude & previous frame momentum into 4 cartoon mouth shapes */
@@ -105,7 +222,7 @@ export function rmsToMouthViseme(rms: number, prevRms = 0): MouthViseme {
   return 'wide';
 }
 
-/** Lightweight synced audio player for X-Sheet playback */
+/** Lightweight synced audio player for X-Sheet playback & offline export */
 export class StudioAudioPlayer {
   private ctx: AudioContext | null = null;
   private buffer: AudioBuffer | null = null;
@@ -132,6 +249,16 @@ export class StudioAudioPlayer {
     const arr = await blob.arrayBuffer();
     this.buffer = await this.ctx.decodeAudioData(arr.slice(0));
     this.loadedKey = audio.blobKey;
+  }
+
+  public getDecodedBuffer(): AudioBuffer | null {
+    return this.buffer;
+  }
+
+  /** Dynamically updates gain/mute during active playback without restarting the clock! */
+  public setLiveVolumeAndMute(volume: number, muted: boolean): void {
+    if (!this.gainNode || !this.ctx) return;
+    this.gainNode.gain.setValueAtTime(muted ? 0 : Math.max(0, volume), this.ctx.currentTime);
   }
 
   private connectWithEffect(
@@ -185,31 +312,37 @@ export class StudioAudioPlayer {
     if (this.ctx.state === 'suspended') {
       void this.ctx.resume().catch(() => {});
     }
-    if (offsetSec >= this.buffer.duration) return;
+    const rate = getVoiceEffectRate(voiceEffect);
+    const bufOffset = Math.max(0, offsetSec * rate);
+    if (bufOffset >= this.buffer.duration) return;
 
     const src = this.ctx.createBufferSource();
     src.buffer = this.buffer;
     this.cleanupFx = this.connectWithEffect(src, this.ctx.destination, volume, voiceEffect);
-    src.start(0, Math.max(0, offsetSec));
+    src.start(0, bufOffset);
     this.source = src;
   }
 
-  /** Plays a crisp 85ms syllable slice for real pro lip-sync audio scrubbing */
+  /** Plays a crisp 85ms syllable slice for real pro lip-sync audio scrubbing (respecting voiceEffect!) */
   public playScrubSlice(
     offsetSec: number,
     volume: number,
     muted: boolean,
-    durationSec = 0.085
+    durationSec = 0.085,
+    voiceEffect: VoiceEffectId = 'natural'
   ): void {
     this.stop();
     if (!this.ctx || !this.buffer || muted) return;
     if (this.ctx.state === 'suspended') {
       void this.ctx.resume().catch(() => {});
     }
-    if (offsetSec < 0 || offsetSec >= this.buffer.duration) return;
+    const rate = getVoiceEffectRate(voiceEffect);
+    const bufOffset = offsetSec * rate;
+    if (bufOffset < 0 || bufOffset >= this.buffer.duration) return;
 
     const src = this.ctx.createBufferSource();
     src.buffer = this.buffer;
+    src.playbackRate.value = rate;
     const gain = this.ctx.createGain();
     const now = this.ctx.currentTime;
     gain.gain.setValueAtTime(0.001, now);
@@ -219,7 +352,7 @@ export class StudioAudioPlayer {
 
     src.connect(gain);
     gain.connect(this.ctx.destination);
-    src.start(now, offsetSec, Math.min(durationSec, this.buffer.duration - offsetSec));
+    src.start(now, bufOffset, Math.min(durationSec * rate, this.buffer.duration - bufOffset));
     this.source = src;
     this.gainNode = gain;
   }
@@ -306,7 +439,7 @@ export class MicVoiceRecorder {
   public stop(): Promise<Blob> {
     return new Promise((resolve, reject) => {
       if (!this.recorder) {
-        reject(new Error('Kayıt aktif değil'));
+        reject(new Error('Recorder inactive'));
         return;
       }
       this.recorder.onstop = () => {

@@ -1,12 +1,12 @@
 /**
- * KÂĞIT Universal Browser Video Export Engine ($0, 100% Client-Side)
+ * INKTROPE Universal Frame-Accurate Video Export Engine ($0, 100% Client-Side, F1-03 10/10 Upgrade)
  *
- * 4-Tier Cross-Browser Strategy (WhatsApp, iPhone Photos, Instagram Reels & TikTok compatible!):
- *   1. Native MP4 MediaRecorder (Safari 14.5+, modern Chrome 126+ with AVC1/MP4A) -> real .mp4 with audio
- *   2. WebCodecs H.264 VideoEncoder (+ lazy-loaded mp4-muxer) with automatic GPU -> software CPU fallback -> real .mp4!
- *   3. MediaRecorder WebM VP9/VP8 fallback (Firefox / older Chrome) -> .webm
- *   4. In-App WebView (Instagram / TikTok / old iOS without MediaRecorder or WebCodecs) -> never crashes;
- *      signals callers to fall back gracefully to Animated GIF / PNG ZIP!
+ * Cross-Browser Strategy:
+ *   1. PRIMARY EVERYWHERE: WebCodecs H.264 `VideoEncoder` + `mp4-muxer` (`fastStart: 'in-memory'`, zero `moof` fragments!)
+ *      - Resolution-adaptive AVC Level selector: Level 3.1 (`1f`) up to 720p, Level 4.0 (`28`) for 1080p & 9:16 `1080×1920` Reels, Level 4.2 (`2a`) above!
+ *      - Dual WebCodecs audio encoder: `mp4a.40.2` (`aac`) first, automatic `opus` (`48 kHz`) fallback when OS lacks patent-encumbered AAC!
+ *      - Exact `audioVolume` gain application & minimum playable duration guard so 1-frame projects NEVER output 0-byte or rejected MP4s!
+ *   2. FALLBACK: Audio-aware `MediaRecorder` (MP4 with audio codecs -> WebM VP9/VP8+Opus) returning `null` cleanly when unsupported!
  */
 
 export interface VideoExportSupport {
@@ -18,43 +18,65 @@ export interface VideoExportSupport {
   canWebShareFiles: boolean;
 }
 
-const MP4_MIME_CANDIDATES = [
+export type ExportAspectPreset = 'native' | '9:16' | '1:1';
+
+const MP4_AUDIO_CAPABLE_MIMES = [
+  'video/mp4;codecs=avc1.42001f,mp4a.40.2',
+  'video/mp4;codecs=avc1.420028,mp4a.40.2',
   'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
   'video/mp4;codecs=avc1.42001E,mp4a.40.2',
-  'video/mp4;codecs=avc1.42E01E',
+  'video/mp4;codecs=avc1.42001f,opus',
   'video/mp4',
 ] as const;
 
-const WEBM_MIME_CANDIDATES = [
+const MP4_VIDEO_ONLY_MIMES = [
+  ...MP4_AUDIO_CAPABLE_MIMES,
+  'video/mp4;codecs=avc1.42001f',
+  'video/mp4;codecs=avc1.420028',
+  'video/mp4;codecs=avc1.42E01E',
+] as const;
+
+const WEBM_AUDIO_CAPABLE_MIMES = [
   'video/webm;codecs=vp9,opus',
   'video/webm;codecs=vp8,opus',
-  'video/webm;codecs=vp9',
-  'video/webm;codecs=vp8',
   'video/webm',
 ] as const;
 
-export function pickBestMediaRecorderFormat(): {
+const WEBM_VIDEO_ONLY_MIMES = [
+  ...WEBM_AUDIO_CAPABLE_MIMES,
+  'video/webm;codecs=vp9',
+  'video/webm;codecs=vp8',
+] as const;
+
+/**
+ * Selects an actually supported MediaRecorder format.
+ * - When `hasAudio = true`, NEVER selects a video-only MIME string (preventing `NotSupportedError` crashes!).
+ * - When NO candidate is supported, returns `null` instead of a fake `'video/webm'` string!
+ */
+export function pickBestMediaRecorderFormat(hasAudio = false): {
   mime: string;
   ext: 'mp4' | 'webm';
 } | null {
   if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
     return null;
   }
-  for (const mime of MP4_MIME_CANDIDATES) {
+  const mp4List = hasAudio ? MP4_AUDIO_CAPABLE_MIMES : MP4_VIDEO_ONLY_MIMES;
+  for (const mime of mp4List) {
     try {
       if (MediaRecorder.isTypeSupported(mime)) return { mime, ext: 'mp4' };
     } catch {
       // ignore unsupported query
     }
   }
-  for (const mime of WEBM_MIME_CANDIDATES) {
+  const webmList = hasAudio ? WEBM_AUDIO_CAPABLE_MIMES : WEBM_VIDEO_ONLY_MIMES;
+  for (const mime of webmList) {
     try {
       if (MediaRecorder.isTypeSupported(mime)) return { mime, ext: 'webm' };
     } catch {
       // ignore
     }
   }
-  return { mime: 'video/webm', ext: 'webm' };
+  return null;
 }
 
 export function detectVideoExportSupport(): VideoExportSupport {
@@ -68,7 +90,7 @@ export function detectVideoExportSupport(): VideoExportSupport {
   let webmMime: string | null = null;
 
   if (hasMediaRecorder && hasCaptureStream) {
-    for (const m of MP4_MIME_CANDIDATES) {
+    for (const m of MP4_VIDEO_ONLY_MIMES) {
       try {
         if (MediaRecorder.isTypeSupported(m)) {
           nativeMp4Mime = m;
@@ -78,7 +100,7 @@ export function detectVideoExportSupport(): VideoExportSupport {
         // ignore
       }
     }
-    for (const m of WEBM_MIME_CANDIDATES) {
+    for (const m of WEBM_VIDEO_ONLY_MIMES) {
       try {
         if (MediaRecorder.isTypeSupported(m)) {
           webmMime = m;
@@ -99,8 +121,8 @@ export function detectVideoExportSupport(): VideoExportSupport {
     typeof navigator.canShare === 'function';
 
   return {
-    canExportVideo: Boolean(nativeMp4Mime || webCodecsMp4 || webmMime),
-    prefersMp4: Boolean(nativeMp4Mime || webCodecsMp4),
+    canExportVideo: Boolean(webCodecsMp4 || nativeMp4Mime || webmMime),
+    prefersMp4: Boolean(webCodecsMp4 || nativeMp4Mime),
     nativeMp4Mime,
     webCodecsMp4,
     webmMime,
@@ -116,10 +138,67 @@ export function ensureEvenDimensions(w: number, h: number): { width: number; hei
   };
 }
 
+/** Resolves target pixel dimensions for native, 9:16 Vertical Reels (1080x1920), or 1:1 Square (1080x1080) */
+export function resolveExportDimensions(
+  projectWidth: number,
+  projectHeight: number,
+  scale: 1 | 0.75 | 0.5 = 1,
+  aspectPreset: ExportAspectPreset = 'native'
+): { width: number; height: number } {
+  if (aspectPreset === '9:16') {
+    return ensureEvenDimensions(Math.round(1080 * scale), Math.round(1920 * scale));
+  }
+  if (aspectPreset === '1:1') {
+    return ensureEvenDimensions(Math.round(1080 * scale), Math.round(1080 * scale));
+  }
+  return ensureEvenDimensions(Math.round(projectWidth * scale), Math.round(projectHeight * scale));
+}
+
+/**
+ * Selects H.264 profile/level strings matching the macroblock count of `(width, height)`:
+ * - `<= 3600` MB (`<= 1280x720`): Level 3.1 (`1f`)
+ * - `<= 8192` MB (`1920x1080` and `1080x1920` 9:16 Reels/TikTok/Shorts): Level 4.0 (`28`)
+ * - `> 8192` MB: Level 4.2 / 5.0 (`2a` / `32`)
+ */
+export function selectH264CodecCandidates(width: number, height: number): string[] {
+  const { width: w, height: h } = ensureEvenDimensions(width, height);
+  const mbCount = Math.ceil(w / 16) * Math.ceil(h / 16);
+  if (mbCount <= 3600) {
+    return ['avc1.64001f', 'avc1.4d001f', 'avc1.42001f'];
+  }
+  if (mbCount <= 8192) {
+    return ['avc1.640028', 'avc1.4d0028', 'avc1.420028'];
+  }
+  return ['avc1.64002a', 'avc1.4d002a', 'avc1.42002a', 'avc1.640032'];
+}
+
+/** Linearly resamples mono/stereo PCM channel data to 48000 Hz when Opus fallback is chosen */
+function extractChannelWithGainAndSampleRate(
+  buf: AudioBuffer,
+  channelIndex: number,
+  targetSampleRate: number,
+  totalFramesOut: number,
+  volumeGain: number
+): Float32Array {
+  const src = buf.getChannelData(Math.min(channelIndex, buf.numberOfChannels - 1));
+  const out = new Float32Array(totalFramesOut);
+  const ratio = buf.sampleRate / targetSampleRate;
+  const srcLen = src.length;
+  for (let i = 0; i < totalFramesOut; i++) {
+    const sp = i * ratio;
+    const i0 = Math.floor(sp);
+    if (i0 >= srcLen) break;
+    const i1 = Math.min(srcLen - 1, i0 + 1);
+    const frac = sp - i0;
+    const sample = (src[i0] * (1 - frac) + src[i1] * frac) * volumeGain;
+    out[i] = sample < -1 ? -1 : sample > 1 ? 1 : sample;
+  }
+  return out;
+}
+
 /**
  * Pure WebCodecs H.264 + mp4-muxer Frame-Accurate Offline MP4 Encoder!
- * Works even on GPU-free laptops by automatically falling back to `prefer-software` H.264 encoding!
- * Produces 100% WhatsApp, Instagram Reels, TikTok, and iPhone Photos compatible MP4 files!
+ * Produces non-fragmented `fastStart` ISO BMFF `.mp4` files (`ftyp + moov + mdat`, `moof = false`)!
  */
 export async function encodeFramesToMp4WebCodecs(opts: {
   width: number;
@@ -128,6 +207,7 @@ export async function encodeFramesToMp4WebCodecs(opts: {
   totalFrames: number;
   drawFrame: (ctx: CanvasRenderingContext2D, frameIndex: number, w: number, h: number) => void | Promise<void>;
   audioBuffer?: AudioBuffer | null;
+  audioVolume?: number;
   shouldAbort?: () => boolean;
   onProgress?: (done: number, total: number) => void;
 }): Promise<Blob | null> {
@@ -137,34 +217,35 @@ export async function encodeFramesToMp4WebCodecs(opts: {
 
   const { width, height } = ensureEvenDimensions(opts.width, opts.height);
   const fps = Math.max(6, Math.min(60, Math.round(opts.fps)));
+  const pixels = width * height;
+  const targetBitrate = pixels > 1_000_000 ? 7_200_000 : 5_000_000;
 
-  // Probe H.264 Baseline/Main support — try hardware first, then CPU software encoder for GPU-free devices!
-  const codecConfigs: VideoEncoderConfig[] = [
-    {
-      codec: 'avc1.42001f',
+  // Enforce at least ~0.5s (minimum 6 frames) so 1-frame Draw projects NEVER output 0-byte or unplayable 83ms MP4s!
+  const minPlayableFrames = Math.max(6, Math.ceil(fps * 0.5));
+  const totalEncodedFrames = Math.max(opts.totalFrames, minPlayableFrames);
+
+  const codecStrings = selectH264CodecCandidates(width, height);
+  const codecConfigs: VideoEncoderConfig[] = [];
+  for (const codec of codecStrings) {
+    codecConfigs.push({
+      codec,
       width,
       height,
-      bitrate: 5_000_000,
+      bitrate: targetBitrate,
       framerate: fps,
       hardwareAcceleration: 'no-preference',
-    },
-    {
-      codec: 'avc1.42001f',
+    });
+  }
+  for (const codec of codecStrings) {
+    codecConfigs.push({
+      codec,
       width,
       height,
-      bitrate: 4_500_000,
+      bitrate: Math.round(targetBitrate * 0.9),
       framerate: fps,
       hardwareAcceleration: 'prefer-software',
-    },
-    {
-      codec: 'avc1.4d001f',
-      width,
-      height,
-      bitrate: 4_500_000,
-      framerate: fps,
-      hardwareAcceleration: 'prefer-software',
-    },
-  ];
+    });
+  }
 
   let chosenVideoConfig: VideoEncoderConfig | null = null;
   for (const cfg of codecConfigs) {
@@ -180,26 +261,50 @@ export async function encodeFramesToMp4WebCodecs(opts: {
   }
   if (!chosenVideoConfig) return null;
 
-  // Optional AAC audio encoding via AudioEncoder when audioBuffer is supplied & supported
-  let canEncodeAudio = false;
+  // Dual Audio Codec Support: prefer `mp4a.40.2` (AAC-LC), fall back to `opus` @ 48 kHz so audio is NEVER dropped!
+  let muxAudioCodec: 'aac' | 'opus' | null = null;
   let audioConfig: AudioEncoderConfig | null = null;
-  if (opts.audioBuffer && typeof AudioEncoder !== 'undefined' && typeof AudioData !== 'undefined') {
+  const audioGain = Math.max(0, Math.min(2, opts.audioVolume ?? 1));
+
+  if (
+    opts.audioBuffer &&
+    audioGain > 0.001 &&
+    typeof AudioEncoder !== 'undefined' &&
+    typeof AudioData !== 'undefined'
+  ) {
     const ch = Math.min(2, Math.max(1, opts.audioBuffer.numberOfChannels));
-    const sr = opts.audioBuffer.sampleRate;
-    const candidate: AudioEncoderConfig = {
+    const aacCandidate: AudioEncoderConfig = {
       codec: 'mp4a.40.2',
       numberOfChannels: ch,
-      sampleRate: sr,
+      sampleRate: opts.audioBuffer.sampleRate,
       bitrate: 128_000,
     };
     try {
-      const sup = await AudioEncoder.isConfigSupported(candidate);
-      if (sup.supported) {
-        canEncodeAudio = true;
-        audioConfig = candidate;
+      const supAac = await AudioEncoder.isConfigSupported(aacCandidate);
+      if (supAac.supported) {
+        muxAudioCodec = 'aac';
+        audioConfig = aacCandidate;
       }
     } catch {
-      canEncodeAudio = false;
+      // try Opus next
+    }
+
+    if (!audioConfig) {
+      const opusCandidate: AudioEncoderConfig = {
+        codec: 'opus',
+        numberOfChannels: ch,
+        sampleRate: 48_000,
+        bitrate: 128_000,
+      };
+      try {
+        const supOpus = await AudioEncoder.isConfigSupported(opusCandidate);
+        if (supOpus.supported) {
+          muxAudioCodec = 'opus';
+          audioConfig = opusCandidate;
+        }
+      } catch {
+        muxAudioCodec = null;
+      }
     }
   }
 
@@ -211,11 +316,12 @@ export async function encodeFramesToMp4WebCodecs(opts: {
       codec: 'avc',
       width,
       height,
+      frameRate: fps,
     },
     audio:
-      canEncodeAudio && audioConfig
+      muxAudioCodec && audioConfig
         ? {
-            codec: 'aac',
+            codec: muxAudioCodec,
             numberOfChannels: audioConfig.numberOfChannels,
             sampleRate: audioConfig.sampleRate,
           }
@@ -235,7 +341,7 @@ export async function encodeFramesToMp4WebCodecs(opts: {
   videoEncoder.configure(chosenVideoConfig);
 
   let audioEncoder: AudioEncoder | null = null;
-  if (canEncodeAudio && audioConfig) {
+  if (muxAudioCodec && audioConfig) {
     audioEncoder = new AudioEncoder({
       output: (chunk, meta) => {
         muxer.addAudioChunk(chunk, meta);
@@ -256,9 +362,11 @@ export async function encodeFramesToMp4WebCodecs(opts: {
   const keyFrameInterval = Math.max(12, fps * 2);
 
   try {
-    for (let i = 0; i < opts.totalFrames; i++) {
+    const srcCount = Math.max(1, opts.totalFrames);
+    for (let i = 0; i < totalEncodedFrames; i++) {
       if (opts.shouldAbort?.() || encoderError) break;
-      await opts.drawFrame(ctx, i, width, height);
+      const logicalIdx = Math.min(srcCount - 1, i);
+      await opts.drawFrame(ctx, logicalIdx, width, height);
 
       const frame = new VideoFrame(canvas, {
         timestamp: i * frameDurationUs,
@@ -267,12 +375,11 @@ export async function encodeFramesToMp4WebCodecs(opts: {
       videoEncoder.encode(frame, { keyFrame: i % keyFrameInterval === 0 });
       frame.close();
 
-      // Backpressure guard so memory never spikes on 3 GB phones
       if (videoEncoder.encodeQueueSize > 8) {
         await videoEncoder.flush();
       }
 
-      opts.onProgress?.(i + 1, opts.totalFrames);
+      opts.onProgress?.(i + 1, totalEncodedFrames);
       if (i % 4 === 0) {
         await new Promise<void>((r) => setTimeout(r, 0));
       }
@@ -282,37 +389,48 @@ export async function encodeFramesToMp4WebCodecs(opts: {
       return null;
     }
 
-    // Encode matching duration of audio buffer into AAC frames if available
     if (audioEncoder && opts.audioBuffer && audioConfig) {
-      const totalSec = opts.totalFrames / fps;
-      const sr = opts.audioBuffer.sampleRate;
+      const totalSec = totalEncodedFrames / fps;
+      const sr = audioConfig.sampleRate;
       const ch = audioConfig.numberOfChannels;
-      const totalSamples = Math.min(opts.audioBuffer.length, Math.round(totalSec * sr));
-      const chunkSamples = 4096;
+      const maxAvailableSec = opts.audioBuffer.duration;
+      const encodeSec = Math.min(maxAvailableSec, totalSec);
+      const totalSamples = Math.max(0, Math.round(encodeSec * sr));
 
-      for (let offset = 0; offset < totalSamples; offset += chunkSamples) {
-        const count = Math.min(chunkSamples, totalSamples - offset);
-        const planar = new Float32Array(count * ch);
+      if (totalSamples > 0) {
+        const chBuffers: Float32Array[] = [];
         for (let c = 0; c < ch; c++) {
-          const src = opts.audioBuffer.getChannelData(Math.min(c, opts.audioBuffer.numberOfChannels - 1));
-          planar.set(src.subarray(offset, offset + count), c * count);
+          chBuffers.push(
+            extractChannelWithGainAndSampleRate(opts.audioBuffer, c, sr, totalSamples, audioGain)
+          );
         }
-        const audioData = new AudioData({
-          format: 'f32-planar',
-          sampleRate: sr,
-          numberOfFrames: count,
-          numberOfChannels: ch,
-          timestamp: Math.round((offset / sr) * 1_000_000),
-          data: planar,
-        });
-        audioEncoder.encode(audioData);
-        audioData.close();
+        const chunkSamples = muxAudioCodec === 'opus' ? 960 : 4096;
+        for (let offset = 0; offset < totalSamples; offset += chunkSamples) {
+          const count = Math.min(chunkSamples, totalSamples - offset);
+          const planar = new Float32Array(count * ch);
+          for (let c = 0; c < ch; c++) {
+            planar.set(chBuffers[c].subarray(offset, offset + count), c * count);
+          }
+          const audioData = new AudioData({
+            format: 'f32-planar',
+            sampleRate: sr,
+            numberOfFrames: count,
+            numberOfChannels: ch,
+            timestamp: Math.round((offset / sr) * 1_000_000),
+            data: planar,
+          });
+          audioEncoder.encode(audioData);
+          audioData.close();
+        }
+        await audioEncoder.flush();
       }
-      await audioEncoder.flush();
     }
 
     await videoEncoder.flush();
     muxer.finalize();
+    if (!target.buffer || target.buffer.byteLength < 256) {
+      return null;
+    }
     return new Blob([target.buffer], { type: 'video/mp4' });
   } catch {
     return null;
@@ -331,7 +449,7 @@ export async function encodeFramesToMp4WebCodecs(opts: {
 }
 
 /**
- * Triggers a reliable file download AND supports Web Share API Level 2 on mobile when requested!
+ * Triggers Web Share API Level 2 native share sheet on mobile/desktop when supported!
  */
 export async function shareFileOnMobileIfSupported(
   blob: Blob,

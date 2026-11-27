@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Check,
@@ -6,6 +6,7 @@ import {
   FileSpreadsheet,
   KeyRound,
   Move,
+  Paintbrush,
   Pencil,
   RotateCcw,
   Scissors,
@@ -23,6 +24,7 @@ import type {
   CustomMouthKey,
   RigViewSlot,
   ViewAnchors,
+  WeightStroke,
 } from '../../types/masterRig';
 import { countRigViews, defaultViewAnchors } from '../../types/masterRig';
 import type { CustomSlitLine, UniversalCreatureClass } from '../../engine/conformingMeshEngine';
@@ -37,9 +39,12 @@ import {
 import { MasterRigRuntimeCache, renderMasterRigCharacter } from '../../engine/viewRigBlender';
 import {
   analyzeDrawingAnatomyFromPixels,
+  defaultDrawingAnatomy,
   evaluateCartoonDancePose,
+  type DrawingAnatomy,
+  type PrestonBlairViseme,
 } from '../../engine/cartoonMotionEngine';
-import { buildRiggedCharacterPack, type RiggedCharacterPack } from '../../engine/skeletonSkinEngine';
+import { buildRiggedCharacterPackAsync, type RiggedCharacterPack } from '../../engine/skeletonSkinEngine';
 import { prepareCharacterCanvas } from '../../engine/characterIntakeEngine';
 import {
   getSavedByokGeminiKey,
@@ -76,14 +81,54 @@ const ANGLE_CARDS: Array<{ angle: CharacterViewAngle; labelKey: TranslationKey; 
   { angle: 'threeQuarter', labelKey: 'v4SlotThreeQuarter', yawSnap: 45 },
 ];
 
-const DEFAULT_JOINT_PINS: Array<{ id: string; labelTr: string; x: number; y: number }> = [
-  { id: 'head', labelTr: 'Baş', x: 0.5, y: 0.22 },
-  { id: 'shoulderL', labelTr: 'Omuz Sol', x: 0.36, y: 0.36 },
-  { id: 'shoulderR', labelTr: 'Omuz Sağ', x: 0.64, y: 0.36 },
-  { id: 'handL', labelTr: 'El Sol', x: 0.22, y: 0.56 },
-  { id: 'handR', labelTr: 'El Sağ', x: 0.78, y: 0.56 },
-  { id: 'footL', labelTr: 'Ayak Sol', x: 0.39, y: 0.90 },
-  { id: 'footR', labelTr: 'Ayak Sağ', x: 0.61, y: 0.90 },
+interface CanonicalJointSpec {
+  id: string;
+  legacyId?: string;
+  labelTr: string;
+  primary?: boolean;
+}
+
+const CANONICAL_JOINT_PINS: CanonicalJointSpec[] = [
+  { id: 'head', labelTr: 'Baş', primary: true },
+  { id: 'neck', labelTr: 'Boyun' },
+  { id: 'shoulder_l', legacyId: 'shoulderL', labelTr: 'Omuz Sol' },
+  { id: 'elbow_l', legacyId: 'elbowL', labelTr: 'Dirsek Sol' },
+  { id: 'wrist_l', legacyId: 'handL', labelTr: 'El Sol', primary: true },
+  { id: 'shoulder_r', legacyId: 'shoulderR', labelTr: 'Omuz Sağ' },
+  { id: 'elbow_r', legacyId: 'elbowR', labelTr: 'Dirsek Sağ' },
+  { id: 'wrist_r', legacyId: 'handR', labelTr: 'El Sağ', primary: true },
+  { id: 'hip_l', legacyId: 'hipL', labelTr: 'Kalça Sol' },
+  { id: 'knee_l', legacyId: 'kneeL', labelTr: 'Diz Sol' },
+  { id: 'ankle_l', legacyId: 'footL', labelTr: 'Ayak Sol', primary: true },
+  { id: 'hip_r', legacyId: 'hipR', labelTr: 'Kalça Sağ' },
+  { id: 'knee_r', legacyId: 'kneeR', labelTr: 'Diz Sağ' },
+  { id: 'ankle_r', legacyId: 'footR', labelTr: 'Ayak Sağ', primary: true },
+];
+
+const SKELETON_BONE_LINKS: Array<[string, string]> = [
+  ['head', 'neck'],
+  ['neck', 'shoulder_l'],
+  ['shoulder_l', 'elbow_l'],
+  ['elbow_l', 'wrist_l'],
+  ['neck', 'shoulder_r'],
+  ['shoulder_r', 'elbow_r'],
+  ['elbow_r', 'wrist_r'],
+  ['neck', 'hip_l'],
+  ['neck', 'hip_r'],
+  ['hip_l', 'hip_r'],
+  ['hip_l', 'knee_l'],
+  ['knee_l', 'ankle_l'],
+  ['hip_r', 'knee_r'],
+  ['knee_r', 'ankle_r'],
+];
+
+const PAINT_REGIONS: Array<{ region: number; labelTr: string; color: string }> = [
+  { region: 1, labelTr: 'Gövde', color: '#D99B26' },
+  { region: 0, labelTr: 'Baş', color: '#8B5CF6' },
+  { region: 2, labelTr: 'Sol Kol', color: '#2563EB' },
+  { region: 3, labelTr: 'Sağ Kol', color: '#0EA5E9' },
+  { region: 4, labelTr: 'Sol Bacak', color: '#10B981' },
+  { region: 5, labelTr: 'Sağ Bacak', color: '#F97316' },
 ];
 
 const MOUTH_KEYS: Array<{ id: CustomMouthKey; labelKey?: TranslationKey; literal?: string }> = [
@@ -92,6 +137,60 @@ const MOUTH_KEYS: Array<{ id: CustomMouthKey; labelKey?: TranslationKey; literal
   { id: 'E', literal: 'E' },
   { id: 'O', literal: 'O' },
 ];
+
+function computeAnatomyJointDefaults(
+  anatomy: DrawingAnatomy,
+  pack?: RiggedCharacterPack | null
+): Record<string, { x: number; y: number }> {
+  const bones = pack?.creatureClass === 'humanoid' && pack.skinnedMesh && pack.skinnedMesh.bones.length >= 11
+    ? pack.skinnedMesh.bones
+    : null;
+
+  const shL = bones ? bones[3].start : { x: anatomy.shoulderLeftX, y: anatomy.shoulderY };
+  const elL = bones
+    ? bones[3].end
+    : { x: (anatomy.shoulderLeftX + anatomy.handLeftX) * 0.5, y: (anatomy.shoulderY + anatomy.handLeftY) * 0.5 + 0.02 };
+  const wrL = bones ? bones[4].end : { x: anatomy.handLeftX, y: anatomy.handLeftY };
+
+  const shR = bones ? bones[5].start : { x: anatomy.shoulderRightX, y: anatomy.shoulderY };
+  const elR = bones
+    ? bones[5].end
+    : { x: (anatomy.shoulderRightX + anatomy.handRightX) * 0.5, y: (anatomy.shoulderY + anatomy.handRightY) * 0.5 + 0.02 };
+  const wrR = bones ? bones[6].end : { x: anatomy.handRightX, y: anatomy.handRightY };
+
+  const hipL = bones
+    ? bones[7].start
+    : { x: Math.max(0.18, Math.min(anatomy.centerX - 0.05, anatomy.footLeftX * 0.7 + anatomy.centerX * 0.3)), y: anatomy.hipV };
+  const knL = bones
+    ? bones[7].end
+    : { x: (hipL.x + anatomy.footLeftX) * 0.5, y: (anatomy.hipV + anatomy.groundV) * 0.5 };
+  const anL = bones ? bones[8].end : { x: anatomy.footLeftX, y: Math.max(0.7, anatomy.groundV - 0.02) };
+
+  const hipR = bones
+    ? bones[9].start
+    : { x: Math.min(0.82, Math.max(anatomy.centerX + 0.05, anatomy.footRightX * 0.7 + anatomy.centerX * 0.3)), y: anatomy.hipV };
+  const knR = bones
+    ? bones[9].end
+    : { x: (hipR.x + anatomy.footRightX) * 0.5, y: (anatomy.hipV + anatomy.groundV) * 0.5 };
+  const anR = bones ? bones[10].end : { x: anatomy.footRightX, y: Math.max(0.7, anatomy.groundV - 0.02) };
+
+  return {
+    head: { x: anatomy.headCenterX, y: anatomy.headCenterY },
+    neck: { x: anatomy.neckX, y: anatomy.headEndV },
+    shoulder_l: { x: shL.x, y: shL.y },
+    elbow_l: { x: elL.x, y: elL.y },
+    wrist_l: { x: wrL.x, y: wrL.y },
+    shoulder_r: { x: shR.x, y: shR.y },
+    elbow_r: { x: elR.x, y: elR.y },
+    wrist_r: { x: wrR.x, y: wrR.y },
+    hip_l: { x: hipL.x, y: hipL.y },
+    knee_l: { x: knL.x, y: knL.y },
+    ankle_l: { x: anL.x, y: anL.y },
+    hip_r: { x: hipR.x, y: hipR.y },
+    knee_r: { x: knR.x, y: knR.y },
+    ankle_r: { x: anR.x, y: anR.y },
+  };
+}
 
 function loadCanvasFromUrl(url: string): Promise<HTMLCanvasElement> {
   return new Promise((resolve, reject) => {
@@ -139,7 +238,7 @@ export default function CharacterMasterModal({
   const [previewAngleDeg, setPreviewAngleDeg] = useState<number>(0);
   const [notice, setNotice] = useState<{ text: string; tone: 'ok' | 'amber' | 'info' } | null>(null);
 
-  // Light-Table Tracing Canvas state (for drawing Side / Back / 3-4 directly over blue 5-line guides!)
+  // Light-Table Tracing Canvas state
   const [tracingAngle, setTracingAngle] = useState<Exclude<CharacterViewAngle, 'front'> | null>(null);
   const [traceUnderlayUrl, setTraceUnderlayUrl] = useState<string | null>(null);
   const [traceTool, setTraceTool] = useState<'pen' | 'eraser'>('pen');
@@ -149,7 +248,7 @@ export default function CharacterMasterModal({
   const traceHistoryRef = useRef<ImageData[]>([]);
   const traceLastPtRef = useRef<{ x: number; y: number } | null>(null);
 
-  // Optional AI Side-Guide Drawer state (strictly opt-in, NEVER alters Front!)
+  // Optional AI Side-Guide Drawer state
   const [aiDrawerAngle, setAiDrawerAngle] = useState<Exclude<CharacterViewAngle, 'front'> | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [pendingAiApproval, setPendingAiApproval] = useState<{
@@ -162,17 +261,40 @@ export default function CharacterMasterModal({
   const [showByokInput, setShowByokInput] = useState(false);
   const [byokKey, setByokKey] = useState(() => getSavedByokGeminiKey());
 
-  // Tab 2: 5-second Joint Pin & Scissors Calibrator state
-  const [jointTool, setJointTool] = useState<'pin' | 'scissors'>('pin');
+  // Tab 2: Sub-Millisecond Joint Pin, Scissors & Region Paint Brush Calibrator state
+  const [jointTool, setJointTool] = useState<'pin' | 'scissors' | 'paint'>('pin');
   const [draggingPinId, setDraggingPinId] = useState<string | null>(null);
+  const [hoveredPinId, setHoveredPinId] = useState<string | null>(null);
+  const [selectedPinId, setSelectedPinId] = useState<string>('head');
+  const [livePinOverride, setLivePinOverride] = useState<{ id: string; x: number; y: number } | null>(null);
+  const livePinOverrideRef = useRef<{ id: string; x: number; y: number } | null>(null);
+
   const [pendingSlitStart, setPendingSlitStart] = useState<{ x: number; y: number } | null>(null);
   const [pendingSlitCur, setPendingSlitCur] = useState<{ x: number; y: number } | null>(null);
+
+  // Interactive Region / Weight Brush state
+  const [activePaintRegion, setActivePaintRegion] = useState<number>(1);
+  const [paintBrushRadius, setPaintBrushRadius] = useState<number>(0.07);
+  const [livePaintStrokes, setLivePaintStrokes] = useState<WeightStroke[]>([]);
+  const livePaintStrokesRef = useRef<WeightStroke[]>([]);
+  const isPaintingRef = useRef<boolean>(false);
+
+  // Detected real anatomy joint positions & exact image dimensions for unclipped 1:1 framing
+  const [detectedJoints, setDetectedJoints] = useState<Record<string, { x: number; y: number }>>(() =>
+    computeAnatomyJointDefaults(defaultDrawingAnatomy(), null)
+  );
+  const [frontDims, setFrontDims] = useState<{ w: number; h: number }>({
+    w: initialRig.views.front?.width || 400,
+    h: initialRig.views.front?.height || 500,
+  });
   const jointSurfaceRef = useRef<HTMLDivElement | null>(null);
 
   // Live 360° Preview Refs
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const frontPackRef = useRef<RiggedCharacterPack | null>(null);
   const rigCacheRef = useRef<MasterRigRuntimeCache | null>(null);
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
 
   // Hidden file inputs
   const singleSlotInputRef = useRef<HTMLInputElement | null>(null);
@@ -192,13 +314,21 @@ export default function CharacterMasterModal({
       setPendingAiApproval(null);
       setNotice(null);
       setPreviewAngleDeg(0);
+      setLivePinOverride(null);
+      livePinOverrideRef.current = null;
+      setLivePaintStrokes([]);
+      livePaintStrokesRef.current = [];
+      if (initialRig.views.front?.width && initialRig.views.front?.height) {
+        setFrontDims({ w: initialRig.views.front.width, h: initialRig.views.front.height });
+      }
     }
   }, [open, initialRig]);
 
-  // Keep live 360° preview rig cache synced whenever draft views or creatureClass changes
+  // Non-blocking off-main-thread Worker rig build whenever committed `draft` changes!
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    const abortCtrl = new AbortController();
     const frontUrl = draft.views.front?.dataUrl;
     if (!frontUrl) return;
 
@@ -208,25 +338,44 @@ export default function CharacterMasterModal({
       rigCacheRef.current.syncRig(draft);
     }
 
-    void loadCanvasFromUrl(frontUrl).then((canvas) => {
-      if (cancelled) return;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return;
-      const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-      const anatomy = analyzeDrawingAnatomyFromPixels(rgba, canvas.width, canvas.height);
-      const pack = buildRiggedCharacterPack(canvas, anatomy, {
-        creatureClass: draft.creatureClass,
-        meshOptions: {
-          customSlitLines: draft.customSlitLines,
-          jointOverrides: draft.jointOverrides,
-        },
+    void loadCanvasFromUrl(frontUrl)
+      .then(async (canvas) => {
+        if (cancelled) return;
+        setFrontDims({ w: Math.max(16, canvas.width), h: Math.max(16, canvas.height) });
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return;
+        const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        const anatomy = analyzeDrawingAnatomyFromPixels(rgba, canvas.width, canvas.height);
+
+        // Immediately seed joints from fast (<1 ms) pixel anatomy before Worker finishes!
+        if (!frontPackRef.current) {
+          setDetectedJoints(computeAnatomyJointDefaults(anatomy, null));
+        }
+
+        const pack = await buildRiggedCharacterPackAsync(canvas, anatomy, {
+          creatureClass: draft.creatureClass,
+          meshOptions: {
+            customSlitLines: draft.customSlitLines,
+            jointOverrides: draft.jointOverrides,
+            weightStrokes: draft.weightStrokes,
+          },
+          channelKey: 'master-modal-front',
+          signal: abortCtrl.signal,
+        });
+        if (cancelled) return;
+        frontPackRef.current = pack;
+        rigCacheRef.current?.prewarmAngle('front', pack, frontUrl);
+
+        // Refine default joint positions from medial-axis skeleton when no custom override exists on a joint
+        setDetectedJoints(computeAnatomyJointDefaults(pack.anatomy, pack));
+      })
+      .catch(() => {
+        // Ignore superseded/aborted worker builds
       });
-      frontPackRef.current = pack;
-      rigCacheRef.current?.prewarmAngle('front', pack, frontUrl);
-    });
 
     return () => {
       cancelled = true;
+      abortCtrl.abort();
     };
   }, [open, draft]);
 
@@ -239,11 +388,19 @@ export default function CharacterMasterModal({
     }
   }, [open]);
 
-  // Live 360° animated preview loop (~30 FPS light preview)
+  // Live 360° animated preview loop (cycles visemes on Tab 3 when custom mouths are present!)
+  const hasCustomMouthSprites = Boolean(
+    draft.faceSprites?.mouths &&
+      Object.values(draft.faceSprites.mouths).some((v) => Boolean(v))
+  );
+  const hasCustomMouthRef = useRef(hasCustomMouthSprites);
+  hasCustomMouthRef.current = hasCustomMouthSprites;
+
   useEffect(() => {
     if (!open) return;
     let rafId = 0;
     const startMs = performance.now();
+    const demoVisemes: PrestonBlairViseme[] = ['closed', 'AA', 'EE', 'OH'];
 
     const tick = (now: number) => {
       rafId = requestAnimationFrame(tick);
@@ -256,7 +413,6 @@ export default function CharacterMasterModal({
       const tSec = (now - startMs) * 0.001;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Subtle ivory drafting table ring under feet
       ctx.save();
       ctx.fillStyle = 'rgba(28, 25, 23, 0.10)';
       ctx.beginPath();
@@ -265,6 +421,13 @@ export default function CharacterMasterModal({
       ctx.restore();
 
       const pose = evaluateCartoonDancePose(tSec, null, 24, 'natural');
+      if (activeTabRef.current === 'face' || hasCustomMouthRef.current) {
+        const slot = Math.floor(tSec * 2.2) % demoVisemes.length;
+        const vis = demoVisemes[slot];
+        pose.viseme = vis;
+        pose.mouthOpen = vis === 'closed' ? 0 : 0.65;
+      }
+
       const pad = 12;
       const bounds = {
         x: pad,
@@ -276,6 +439,7 @@ export default function CharacterMasterModal({
 
       renderMasterRigCharacter(ctx, rigCacheRef.current, pack, pose, bounds, {
         boilTick: Math.floor(tSec * 6),
+        timeSec: tSec,
         yawDeg: previewAngleDeg,
         universalAction: defaultAction,
       });
@@ -287,6 +451,29 @@ export default function CharacterMasterModal({
 
   const refAnchors: ViewAnchors = draft.views.front?.anchors ?? defaultViewAnchors();
   const viewCount = countRigViews(draft);
+
+  // Resolve effective UV for every canonical joint (<0.1 ms, zero Worker call during drag!)
+  const effectiveJointPositions = useMemo(() => {
+    const out: Record<string, { x: number; y: number }> = {};
+    const ov = draft.jointOverrides ?? {};
+    for (const spec of CANONICAL_JOINT_PINS) {
+      if (livePinOverride && livePinOverride.id === spec.id) {
+        out[spec.id] = { x: livePinOverride.x, y: livePinOverride.y };
+      } else if (ov[spec.id]) {
+        out[spec.id] = ov[spec.id];
+      } else if (spec.legacyId && ov[spec.legacyId]) {
+        out[spec.id] = ov[spec.legacyId];
+      } else {
+        out[spec.id] = detectedJoints[spec.id] ?? { x: 0.5, y: 0.5 };
+      }
+    }
+    return out;
+  }, [draft.jointOverrides, detectedJoints, livePinOverride]);
+
+  const displayedWeightStrokes = useMemo(
+    () => [...(draft.weightStrokes ?? []), ...livePaintStrokes],
+    [draft.weightStrokes, livePaintStrokes]
+  );
 
   const handleUploadSlotFile = useCallback(
     async (file: File, angle: CharacterViewAngle) => {
@@ -407,7 +594,6 @@ export default function CharacterMasterModal({
         setDraft((prev) => {
           const nextViews = { ...prev.views };
           for (const s of slots) {
-            // Keep existing front intact if user already had one and only wanted secondary? Actually multi-sheet replaces consistently so all heights match 0.0px!
             nextViews[s.angle] = s;
           }
           return {
@@ -426,7 +612,7 @@ export default function CharacterMasterModal({
     [t]
   );
 
-  // Light-Table Tracing Canvas handlers (draw Side/Back/3-4 cleanly over blue 5-line anchor grid!)
+  // Light-Table Tracing Canvas handlers
   const openTracePad = useCallback(
     (angle: Exclude<CharacterViewAngle, 'front'>, underlayUrl: string | null = null) => {
       setTracingAngle(angle);
@@ -439,7 +625,6 @@ export default function CharacterMasterModal({
         const ctx = c.getContext('2d');
         if (!ctx) return;
         ctx.clearRect(0, 0, c.width, c.height);
-        // If user already drew/uploaded this slot and clicked edit without AI underlay, load it onto pad
         const existingUrl = !underlayUrl ? draft.views[angle]?.dataUrl : null;
         if (existingUrl) {
           void loadCanvasFromUrl(existingUrl).then((imgCanvas) => {
@@ -521,7 +706,7 @@ export default function CharacterMasterModal({
     soundEngine.click(1.2);
   };
 
-  // Optional AI Side-Profile Guide handler (strictly opt-in!)
+  // Optional AI Side-Profile Guide handler
   const handleRunAiDraft = async (mode: 'trace' | 'style_lock') => {
     const frontUrl = draft.views.front?.dataUrl;
     if (!frontUrl || !aiDrawerAngle) return;
@@ -543,14 +728,12 @@ export default function CharacterMasterModal({
       }
 
       if (mode === 'trace') {
-        // 0% AI pixels in final character! Open AI draft as blue light-table tracing guide!
         const target = aiDrawerAngle;
         setAiDrawerAngle(null);
         openTracePad(target, res.imageDataUrl);
         return;
       }
 
-      // Style-Lock Direct Mode: strip white paper + lock to artist's palette/ink/grain + align height + side-by-side approval!
       const [aiCanvas, frontCanvas] = await Promise.all([
         loadCanvasFromUrl(res.imageDataUrl),
         loadCanvasFromUrl(frontUrl),
@@ -571,44 +754,90 @@ export default function CharacterMasterModal({
     }
   };
 
-  // Tab 2: 5-second Joint Pins & Scissors Slit interaction
-  const getJointUV = (e: React.PointerEvent<HTMLDivElement>) => {
+  // Tab 2: < 1 ms Joint Pin Dragging, Scissors Slit, & Region/Weight Brush
+  const getJointUV = (e: React.PointerEvent<HTMLElement>) => {
     const box = jointSurfaceRef.current?.getBoundingClientRect();
     if (!box) return { x: 0.5, y: 0.5 };
     return {
-      x: Math.max(0.03, Math.min(0.97, (e.clientX - box.left) / Math.max(1, box.width))),
-      y: Math.max(0.03, Math.min(0.97, (e.clientY - box.top) / Math.max(1, box.height))),
+      x: Math.max(0.02, Math.min(0.98, (e.clientX - box.left) / Math.max(1, box.width))),
+      y: Math.max(0.02, Math.min(0.98, (e.clientY - box.top) / Math.max(1, box.height))),
     };
   };
 
   const handleJointPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const uv = getJointUV(e);
     if (jointTool === 'scissors') {
-      const uv = getJointUV(e);
+      safeSetPointerCapture(e.currentTarget, e.pointerId);
       setPendingSlitStart(uv);
       setPendingSlitCur(uv);
+    } else if (jointTool === 'paint') {
+      safeSetPointerCapture(e.currentTarget, e.pointerId);
+      isPaintingRef.current = true;
+      const stroke: WeightStroke = {
+        region: activePaintRegion,
+        x: Number(uv.x.toFixed(4)),
+        y: Number(uv.y.toFixed(4)),
+        radius: paintBrushRadius,
+        strength: 0.9,
+      };
+      livePaintStrokesRef.current = [stroke];
+      setLivePaintStrokes([stroke]);
     }
   };
 
   const handleJointPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const uv = getJointUV(e);
     if (draggingPinId) {
-      setDraft((prev) => ({
-        ...prev,
-        jointOverrides: {
-          ...(prev.jointOverrides ?? {}),
-          [draggingPinId]: uv,
-        },
-        updatedAt: Date.now(),
-      }));
+      // < 1 ms local SVG skeleton preview — NEVER calls setDraft or buildRiggedCharacterPack during move!
+      const next = {
+        id: draggingPinId,
+        x: Number(uv.x.toFixed(4)),
+        y: Number(uv.y.toFixed(4)),
+      };
+      livePinOverrideRef.current = next;
+      setLivePinOverride(next);
     } else if (pendingSlitStart) {
       setPendingSlitCur(uv);
+    } else if (isPaintingRef.current && jointTool === 'paint') {
+      const curList = livePaintStrokesRef.current;
+      const last = curList[curList.length - 1];
+      if (!last || Math.hypot(uv.x - last.x, uv.y - last.y) >= Math.max(0.014, paintBrushRadius * 0.25)) {
+        const nextStroke: WeightStroke = {
+          region: activePaintRegion,
+          x: Number(uv.x.toFixed(4)),
+          y: Number(uv.y.toFixed(4)),
+          radius: paintBrushRadius,
+          strength: 0.9,
+        };
+        const updated = [...curList, nextStroke];
+        livePaintStrokesRef.current = updated;
+        setLivePaintStrokes(updated);
+      }
     }
   };
 
   const handleJointPointerUp = () => {
     if (draggingPinId) {
+      const committed = livePinOverrideRef.current;
       setDraggingPinId(null);
+      setLivePinOverride(null);
+      livePinOverrideRef.current = null;
+      if (committed) {
+        const spec = CANONICAL_JOINT_PINS.find((p) => p.id === committed.id);
+        setDraft((prev) => {
+          const cleaned = { ...(prev.jointOverrides ?? {}) };
+          if (spec?.legacyId) delete cleaned[spec.legacyId];
+          cleaned[committed.id] = { x: committed.x, y: committed.y };
+          return {
+            ...prev,
+            jointOverrides: cleaned,
+            updatedAt: Date.now(),
+          };
+        });
+        soundEngine.click(1.08);
+      }
     }
+
     if (pendingSlitStart && pendingSlitCur) {
       const dist = Math.hypot(pendingSlitCur.x - pendingSlitStart.x, pendingSlitCur.y - pendingSlitStart.y);
       if (dist > 0.04) {
@@ -620,13 +849,28 @@ export default function CharacterMasterModal({
         };
         setDraft((prev) => ({
           ...prev,
-          customSlitLines: [...(prev.customSlitLines ?? []).slice(-5), nextLine],
+          customSlitLines: [...(prev.customSlitLines ?? []).slice(-7), nextLine],
           updatedAt: Date.now(),
         }));
         soundEngine.click(1.16);
       }
       setPendingSlitStart(null);
       setPendingSlitCur(null);
+    }
+
+    if (isPaintingRef.current) {
+      isPaintingRef.current = false;
+      const added = livePaintStrokesRef.current;
+      livePaintStrokesRef.current = [];
+      setLivePaintStrokes([]);
+      if (added.length > 0) {
+        setDraft((prev) => ({
+          ...prev,
+          weightStrokes: [...(prev.weightStrokes ?? []), ...added].slice(-240),
+          updatedAt: Date.now(),
+        }));
+        soundEngine.click(1.12);
+      }
     }
   };
 
@@ -638,7 +882,7 @@ export default function CharacterMasterModal({
       setDraft((prev) => ({
         ...prev,
         faceSprites: {
-          autoInkStyle: false,
+          autoInkStyle: true,
           ...(prev.faceSprites ?? {}),
           mouths: {
             ...(prev.faceSprites?.mouths ?? {}),
@@ -655,10 +899,19 @@ export default function CharacterMasterModal({
 
   if (!open) return null;
 
+  // Compute unclipped exact aspect-fitted calibration box dimensions (fits 100% inside 1280×800 without scrolling!)
+  const maxCalibH = 388;
+  const maxCalibW = 332;
+  const aspect = Math.max(0.45, Math.min(1.6, frontDims.w / Math.max(1, frontDims.h)));
+  const fitW = Math.round(Math.min(maxCalibW, maxCalibH * aspect));
+  const fitH = Math.round(fitW / aspect);
+
+  const activeBadgePinId = draggingPinId ?? hoveredPinId ?? selectedPinId;
+
   const modalNode = (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-[9999] flex items-center justify-center p-2 sm:p-4 bg-black/75 backdrop-blur-sm"
+      className="fixed inset-0 z-[9999] flex items-center justify-center p-2 sm:p-3 bg-black/75 backdrop-blur-sm"
     >
       <div
         ref={modalDialogRef}
@@ -716,8 +969,8 @@ export default function CharacterMasterModal({
         />
 
         {/* HEADER + LIVE 360° PREVIEW */}
-        <div className="px-4 py-3 border-b border-desk-border/80 bg-desk-surface/60">
-          <div className="flex items-center justify-between gap-2 mb-2.5">
+        <div className="px-4 py-2.5 border-b border-desk-border/80 bg-desk-surface/60 shrink-0">
+          <div className="flex items-center justify-between gap-2 mb-2">
             <div className="flex items-center gap-2 min-w-0">
               <Sparkles className="w-4 h-4 text-ink-brass shrink-0" />
               <h2 id="char-master-modal-title" className="text-sm sm:text-base font-bold tracking-tight truncate">
@@ -736,7 +989,7 @@ export default function CharacterMasterModal({
             <button
               type="button"
               onClick={onClose}
-              className="min-w-[44px] min-h-[44px] p-2 rounded-lg inline-flex items-center justify-center text-desk-muted hover:text-desk-ink hover:bg-white/5 transition-colors"
+              className="min-w-[40px] min-h-[40px] p-1.5 rounded-lg inline-flex items-center justify-center text-desk-muted hover:text-desk-ink hover:bg-white/5 transition-colors"
               aria-label={t('exportCloseAria')}
             >
               <X className="w-4 h-4" />
@@ -745,15 +998,14 @@ export default function CharacterMasterModal({
 
           <div className="flex flex-col sm:flex-row items-center gap-3">
             {/* Compact Backlit Live 360° Preview */}
-            <div className="relative w-28 h-28 sm:w-32 sm:h-32 shrink-0 rounded-xl bg-[#F8F4EC] border border-ink-brass/40 shadow-inner overflow-hidden flex items-center justify-center">
+            <div className="relative w-24 h-24 sm:w-28 sm:h-28 shrink-0 rounded-xl bg-[#F8F4EC] border border-ink-brass/40 shadow-inner overflow-hidden flex items-center justify-center">
               <canvas ref={previewCanvasRef} width={160} height={160} className="w-full h-full block" />
               <span className="absolute bottom-1 right-1.5 px-1.5 py-0.5 rounded bg-neutral-950/75 text-[11px] font-mono text-ink-brass">
                 {previewAngleDeg > 0 ? `+${previewAngleDeg}°` : `${previewAngleDeg}°`}
               </span>
             </div>
 
-            <div className="flex-1 w-full min-w-0 space-y-2">
-              {/* 360° Smooth Turn Slider + Quick Angle Snaps */}
+            <div className="flex-1 w-full min-w-0 space-y-1.5">
               <div>
                 <div className="flex items-center justify-between text-[11px] font-semibold mb-1">
                   <span className="text-desk-muted">{t('v4TurnPreviewLabel')}</span>
@@ -791,7 +1043,6 @@ export default function CharacterMasterModal({
                 />
               </div>
 
-              {/* 7-Class Universal Creature Type Selector */}
               <div>
                 <div className="text-[11px] font-semibold text-desk-muted mb-1">
                   {t('v4CreatureTypeLabel')}
@@ -811,7 +1062,7 @@ export default function CharacterMasterModal({
                             updatedAt: Date.now(),
                           }));
                         }}
-                        className={`px-2 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1 transition-all ${
+                        className={`px-2 py-0.5 rounded-full text-[11px] font-bold inline-flex items-center gap-1 transition-all ${
                           active
                             ? 'bg-ink-brass text-neutral-950 shadow'
                             : 'bg-white/5 border border-desk-border text-desk-muted hover:text-desk-ink hover:border-ink-brass/40'
@@ -829,7 +1080,7 @@ export default function CharacterMasterModal({
         </div>
 
         {/* 3 CLEAN TABS */}
-        <div className="px-3 sm:px-4 pt-2 border-b border-desk-border flex items-center gap-0.5 sm:gap-1 bg-desk-panel overflow-x-auto">
+        <div className="px-3 sm:px-4 pt-1.5 border-b border-desk-border flex items-center gap-0.5 sm:gap-1 bg-desk-panel overflow-x-auto shrink-0">
           {(
             [
               { id: 'angles', label: t('v4TabAngles') },
@@ -844,7 +1095,7 @@ export default function CharacterMasterModal({
                 soundEngine.click(1.06);
                 setActiveTab(tab.id);
               }}
-              className={`px-2.5 sm:px-3 py-2 text-[11px] sm:text-xs font-bold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+              className={`px-2.5 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === tab.id
                   ? 'border-ink-brass text-ink-brass'
                   : 'border-transparent text-desk-muted hover:text-desk-ink'
@@ -856,7 +1107,7 @@ export default function CharacterMasterModal({
         </div>
 
         {/* BODY CONTENT */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3">
           {notice && (
             <div
               className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 border ${
@@ -885,7 +1136,6 @@ export default function CharacterMasterModal({
                 if (files.length > 0) void handleUploadBatchPhotos(files);
               }}
             >
-              {/* 4 Backlit Polaroid Angle Slots */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 {ANGLE_CARDS.map(({ angle, labelKey, yawSnap }) => {
                   const slot = draft.views[angle];
@@ -920,7 +1170,6 @@ export default function CharacterMasterModal({
                         )}
                       </div>
 
-                      {/* Polaroid Ivory Paper Frame */}
                       <button
                         type="button"
                         onClick={() => {
@@ -947,7 +1196,6 @@ export default function CharacterMasterModal({
                         )}
                       </button>
 
-                      {/* Clean Action Buttons per Slot */}
                       {isFront ? (
                         <button
                           type="button"
@@ -1028,12 +1276,11 @@ export default function CharacterMasterModal({
                 })}
               </div>
 
-              {/* Clean 2-Option Multi-Angle Upload Row: Batch Photos OR Single A4 Sheet */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => batchPhotosInputRef.current?.click()}
-                  className="py-2.5 px-3 rounded-xl bg-ink-brass/15 hover:bg-ink-brass/25 border border-ink-brass/45 text-ink-brass text-xs font-bold inline-flex items-center justify-center gap-2 transition-colors"
+                  className="py-2 px-3 rounded-xl bg-ink-brass/15 hover:bg-ink-brass/25 border border-ink-brass/45 text-ink-brass text-xs font-bold inline-flex items-center justify-center gap-2 transition-colors"
                 >
                   <Upload className="w-4 h-4 shrink-0" />
                   <span>{t('v4BtnMultiPhotos')}</span>
@@ -1041,14 +1288,13 @@ export default function CharacterMasterModal({
                 <button
                   type="button"
                   onClick={() => multiSheetInputRef.current?.click()}
-                  className="py-2.5 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-desk-border hover:border-ink-brass/45 text-desk-ink text-xs font-bold inline-flex items-center justify-center gap-2 transition-colors"
+                  className="py-2 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-desk-border hover:border-ink-brass/45 text-desk-ink text-xs font-bold inline-flex items-center justify-center gap-2 transition-colors"
                 >
                   <FileSpreadsheet className="w-4 h-4 text-ink-brass shrink-0" />
                   <span>{t('v4BtnMultiPoseShort')}</span>
                 </button>
               </div>
 
-              {/* Strictly OPTIONAL AI Side-Profile Guide Drawer */}
               {aiDrawerAngle && (
                 <div className="rounded-xl border border-amber-400/40 bg-amber-950/25 p-3 space-y-2.5">
                   <div className="flex items-start gap-2 text-xs text-amber-200">
@@ -1079,7 +1325,6 @@ export default function CharacterMasterModal({
                         </button>
                       </div>
 
-                      {/* Optional Personal Gemini Key Accordion (Zero Server Cost!) */}
                       <div className="pt-1">
                         <button
                           type="button"
@@ -1104,7 +1349,6 @@ export default function CharacterMasterModal({
                       </div>
                     </div>
                   ) : (
-                    /* Side-by-Side Comparison & Artist Approval Gate */
                     <div className="space-y-2.5">
                       <div className="text-xs font-bold text-ink-brass">{t('v4AiApproveTitle')}</div>
                       <div className="grid grid-cols-2 gap-2.5">
@@ -1162,7 +1406,7 @@ export default function CharacterMasterModal({
             </div>
           )}
 
-          {/* ================= LIGHT-TABLE TRACING CANVAS (Draw Side/Back over 5-Line Blue Guides!) ================= */}
+          {/* ================= LIGHT-TABLE TRACING CANVAS ================= */}
           {activeTab === 'angles' && tracingAngle && (
             <div className="space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1175,7 +1419,7 @@ export default function CharacterMasterModal({
                       traceTool === 'pen' ? 'bg-ink-brass text-neutral-950' : 'bg-white/5 text-desk-muted'
                     }`}
                   >
-                    <Pencil className="w-3 h-3" /> Kalem
+                    <Pencil className="w-3 h-3" /> {t('toolGpen')}
                   </button>
                   <button
                     type="button"
@@ -1184,7 +1428,7 @@ export default function CharacterMasterModal({
                       traceTool === 'eraser' ? 'bg-ink-brass text-neutral-950' : 'bg-white/5 text-desk-muted'
                     }`}
                   >
-                    <Eraser className="w-3 h-3" /> Silgi
+                    <Eraser className="w-3 h-3" /> {t('toolEraser')}
                   </button>
                   <button
                     type="button"
@@ -1219,8 +1463,7 @@ export default function CharacterMasterModal({
                 </div>
               </div>
 
-              {/* Backlit Glass Paper + Onion Skin + 5 Blue Anchor Calibration Lines */}
-              <div className="relative mx-auto w-full max-w-[340px] aspect-square rounded-xl bg-[#FAF6ED] border-2 border-ink-brass/50 overflow-hidden shadow-inner">
+              <div className="relative mx-auto w-full max-w-[336px] max-h-[min(50vh,380px)] aspect-square rounded-xl bg-[#FAF6ED] border-2 border-ink-brass/50 overflow-hidden shadow-inner">
                 {traceUnderlayUrl && (
                   <img
                     src={traceUnderlayUrl}
@@ -1229,7 +1472,6 @@ export default function CharacterMasterModal({
                     style={{ filter: 'sepia(1) hue-rotate(175deg) saturate(2.2)' }}
                   />
                 )}
-                {/* 5 Horizontal Blue Calibration Lines */}
                 {[
                   { v: refAnchors.headTopV, lbl: t('rigLandmarkHead') },
                   { v: refAnchors.eyeLineV, lbl: t('rigLandmarkEye') },
@@ -1282,15 +1524,160 @@ export default function CharacterMasterModal({
             </div>
           )}
 
-          {/* ================= TAB 2: 5-SECOND JOINT PINS & SCISSORS ================= */}
+          {/* ================= TAB 2: 2-COLUMN UNCLIPPED CALIBRATOR (PINS + SCISSORS + REGION PAINT) ================= */}
           {activeTab === 'joints' && (
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5">
+            <div className="grid grid-cols-1 md:grid-cols-[minmax(0,344px)_1fr] gap-3 items-start">
+              {/* LEFT: Exact Aspect-Fitted Unclipped Character Frame (Hat to Shoes visible at 1280×800!) */}
+              <div className="flex flex-col items-center justify-center rounded-xl bg-desk-surface/45 border border-desk-border p-2">
+                <div
+                  ref={jointSurfaceRef}
+                  onPointerDown={handleJointPointerDown}
+                  onPointerMove={handleJointPointerMove}
+                  onPointerUp={handleJointPointerUp}
+                  onPointerCancel={handleJointPointerUp}
+                  style={{ width: `${fitW}px`, height: `${fitH}px` }}
+                  className={`relative max-w-full max-h-[min(52vh,400px)] rounded-xl bg-[#FAF6ED] border border-ink-brass/50 overflow-hidden select-none touch-none shadow-inner ${
+                    jointTool === 'scissors' || jointTool === 'paint' ? 'cursor-crosshair' : 'cursor-default'
+                  }`}
+                >
+                  {draft.views.front?.dataUrl && (
+                    <img
+                      src={draft.views.front.dataUrl}
+                      alt="Calibration"
+                      className="w-full h-full block pointer-events-none"
+                    />
+                  )}
+
+                  {/* SVG Overlay: Weight Paint Heatmap + Anatomical Bone Links + Scissors Slits */}
+                  <svg
+                    viewBox="0 0 100 100"
+                    className="absolute inset-0 w-full h-full pointer-events-none"
+                    preserveAspectRatio="none"
+                  >
+                    {/* Color-coded weight brush heatmap strokes */}
+                    {displayedWeightStrokes.map((st, idx) => {
+                      const regSpec = PAINT_REGIONS.find((r) => r.region === st.region) ?? PAINT_REGIONS[0];
+                      return (
+                        <circle
+                          key={`ws-${idx}`}
+                          cx={st.x * 100}
+                          cy={st.y * 100}
+                          r={st.radius * 100}
+                          fill={regSpec.color}
+                          fillOpacity={jointTool === 'paint' ? 0.34 : 0.16}
+                        />
+                      );
+                    })}
+
+                    {/* Semi-transparent anatomical skeleton bone connections */}
+                    {jointTool === 'pin' &&
+                      SKELETON_BONE_LINKS.map(([aId, bId]) => {
+                        const a = effectiveJointPositions[aId];
+                        const b = effectiveJointPositions[bId];
+                        if (!a || !b) return null;
+                        return (
+                          <line
+                            key={`${aId}-${bId}`}
+                            x1={a.x * 100}
+                            y1={a.y * 100}
+                            x2={b.x * 100}
+                            y2={b.y * 100}
+                            stroke="#1C1917"
+                            strokeOpacity="0.42"
+                            strokeWidth="0.95"
+                            strokeLinecap="round"
+                          />
+                        );
+                      })}
+
+                    {/* Existing & Live Scissors Slit Lines */}
+                    {(draft.customSlitLines ?? []).map((ln, i) => (
+                      <line
+                        key={`slit-${i}`}
+                        x1={ln.x0 * 100}
+                        y1={ln.y0 * 100}
+                        x2={ln.x1 * 100}
+                        y2={ln.y1 * 100}
+                        stroke="#E11D48"
+                        strokeWidth="1.4"
+                        strokeDasharray="2.5 2"
+                      />
+                    ))}
+                    {pendingSlitStart && pendingSlitCur && (
+                      <line
+                        x1={pendingSlitStart.x * 100}
+                        y1={pendingSlitStart.y * 100}
+                        x2={pendingSlitCur.x * 100}
+                        y2={pendingSlitCur.y * 100}
+                        stroke="#FB7185"
+                        strokeWidth="1.6"
+                        strokeDasharray="2 1.5"
+                      />
+                    )}
+                  </svg>
+
+                  {/* Draggable Canonical Joint Pins + >= 11px Readable Badge */}
+                  {jointTool === 'pin' &&
+                    CANONICAL_JOINT_PINS.map((pin) => {
+                      const pos = effectiveJointPositions[pin.id] ?? { x: 0.5, y: 0.5 };
+                      const isActive = activeBadgePinId === pin.id;
+                      const labelText = localizePinOrPartLabel(pin.labelTr, locale);
+                      return (
+                        <div
+                          key={pin.id}
+                          style={{
+                            left: `${pos.x * 100}%`,
+                            top: `${pos.y * 100}%`,
+                          }}
+                          className={`absolute -translate-x-1/2 -translate-y-1/2 ${
+                            isActive ? 'z-30' : pin.primary ? 'z-20' : 'z-10'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onPointerEnter={() => setHoveredPinId(pin.id)}
+                            onPointerLeave={() => setHoveredPinId((cur) => (cur === pin.id ? null : cur))}
+                            onFocus={() => setSelectedPinId(pin.id)}
+                            onPointerDown={(e) => {
+                              e.stopPropagation();
+                              if (jointSurfaceRef.current) {
+                                safeSetPointerCapture(jointSurfaceRef.current, e.pointerId);
+                              }
+                              setSelectedPinId(pin.id);
+                              setDraggingPinId(pin.id);
+                              livePinOverrideRef.current = { id: pin.id, x: pos.x, y: pos.y };
+                            }}
+                            aria-label={labelText}
+                            className={`rounded-full border-2 shadow-md transition-transform cursor-grab active:cursor-grabbing ${
+                              isActive
+                                ? 'w-5 h-5 bg-rose-500 border-white scale-110'
+                                : pin.primary
+                                  ? 'w-4 h-4 bg-ink-brass border-neutral-950 hover:scale-125'
+                                  : 'w-3.5 h-3.5 bg-amber-300/95 border-neutral-900 hover:scale-125'
+                            }`}
+                          />
+                          {isActive && (
+                            <span
+                              className={`pointer-events-none absolute left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-md bg-neutral-950/90 text-[#FAF6ED] text-[11px] font-bold whitespace-nowrap shadow ${
+                                pos.y < 0.14 ? 'top-5' : '-top-6'
+                              }`}
+                            >
+                              {labelText}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+
+              {/* RIGHT: 3-Tool Switcher + Region Paint Palette + Pin Selector */}
+              <div className="space-y-3 min-w-0">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
                     onClick={() => setJointTool('pin')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors ${
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors ${
                       jointTool === 'pin'
                         ? 'bg-ink-brass text-neutral-950 shadow'
                         : 'bg-white/5 text-desk-muted hover:text-desk-ink'
@@ -1302,7 +1689,7 @@ export default function CharacterMasterModal({
                   <button
                     type="button"
                     onClick={() => setJointTool('scissors')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors ${
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors ${
                       jointTool === 'scissors'
                         ? 'bg-rose-500 text-white shadow'
                         : 'bg-white/5 text-desk-muted hover:text-desk-ink'
@@ -1311,99 +1698,134 @@ export default function CharacterMasterModal({
                     <Scissors className="w-3.5 h-3.5" />
                     {t('v4JointToolScissors')}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setJointTool('paint')}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors ${
+                      jointTool === 'paint'
+                        ? 'bg-emerald-500 text-neutral-950 shadow'
+                        : 'bg-white/5 text-desk-muted hover:text-desk-ink'
+                    }`}
+                  >
+                    <Paintbrush className="w-3.5 h-3.5" />
+                    {t('v4JointToolPaint' as TranslationKey)}
+                  </button>
                 </div>
+
+                <p className="text-xs text-desk-muted leading-relaxed">
+                  {jointTool === 'pin'
+                    ? t('v4JointHintPin')
+                    : jointTool === 'scissors'
+                      ? t('v4JointHintScissors')
+                      : t('v4JointHintPaint' as TranslationKey)}
+                </p>
+
+                {jointTool === 'pin' && (
+                  <div className="rounded-xl bg-desk-surface/55 border border-desk-border p-2.5 space-y-2">
+                    <div className="grid grid-cols-2 gap-1">
+                      {CANONICAL_JOINT_PINS.map((pin) => {
+                        const isSel = selectedPinId === pin.id;
+                        return (
+                          <button
+                            key={pin.id}
+                            type="button"
+                            onClick={() => setSelectedPinId(pin.id)}
+                            className={`px-2 py-1 rounded-lg text-[11px] font-bold text-left truncate border transition-colors ${
+                              isSel
+                                ? 'bg-ink-brass/20 border-ink-brass text-ink-brass'
+                                : 'bg-white/5 border-transparent text-desk-muted hover:text-desk-ink'
+                            }`}
+                          >
+                            {localizePinOrPartLabel(pin.labelTr, locale)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {jointTool === 'paint' && (
+                  <div className="rounded-xl bg-desk-surface/55 border border-desk-border p-3 space-y-2.5">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {PAINT_REGIONS.map((reg) => {
+                        const active = activePaintRegion === reg.region;
+                        return (
+                          <button
+                            key={reg.region}
+                            type="button"
+                            onClick={() => setActivePaintRegion(reg.region)}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-2 border transition-colors ${
+                              active
+                                ? 'bg-white/15 border-ink-brass text-desk-ink shadow-sm'
+                                : 'bg-white/5 border-desk-border text-desk-muted hover:text-desk-ink'
+                            }`}
+                          >
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: reg.color }}
+                            />
+                            <span className="truncate">{localizePinOrPartLabel(reg.labelTr, locale)}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between text-[11px] font-semibold text-desk-muted mb-1">
+                        <span>{t('v4PaintBrushSize' as TranslationKey)}</span>
+                        <span className="font-mono text-desk-ink">{Math.round(paintBrushRadius * 100)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.03}
+                        max={0.16}
+                        step={0.01}
+                        value={paintBrushRadius}
+                        onChange={(e) => setPaintBrushRadius(Number(e.target.value))}
+                        className="w-full accent-emerald-400 h-1.5 cursor-pointer"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={(draft.weightStrokes?.length ?? 0) === 0}
+                      onClick={() => {
+                        soundEngine.click(0.96);
+                        setDraft((prev) => ({
+                          ...prev,
+                          weightStrokes: undefined,
+                          updatedAt: Date.now(),
+                        }));
+                      }}
+                      className="w-full py-1.5 px-2.5 rounded-lg bg-white/5 hover:bg-white/10 disabled:opacity-40 border border-desk-border text-[11px] font-bold inline-flex items-center justify-center gap-1.5 text-desk-muted hover:text-desk-ink"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      {t('v4PaintClear' as TranslationKey)}
+                    </button>
+                  </div>
+                )}
+
                 <button
                   type="button"
                   onClick={() => {
                     soundEngine.click(1.0);
+                    setLivePinOverride(null);
+                    livePinOverrideRef.current = null;
+                    setLivePaintStrokes([]);
+                    livePaintStrokesRef.current = [];
                     setDraft((prev) => ({
                       ...prev,
                       jointOverrides: undefined,
                       customSlitLines: undefined,
+                      weightStrokes: undefined,
                       updatedAt: Date.now(),
                     }));
                   }}
-                  className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs font-bold inline-flex items-center gap-1 text-desk-muted hover:text-desk-ink"
+                  className="w-full py-2 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-desk-border text-xs font-bold inline-flex items-center justify-center gap-1.5 text-desk-muted hover:text-desk-ink"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                   {t('v4JointReset')}
                 </button>
-              </div>
-
-              <p className="text-[11.5px] text-desk-muted">
-                {jointTool === 'pin' ? t('v4JointHintPin') : t('v4JointHintScissors')}
-              </p>
-
-              <div
-                ref={jointSurfaceRef}
-                onPointerDown={handleJointPointerDown}
-                onPointerMove={handleJointPointerMove}
-                onPointerUp={handleJointPointerUp}
-                onPointerCancel={handleJointPointerUp}
-                className={`relative mx-auto w-full max-w-[320px] aspect-square rounded-xl bg-[#FAF6ED] border border-ink-brass/45 overflow-hidden select-none touch-none ${
-                  jointTool === 'scissors' ? 'cursor-crosshair' : 'cursor-default'
-                }`}
-              >
-                {draft.views.front?.dataUrl && (
-                  <img
-                    src={draft.views.front.dataUrl}
-                    alt="Calibration"
-                    className="w-full h-full object-contain pointer-events-none"
-                  />
-                )}
-
-                {/* Existing & Live Scissors Slit Lines */}
-                <svg
-                  viewBox="0 0 100 100"
-                  className="absolute inset-0 w-full h-full pointer-events-none"
-                  preserveAspectRatio="none"
-                >
-                  {(draft.customSlitLines ?? []).map((ln, i) => (
-                    <line
-                      key={i}
-                      x1={ln.x0 * 100}
-                      y1={ln.y0 * 100}
-                      x2={ln.x1 * 100}
-                      y2={ln.y1 * 100}
-                      stroke="#E11D48"
-                      strokeWidth="1.4"
-                      strokeDasharray="2.5 2"
-                    />
-                  ))}
-                  {pendingSlitStart && pendingSlitCur && (
-                    <line
-                      x1={pendingSlitStart.x * 100}
-                      y1={pendingSlitStart.y * 100}
-                      x2={pendingSlitCur.x * 100}
-                      y2={pendingSlitCur.y * 100}
-                      stroke="#FB7185"
-                      strokeWidth="1.6"
-                      strokeDasharray="2 1.5"
-                    />
-                  )}
-                </svg>
-
-                {/* Draggable Joint Pins */}
-                {jointTool === 'pin' &&
-                  DEFAULT_JOINT_PINS.map((pin) => {
-                    const pos = draft.jointOverrides?.[pin.id] ?? { x: pin.x, y: pin.y };
-                    return (
-                      <button
-                        key={pin.id}
-                        type="button"
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                          setDraggingPinId(pin.id);
-                        }}
-                        style={{
-                          left: `${pos.x * 100}%`,
-                          top: `${pos.y * 100}%`,
-                        }}
-                        className="absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-ink-brass border-2 border-neutral-950 shadow-md hover:scale-125 transition-transform cursor-grab active:cursor-grabbing"
-                        title={localizePinOrPartLabel(pin.labelTr, locale)}
-                      />
-                    );
-                  })}
               </div>
             </div>
           )}
@@ -1437,7 +1859,7 @@ export default function CharacterMasterModal({
               </label>
 
               <div className="space-y-2">
-                <p className="text-[11.5px] text-desk-muted">{t('v4FaceCustomDesc')}</p>
+                <p className="text-xs text-desk-muted">{t('v4FaceCustomDesc')}</p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {MOUTH_KEYS.map((m) => {
                     const customUrl = draft.faceSprites?.mouths?.[m.id];
@@ -1454,16 +1876,41 @@ export default function CharacterMasterModal({
                             <span className="text-[11px] text-neutral-500">{t('rigAutoBadge')}</span>
                           )}
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            mouthTargetRef.current = m.id;
-                            mouthInputRef.current?.click();
-                          }}
-                          className="w-full py-1 rounded-lg bg-white/5 hover:bg-white/10 text-[11px] font-bold"
-                        >
-                          {t('v4BtnUpload')}
-                        </button>
+                        <div className="flex items-center gap-1 w-full">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              mouthTargetRef.current = m.id;
+                              mouthInputRef.current?.click();
+                            }}
+                            className="flex-1 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-[11px] font-bold"
+                          >
+                            {t('v4BtnUpload')}
+                          </button>
+                          {customUrl && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDraft((prev) => {
+                                  const nextMouths = { ...(prev.faceSprites?.mouths ?? {}) };
+                                  delete nextMouths[m.id];
+                                  return {
+                                    ...prev,
+                                    faceSprites: {
+                                      autoInkStyle: prev.faceSprites?.autoInkStyle ?? true,
+                                      mouths: nextMouths,
+                                    },
+                                    updatedAt: Date.now(),
+                                  };
+                                });
+                              }}
+                              className="p-1 rounded-lg bg-white/5 hover:bg-red-500/20 text-desk-muted hover:text-red-300"
+                              aria-label={t('v4BtnRemove')}
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
@@ -1474,7 +1921,7 @@ export default function CharacterMasterModal({
         </div>
 
         {/* FOOTER */}
-        <div className="px-4 py-3 border-t border-desk-border bg-desk-surface/60 flex items-center justify-end gap-2">
+        <div className="px-4 py-2.5 border-t border-desk-border bg-desk-surface/60 flex items-center justify-end gap-2 shrink-0">
           <button
             type="button"
             onClick={onClose}

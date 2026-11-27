@@ -173,10 +173,37 @@ export default function LayerReferenceRail({
       tiltDeg: 0,
     };
 
+  const validateUploadedImageFile = async (file: File): Promise<boolean> => {
+    if (file.size > 35 * 1024 * 1024) {
+      notify(t('paperImageTooLargeErr'), 'error');
+      return false;
+    }
+    const url = URL.createObjectURL(file);
+    try {
+      const dims = await new Promise<{ w: number; h: number }>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve({ w: el.naturalWidth, h: el.naturalHeight });
+        el.onerror = reject;
+        el.src = url;
+      });
+      if (dims.w * dims.h > 64_000_000 || dims.w < 1 || dims.h < 1) {
+        notify(t('paperImageTooLargeErr'), 'error');
+        return false;
+      }
+      return true;
+    } catch {
+      notify(t('paperImageTooLargeErr'), 'error');
+      return false;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
   const handleUploadReference = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
+      if (!(await validateUploadedImageFile(file))) return;
       const blobKey = await saveBlob(file);
       const swatches = await extractSwatchesFromFile(file);
       addReference({
@@ -197,6 +224,7 @@ export default function LayerReferenceRail({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
+      if (!(await validateUploadedImageFile(file))) return;
       const key = await saveBlob(file);
       setSceneBackground(key);
       notify(t('bgAddedToast'));
@@ -390,6 +418,12 @@ export default function LayerReferenceRail({
                                 aria-hidden="true"
                               />
                             )}
+                            {!isActive && (layer.opacity < 0.99 || layer.blendMode === 'multiply') && (
+                              <span className="font-mono text-[11px] text-desk-muted shrink-0">
+                                {Math.round(layer.opacity * 100)}%
+                                {layer.blendMode === 'multiply' ? '·M' : ''}
+                              </span>
+                            )}
                           </span>
                         )}
                         <button
@@ -467,9 +501,9 @@ export default function LayerReferenceRail({
                           </div>
                           <input
                             type="range"
-                            min={0.1}
+                            min={0.01}
                             max={1}
-                            step={0.05}
+                            step={0.01}
                             value={layer.opacity}
                             onChange={(e) =>
                               updateLayerInCurrentFrame(layer.id, {

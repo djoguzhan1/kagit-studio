@@ -15,9 +15,15 @@ import {
   saveBlob,
 } from './db';
 import { runSmartFloodFill } from './paperWorkerClient';
-import { getGraphiteGrainCanvas, getScreentonePattern, renderPaperSurface } from './brushTextures';
+import {
+  GRAIN_TILE_SIZE,
+  getGraphiteGrainCanvas,
+  getScreentonePattern,
+  renderPaperSurface,
+} from './brushTextures';
 import { renderUnderlayGuide } from './underlayGuides';
 import { applySceneAtmosphere, evaluateCameraAtFrame } from './cameraEngine';
+import { convertMultiplySourceToTransparentCanvas } from './frameComposite';
 import { timelapseRecorder } from './timelapseRecorder';
 
 export interface DirtyRect {
@@ -33,6 +39,14 @@ export interface DirtyUndoEntry {
   before: Uint8ClampedArray;
   after: Uint8ClampedArray;
 }
+
+interface FrameHistoryBucket {
+  undo: DirtyUndoEntry[];
+  redo: DirtyUndoEntry[];
+  bytes: number;
+}
+
+const MAX_TOTAL_HISTORY_BYTES = 48 * 1024 * 1024;
 
 /** Pure helper: extracts a sub-rectangle from a full RGBA pixel buffer (10x less RAM than full-frame undo!) */
 export function extractRgbaRect(
@@ -77,8 +91,13 @@ export interface FloatingSelection {
 }
 
 /** Shared cross-frame lasso clipboard so Ctrl+C on Frame 1 -> Ctrl+V on Frame 2 works */
-let sharedClipboard: { canvas: HTMLCanvasElement; x: number; y: number; w: number; h: number } | null =
-  null;
+let sharedClipboard: {
+  canvas: HTMLCanvasElement;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+} | null = null;
 
 function hexToRgba(hex: string, alpha = 255): [number, number, number, number] {
   const clean = hex.replace('#', '');
@@ -104,19 +123,25 @@ function rgbToHex(r: number, g: number, b: number): string {
 }
 
 function getMaxUndoSteps(): number {
-  const mem = typeof navigator !== 'undefined' ? (navigator as unknown as { deviceMemory?: number }).deviceMemory : 8;
+  const mem =
+    typeof navigator !== 'undefined'
+      ? (navigator as unknown as { deviceMemory?: number }).deviceMemory
+      : 8;
   if (typeof mem === 'number' && mem <= 4) return 24;
   return 40;
 }
 
+function entryByteSize(entry: DirtyUndoEntry): number {
+  return entry.before.byteLength + entry.after.byteLength + 64;
+}
+
 /**
  * 10/10 High-Performance 60/120fps Imperative Canvas2D Studio Engine:
- * - 6 Textured Artist Brushes (G-Pen, 2B Paper-Tooth Graphite, Blue Rough, Marker, 5-Bristle Dry Brush, Halftone Screentone)
- * - Dirty-Rect Undo/Redo (10x lower RAM on phones & tablets!)
- * - Live Mirror Symmetry Drawing & Shift/Shape Geometry
- * - Reference-Aware Gap-Closing Smart Flood Fill Bucket
- * - 4-Corner Direct On-Canvas Free-Transform Box for Lasso + Cross-Frame Clipboard
- * - Physical Paper Styles, Fixed Background Plane, Animator Underlay Guides, & Timelapse Hooks
+ * - Offscreen `strokeCanvas` Stroke Accumulator (`0%` semi-transparent joint knots!)
+ * - World-Locked Seamless `128x128` Paper-Tooth Graphite & Continuous 5-Bristle Dry Brush
+ * - Tapered Tangent-Capsule G-Pen (`0%` high-speed beading) + Stabilizer Tail Catch-Up
+ * - Per-Frame LRU Dirty-Rect Undo/Redo (`<= 48 MB`, survives frame switches!)
+ * - Zero Full-Canvas GPU->CPU Readbacks on Brush Strokes, Undo & Redo
  */
 export class StudioCanvasEngine {
   private displayCanvas: HTMLCanvasElement;
@@ -144,13 +169,24 @@ export class StudioCanvasEngine {
   private tintCtx: CanvasRenderingContext2D;
   private cleanTimelapseCanvas: HTMLCanvasElement | null = null;
 
-  // Scratch canvas for grain-masked graphite dabbing
+  // Offscreen stroke accumulator for homogeneous semi-transparent strokes & erasers
+  private strokeCanvas: HTMLCanvasElement;
+  private strokeCtx: CanvasRenderingContext2D;
+  private hasStrokeBuffer = false;
+  private strokeLayerId: string | null = null;
+  private strokeIsEraser = false;
+  private activeStrokeOpacity = 1;
+
+  // Scratch canvas for grain-masked graphite dabbing (256x256 default, auto-expands for huge brushes)
   private grainScratch: HTMLCanvasElement;
   private grainScratchCtx: CanvasRenderingContext2D;
 
   // Bezier stroke & dirty bounding box state
   private isDrawing = false;
   private activePointerId: number | null = null;
+  private activePointerType = 'mouse';
+  private lastPressure = 0.72;
+  private lastRawPt = { x: 0, y: 0 };
   private strokeBeforeFull: Uint8ClampedArray | null = null;
   private dirtyMinX = 0;
   private dirtyMinY = 0;
@@ -164,6 +200,8 @@ export class StudioCanvasEngine {
   private lastTime = 0;
   private lastWidth = 4;
   private lastVelocity = 0;
+  private lastDryNormal: { nx: number; ny: number } | null = null;
+  private lastDryNormalMirror: { nx: number; ny: number } | null = null;
 
   // Shift straight-line or Shape preview state
   private shapePreview: {
@@ -192,9 +230,8 @@ export class StudioCanvasEngine {
     startAngle: 0,
   };
 
-  // Dirty-Rect Undo / Redo Stacks
-  private undoStack: DirtyUndoEntry[] = [];
-  private redoStack: DirtyUndoEntry[] = [];
+  // Per-Frame LRU Dirty-Rect Undo / Redo Map
+  private frameHistory = new Map<string, FrameHistoryBucket>();
 
   private brush: BrushSettings;
   private onion: OnionSkinConfig;
@@ -235,10 +272,80 @@ export class StudioCanvasEngine {
     this.tintCanvas.height = height;
     this.tintCtx = this.tintCanvas.getContext('2d')!;
 
+    this.strokeCanvas = document.createElement('canvas');
+    this.strokeCanvas.width = width;
+    this.strokeCanvas.height = height;
+    this.strokeCtx = this.strokeCanvas.getContext('2d')!;
+
     this.grainScratch = document.createElement('canvas');
-    this.grainScratch.width = 64;
-    this.grainScratch.height = 64;
+    this.grainScratch.width = 256;
+    this.grainScratch.height = 256;
     this.grainScratchCtx = this.grainScratch.getContext('2d')!;
+  }
+
+  private createLayerCanvas(): HTMLCanvasElement {
+    const c = document.createElement('canvas');
+    c.width = this.width;
+    c.height = this.height;
+    // Initialize 2D context with willReadFrequently so dirty sub-rect reads never stall GPU
+    c.getContext('2d', { willReadFrequently: true });
+    return c;
+  }
+
+  private getOrCreateFrameHistory(frameId: string): FrameHistoryBucket {
+    const existing = this.frameHistory.get(frameId);
+    if (existing) {
+      // Refresh LRU order
+      this.frameHistory.delete(frameId);
+      this.frameHistory.set(frameId, existing);
+      return existing;
+    }
+    const created: FrameHistoryBucket = { undo: [], redo: [], bytes: 0 };
+    this.frameHistory.set(frameId, created);
+    return created;
+  }
+
+  private enforceTotalHistoryBudget(protectedFrameId: string | null): void {
+    let total = 0;
+    for (const bucket of this.frameHistory.values()) {
+      total += bucket.bytes;
+    }
+    if (total <= MAX_TOTAL_HISTORY_BYTES) return;
+
+    for (const [fid, bucket] of this.frameHistory.entries()) {
+      if (total <= MAX_TOTAL_HISTORY_BYTES) break;
+      if (fid === protectedFrameId && this.frameHistory.size > 1) continue;
+      while (bucket.redo.length > 0 && total > MAX_TOTAL_HISTORY_BYTES) {
+        const dropped = bucket.redo.shift()!;
+        const sz = entryByteSize(dropped);
+        bucket.bytes = Math.max(0, bucket.bytes - sz);
+        total -= sz;
+      }
+      while (bucket.undo.length > 0 && total > MAX_TOTAL_HISTORY_BYTES) {
+        if (fid === protectedFrameId && bucket.undo.length <= 4) break;
+        const dropped = bucket.undo.shift()!;
+        const sz = entryByteSize(dropped);
+        bucket.bytes = Math.max(0, bucket.bytes - sz);
+        total -= sz;
+      }
+      if (bucket.undo.length === 0 && bucket.redo.length === 0 && fid !== protectedFrameId) {
+        this.frameHistory.delete(fid);
+      }
+    }
+  }
+
+  public canUndo(): boolean {
+    if (!this.frame) return false;
+    return (this.frameHistory.get(this.frame.id)?.undo.length ?? 0) > 0;
+  }
+
+  public canRedo(): boolean {
+    if (!this.frame) return false;
+    return (this.frameHistory.get(this.frame.id)?.redo.length ?? 0) > 0;
+  }
+
+  public getLayerCanvas(layerId: string): HTMLCanvasElement | undefined {
+    return this.layerCanvases.get(layerId);
   }
 
   public setSettings(
@@ -282,11 +389,18 @@ export class StudioCanvasEngine {
         0
       );
     }
+    if (this.hasStrokeBuffer) {
+      this.strokeCtx.clearRect(0, 0, this.width, this.height);
+      this.hasStrokeBuffer = false;
+      this.strokeLayerId = null;
+    }
     this.isDrawing = false;
     this.activePointerId = null;
     this.strokeBeforeFull = null;
     this.shapePreview = null;
     this.lassoPoints = [];
+    this.lastDryNormal = null;
+    this.lastDryNormalMirror = null;
     this.requestRender();
     return true;
   }
@@ -317,12 +431,30 @@ export class StudioCanvasEngine {
 
   public updateFrameMetadata(frame: CelFrame): void {
     this.frame = frame;
+    const validIds = new Set<string>();
     for (const layer of frame.layers) {
+      validIds.add(layer.id);
       if (!this.layerCanvases.has(layer.id)) {
-        const c = document.createElement('canvas');
-        c.width = this.width;
-        c.height = this.height;
-        this.layerCanvases.set(layer.id, c);
+        this.layerCanvases.set(layer.id, this.createLayerCanvas());
+      }
+    }
+    // Prune deleted layers from memory and from this frame's undo/redo history
+    for (const existingId of [...this.layerCanvases.keys()]) {
+      if (!validIds.has(existingId)) {
+        this.layerCanvases.delete(existingId);
+      }
+    }
+    const hist = this.frameHistory.get(frame.id);
+    if (hist) {
+      const prevUndoLen = hist.undo.length;
+      const prevRedoLen = hist.redo.length;
+      hist.undo = hist.undo.filter((e) => validIds.has(e.layerId));
+      hist.redo = hist.redo.filter((e) => validIds.has(e.layerId));
+      if (hist.undo.length !== prevUndoLen || hist.redo.length !== prevRedoLen) {
+        hist.bytes =
+          hist.undo.reduce((s, e) => s + entryByteSize(e), 0) +
+          hist.redo.reduce((s, e) => s + entryByteSize(e), 0);
+        this.onHistoryChange?.(hist.undo.length > 0, hist.redo.length > 0);
       }
     }
     this.requestRender();
@@ -336,19 +468,23 @@ export class StudioCanvasEngine {
     frameIndex = 0
   ): Promise<void> {
     if (this.floating) this.commitFloatingSelection();
+    if (this.hasStrokeBuffer) {
+      this.strokeCtx.clearRect(0, 0, this.width, this.height);
+      this.hasStrokeBuffer = false;
+      this.strokeLayerId = null;
+    }
     this.frame = frame;
     this.activeLayerId = activeLayerId;
     this.activeFrameIndex = frameIndex;
-    this.undoStack = [];
-    this.redoStack = [];
-    this.onHistoryChange?.(false, false);
+
+    // Preserve per-frame Undo/Redo across frame switches!
+    const hist = this.getOrCreateFrameHistory(frame.id);
+    this.onHistoryChange?.(hist.undo.length > 0, hist.redo.length > 0);
 
     this.layerCanvases.clear();
     for (const layer of frame.layers) {
-      const c = document.createElement('canvas');
-      c.width = this.width;
-      c.height = this.height;
-      const ctx = c.getContext('2d')!;
+      const c = this.createLayerCanvas();
+      const ctx = c.getContext('2d', { willReadFrequently: true })!;
       if (layer.blobKey) {
         const bmp = await getBlobBitmap(layer.blobKey);
         if (bmp && !this.disposed) {
@@ -375,10 +511,16 @@ export class StudioCanvasEngine {
         if (!l.visible || !l.blobKey) continue;
         const bmp = await getBlobBitmap(l.blobKey);
         if (!bmp || this.disposed) continue;
+        ctx.save();
         ctx.globalAlpha = l.opacity;
-        ctx.drawImage(bmp, 0, 0, this.width, this.height);
+        // Convert opaque scanned `multiply` paper layers into ink-only silhouettes so Onion Skin never turns into a solid red/blue box!
+        const drawable =
+          l.blendMode === 'multiply'
+            ? convertMultiplySourceToTransparentCanvas(bmp, this.width, this.height)
+            : bmp;
+        ctx.drawImage(drawable, 0, 0, this.width, this.height);
+        ctx.restore();
       }
-      ctx.globalAlpha = 1;
       out.push(c);
     }
     return out;
@@ -410,6 +552,7 @@ export class StudioCanvasEngine {
     if (this.onion.colored) {
       this.tintCtx.clearRect(0, 0, this.width, this.height);
       this.tintCtx.globalCompositeOperation = 'source-over';
+      this.tintCtx.globalAlpha = 1;
       this.tintCtx.drawImage(source, 0, 0);
       this.tintCtx.globalCompositeOperation = 'source-in';
       this.tintCtx.fillStyle = tintColor;
@@ -443,12 +586,7 @@ export class StudioCanvasEngine {
     return {
       cx,
       cy,
-      corners: [
-        rotPt(-hw, -hh),
-        rotPt(hw, -hh),
-        rotPt(hw, hh),
-        rotPt(-hw, hh),
-      ],
+      corners: [rotPt(-hw, -hh), rotPt(hw, -hh), rotPt(hw, hh), rotPt(-hw, hh)],
       rotKnob: rotPt(0, -hh - 34),
       topMid: rotPt(0, -hh),
     };
@@ -459,16 +597,30 @@ export class StudioCanvasEngine {
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
 
-    // 1. Physical Paper Surface (Bristol, Grid, Lined, Kraft, ACME 12-Field)
-    renderPaperSurface(ctx, this.width, this.height, this.paperColor, this.paperStyle, this.lightboxDim);
+    // 1. Physical Paper Surface
+    renderPaperSurface(
+      ctx,
+      this.width,
+      this.height,
+      this.paperColor,
+      this.paperStyle,
+      this.lightboxDim
+    );
 
-    // 2. Fixed Project/Scene Background Plane (rendered underneath all cel layers!)
+    // 2. Fixed Project/Scene Background Plane
     if (this.bgCanvas) {
       ctx.drawImage(this.bgCanvas, 0, 0);
     }
 
-    // 3. Animator Underlay Guides (Bounce, Walk Cycle, Head Turn, Wave, Perspective, Symmetry Axis)
-    renderUnderlayGuide(ctx, this.width, this.height, this.guides, this.activeFrameIndex, this.brush.symmetryX);
+    // 3. Animator Underlay Guides
+    renderUnderlayGuide(
+      ctx,
+      this.width,
+      this.height,
+      this.guides,
+      this.activeFrameIndex,
+      this.brush.symmetryX
+    );
 
     // 4. Red/Blue Onion Skinning
     if (this.onion.enabled) {
@@ -485,18 +637,40 @@ export class StudioCanvasEngine {
       });
     }
 
-    // 5. Active Frame Cel Layers
+    // 5. Active Frame Cel Layers (+ live homogeneous `strokeCanvas` preview!)
     if (this.frame) {
       for (const layer of this.frame.layers) {
         if (!layer.visible) continue;
         const lc = this.layerCanvases.get(layer.id);
         if (!lc) continue;
-        ctx.save();
-        ctx.globalAlpha = layer.opacity;
-        ctx.globalCompositeOperation =
-          layer.blendMode === 'multiply' ? 'multiply' : 'source-over';
-        ctx.drawImage(lc, 0, 0);
-        ctx.restore();
+
+        if (this.hasStrokeBuffer && this.strokeLayerId === layer.id) {
+          this.tintCtx.clearRect(0, 0, this.width, this.height);
+          this.tintCtx.globalCompositeOperation = 'source-over';
+          this.tintCtx.globalAlpha = 1;
+          this.tintCtx.drawImage(lc, 0, 0);
+          this.tintCtx.globalCompositeOperation = this.strokeIsEraser
+            ? 'destination-out'
+            : 'source-over';
+          this.tintCtx.globalAlpha = this.activeStrokeOpacity;
+          this.tintCtx.drawImage(this.strokeCanvas, 0, 0);
+          this.tintCtx.globalCompositeOperation = 'source-over';
+          this.tintCtx.globalAlpha = 1;
+
+          ctx.save();
+          ctx.globalAlpha = layer.opacity;
+          ctx.globalCompositeOperation =
+            layer.blendMode === 'multiply' ? 'multiply' : 'source-over';
+          ctx.drawImage(this.tintCanvas, 0, 0);
+          ctx.restore();
+        } else {
+          ctx.save();
+          ctx.globalAlpha = layer.opacity;
+          ctx.globalCompositeOperation =
+            layer.blendMode === 'multiply' ? 'multiply' : 'source-over';
+          ctx.drawImage(lc, 0, 0);
+          ctx.restore();
+        }
       }
     }
 
@@ -534,7 +708,6 @@ export class StudioCanvasEngine {
       ctx.strokeRect(-f.w / 2, -f.h / 2, f.w, f.h);
       ctx.restore();
 
-      // Rotation stem + brass handle + 4 corner scale squares
       ctx.save();
       ctx.strokeStyle = '#E54D2E';
       ctx.lineWidth = 2;
@@ -575,7 +748,7 @@ export class StudioCanvasEngine {
       ctx.restore();
     }
 
-    // 9. Field Guides (Rule of Thirds, Safe Frame, Center Cross)
+    // 9. Field Guides
     if (this.guides.enabled) {
       ctx.save();
       ctx.strokeStyle = 'rgba(37, 99, 235, 0.24)';
@@ -612,7 +785,7 @@ export class StudioCanvasEngine {
       ctx.restore();
     }
 
-    // 10. Live 2D Cinematic Camera Viewfinder Overlay (shows exact zoom/pan/tilt/shake framing while editing!)
+    // 10. Live 2D Cinematic Camera Viewfinder Overlay
     this.renderCameraViewfinder(ctx);
   }
 
@@ -645,7 +818,6 @@ export class StudioCanvasEngine {
 
     ctx.save();
 
-    // Dim outer area outside the active camera viewfinder when zoomed or panned
     if (isTransformed) {
       ctx.save();
       ctx.beginPath();
@@ -672,7 +844,6 @@ export class StudioCanvasEngine {
       ctx.restore();
     }
 
-    // Viewfinder frame + cinematic L-corner brackets
     ctx.translate(cx, cy);
     ctx.rotate(rad);
     const inset = isTransformed ? 0 : 10;
@@ -687,30 +858,24 @@ export class StudioCanvasEngine {
     ctx.strokeRect(rx, ry, rw, rh);
     ctx.setLineDash([]);
 
-    // Bold corner L-brackets
     const bLen = Math.min(28, rw * 0.14, rh * 0.14);
     ctx.strokeStyle = isTransformed ? '#E54D2E' : '#D99B26';
     ctx.lineWidth = Math.max(3, Math.min(4.5, w / 300));
     ctx.beginPath();
-    // TL
     ctx.moveTo(rx, ry + bLen);
     ctx.lineTo(rx, ry);
     ctx.lineTo(rx + bLen, ry);
-    // TR
     ctx.moveTo(rx + rw - bLen, ry);
     ctx.lineTo(rx + rw, ry);
     ctx.lineTo(rx + rw, ry + bLen);
-    // BR
     ctx.moveTo(rx + rw, ry + rh - bLen);
     ctx.lineTo(rx + rw, ry + rh);
     ctx.lineTo(rx + rw - bLen, ry + rh);
-    // BL
     ctx.moveTo(rx + bLen, ry + rh);
     ctx.lineTo(rx, ry + rh);
     ctx.lineTo(rx, ry + rh - bLen);
     ctx.stroke();
 
-    // Subtle center crosshair inside camera viewfinder
     ctx.strokeStyle = isTransformed ? 'rgba(229, 77, 46, 0.55)' : 'rgba(217, 155, 38, 0.45)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -720,7 +885,6 @@ export class StudioCanvasEngine {
     ctx.lineTo(0, 10);
     ctx.stroke();
 
-    // Shake indicator double frame
     if (curShake > 0) {
       ctx.strokeStyle = 'rgba(229, 77, 46, 0.55)';
       ctx.lineWidth = 2;
@@ -730,7 +894,6 @@ export class StudioCanvasEngine {
       ctx.setLineDash([]);
     }
 
-    // Crisp HUD pill in top-left of viewfinder
     const panXStr = `${cam.panX >= 0 ? '+' : ''}${Math.round(cam.panX * 100)}%`;
     const panYStr = `${cam.panY >= 0 ? '+' : ''}${Math.round(cam.panY * 100)}%`;
     const shakeStr = curShake > 0 ? ` · ⚡${curShake}` : '';
@@ -809,7 +972,11 @@ export class StudioCanvasEngine {
     } else {
       ctx.globalCompositeOperation = 'source-over';
       ctx.strokeStyle =
-        this.brush.tool === 'blue-rough' ? '#2563EB' : previewOnly && shape.isEraser ? '#E54D2E' : this.brush.color;
+        this.brush.tool === 'blue-rough'
+          ? '#2563EB'
+          : previewOnly && shape.isEraser
+            ? '#E54D2E'
+            : this.brush.color;
       ctx.globalAlpha = previewOnly ? Math.max(0.55, this.brush.opacity * 0.85) : this.brush.opacity;
     }
 
@@ -835,13 +1002,17 @@ export class StudioCanvasEngine {
     ctx.restore();
   }
 
-  private getActiveLayer(): { id: string; canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+  private getActiveLayer(): {
+    id: string;
+    canvas: HTMLCanvasElement;
+    ctx: CanvasRenderingContext2D;
+  } | null {
     if (!this.frame || !this.activeLayerId) return null;
     const meta = this.frame.layers.find((l) => l.id === this.activeLayerId);
     if (!meta || meta.locked || !meta.visible) return null;
     const canvas = this.layerCanvases.get(meta.id);
     if (!canvas) return null;
-    return { id: meta.id, canvas, ctx: canvas.getContext('2d')! };
+    return { id: meta.id, canvas, ctx: canvas.getContext('2d', { willReadFrequently: true })! };
   }
 
   private resetDirtyBounds(x: number, y: number, pad: number): void {
@@ -868,33 +1039,70 @@ export class StudioCanvasEngine {
     }
   }
 
+  private getClampedDirtyRect(fullRect = false): DirtyRect {
+    if (fullRect) {
+      return { x: 0, y: 0, w: this.width, h: this.height };
+    }
+    const x0 = Math.max(0, Math.floor(this.dirtyMinX));
+    const y0 = Math.max(0, Math.floor(this.dirtyMinY));
+    const x1 = Math.min(this.width, Math.ceil(this.dirtyMaxX));
+    const y1 = Math.min(this.height, Math.ceil(this.dirtyMaxY));
+    return {
+      x: x0,
+      y: y0,
+      w: Math.max(1, x1 - x0),
+      h: Math.max(1, y1 - y0),
+    };
+  }
+
+  /** Commits `strokeCanvas` onto `active.ctx` reading ONLY the dirty sub-rectangle (zero full-canvas readback!) */
+  private commitStrokeBufferToLayer(layerId: string, ctx: CanvasRenderingContext2D): void {
+    const rect = this.getClampedDirtyRect(false);
+    const beforePatch = new Uint8ClampedArray(
+      ctx.getImageData(rect.x, rect.y, rect.w, rect.h).data
+    );
+
+    ctx.save();
+    ctx.globalCompositeOperation = this.strokeIsEraser ? 'destination-out' : 'source-over';
+    ctx.globalAlpha = this.activeStrokeOpacity;
+    ctx.drawImage(
+      this.strokeCanvas,
+      rect.x,
+      rect.y,
+      rect.w,
+      rect.h,
+      rect.x,
+      rect.y,
+      rect.w,
+      rect.h
+    );
+    ctx.restore();
+
+    const afterPatch = new Uint8ClampedArray(ctx.getImageData(rect.x, rect.y, rect.w, rect.h).data);
+
+    this.strokeCtx.clearRect(rect.x, rect.y, rect.w, rect.h);
+    this.hasStrokeBuffer = false;
+    this.strokeLayerId = null;
+
+    this.pushUndo({ layerId, rect, before: beforePatch, after: afterPatch });
+    if (this.frame) {
+      this.onStrokeCommit?.(layerId, this.frame.id);
+    }
+    this.render();
+    this.captureCleanTimelapse();
+  }
+
   private commitDirtyUndo(layerId: string, ctx: CanvasRenderingContext2D, fullRect = false): void {
     if (!this.strokeBeforeFull) return;
-    const afterFull = ctx.getImageData(0, 0, this.width, this.height).data;
-    const rect: DirtyRect = fullRect
-      ? { x: 0, y: 0, w: this.width, h: this.height }
-      : {
-          x: Math.max(0, Math.floor(this.dirtyMinX)),
-          y: Math.max(0, Math.floor(this.dirtyMinY)),
-          w: Math.max(
-            1,
-            Math.min(this.width, Math.ceil(this.dirtyMaxX)) - Math.max(0, Math.floor(this.dirtyMinX))
-          ),
-          h: Math.max(
-            1,
-            Math.min(this.height, Math.ceil(this.dirtyMaxY)) - Math.max(0, Math.floor(this.dirtyMinY))
-          ),
-        };
-
+    const rect = this.getClampedDirtyRect(fullRect);
     const beforePatch = extractRgbaRect(this.strokeBeforeFull, this.width, rect);
-    const afterPatch = extractRgbaRect(afterFull, this.width, rect);
+    const afterPatch = new Uint8ClampedArray(ctx.getImageData(rect.x, rect.y, rect.w, rect.h).data);
     this.pushUndo({ layerId, rect, before: beforePatch, after: afterPatch });
     this.strokeBeforeFull = null;
     if (this.frame) {
       this.onStrokeCommit?.(layerId, this.frame.id);
     }
 
-    // Clean guide-free timelapse capture
     this.render();
     this.captureCleanTimelapse();
   }
@@ -994,7 +1202,6 @@ export class StudioCanvasEngine {
     }
 
     // Reference-Aware Gap-Closing Smart Flood Fill Bucket!
-    // Works both when filling on Boya underneath Ink AND when filling transparent pockets directly on the Ink layer!
     if (this.brush.tool === 'bucket') {
       const before = active.ctx.getImageData(0, 0, this.width, this.height);
       const otherInkLayer = this.brush.bucketReferenceInk
@@ -1002,11 +1209,15 @@ export class StudioCanvasEngine {
         : undefined;
       const otherInkCanvas = otherInkLayer ? this.layerCanvases.get(otherInkLayer.id) : undefined;
       let barrierRgba: Uint8ClampedArray | undefined = otherInkCanvas
-        ? otherInkCanvas.getContext('2d')!.getImageData(0, 0, this.width, this.height).data
+        ? otherInkCanvas.getContext('2d', { willReadFrequently: true })!.getImageData(
+            0,
+            0,
+            this.width,
+            this.height
+          ).data
         : undefined;
       const isSeparateBarrier = Boolean(barrierRgba);
 
-      // If filling directly on the active layer (e.g. Ink) in a transparent region, still close stroke gaps!
       if (!barrierRgba && this.brush.bucketGapClose > 0) {
         const sx = Math.max(0, Math.min(this.width - 1, Math.round(x)));
         const sy = Math.max(0, Math.min(this.height - 1, Math.round(y)));
@@ -1049,6 +1260,7 @@ export class StudioCanvasEngine {
     if (this.brush.tool === 'lasso') {
       this.isDrawing = true;
       this.activePointerId = pointerId;
+      this.activePointerType = pointerType;
       this.lassoPoints = [{ x, y }];
       this.requestRender();
       return;
@@ -1058,6 +1270,7 @@ export class StudioCanvasEngine {
     if (this.brush.tool === 'shape' || modifiers?.shiftKey) {
       this.isDrawing = true;
       this.activePointerId = pointerId;
+      this.activePointerType = pointerType;
       this.strokeBeforeFull = new Uint8ClampedArray(
         active.ctx.getImageData(0, 0, this.width, this.height).data
       );
@@ -1074,12 +1287,24 @@ export class StudioCanvasEngine {
       return;
     }
 
-    // Smooth Textured Quadratic Bezier Stroke Start
+    // Smooth Textured Quadratic Bezier Stroke Start on Offscreen `strokeCanvas`!
     this.isDrawing = true;
     this.activePointerId = pointerId;
-    this.strokeBeforeFull = new Uint8ClampedArray(
-      active.ctx.getImageData(0, 0, this.width, this.height).data
-    );
+    this.activePointerType = pointerType;
+    this.lastPressure = pressure;
+    this.lastRawPt = { x, y };
+    this.lastDryNormal = null;
+    this.lastDryNormalMirror = null;
+
+    this.strokeCtx.clearRect(0, 0, this.width, this.height);
+    this.hasStrokeBuffer = true;
+    this.strokeLayerId = active.id;
+    this.strokeIsEraser = this.brush.tool === 'eraser';
+    this.activeStrokeOpacity =
+      this.brush.tool === 'marker'
+        ? Math.min(0.42, this.brush.opacity * 0.42)
+        : this.brush.opacity;
+
     this.ropeX = x;
     this.ropeY = y;
     this.prevPt = { x, y };
@@ -1089,7 +1314,7 @@ export class StudioCanvasEngine {
     this.lastWidth = this.computeStrokeWidth(pressure, 0);
     this.resetDirtyBounds(x, y, this.lastWidth * 2 + 16);
     this.drawSymmetricSegment(
-      active.ctx,
+      this.strokeCtx,
       { x, y },
       { x, y },
       { x, y },
@@ -1109,7 +1334,10 @@ export class StudioCanvasEngine {
         this.floating.dx = this.floatDragStart.origDx + (x - this.floatDragStart.x);
         this.floating.dy = this.floatDragStart.origDy + (y - this.floatDragStart.y);
       } else if (this.floatMode === 'scale') {
-        const dist = Math.max(10, Math.hypot(x - this.floatDragStart.cx, y - this.floatDragStart.cy));
+        const dist = Math.max(
+          10,
+          Math.hypot(x - this.floatDragStart.cx, y - this.floatDragStart.cy)
+        );
         this.floating.scale = Math.max(
           0.2,
           Math.min(4, this.floatDragStart.origScale * (dist / this.floatDragStart.startDist))
@@ -1142,8 +1370,10 @@ export class StudioCanvasEngine {
       return;
     }
 
-    const active = this.getActiveLayer();
-    if (!active) return;
+    if (!this.hasStrokeBuffer) return;
+
+    this.lastRawPt = { x, y };
+    this.lastPressure = pressure;
 
     const alpha = 1 - Math.min(0.86, Math.max(0, this.brush.stabilizer));
     this.ropeX += (x - this.ropeX) * alpha;
@@ -1152,7 +1382,7 @@ export class StudioCanvasEngine {
     const now = performance.now();
     const dt = Math.max(1, now - this.lastTime);
     const dist = Math.hypot(this.ropeX - this.prevPt.x, this.ropeY - this.prevPt.y);
-    if (dist < 1.1) return;
+    if (dist < 0.9) return;
 
     const velocity = dist / dt;
     this.lastVelocity = this.lastVelocity * 0.65 + velocity * 0.35;
@@ -1169,7 +1399,7 @@ export class StudioCanvasEngine {
     this.expandDirtyBounds(nextMid.x, nextMid.y, pad);
 
     this.drawSymmetricSegment(
-      active.ctx,
+      this.strokeCtx,
       this.midPt,
       this.prevPt,
       nextMid,
@@ -1230,14 +1460,66 @@ export class StudioCanvasEngine {
       return;
     }
 
-    if (active && this.strokeBeforeFull) {
-      this.commitDirtyUndo(active.id, active.ctx, false);
+    // Stabilizer tail catch-up: smoothly glide `ropeX/ropeY` into `lastRawPt` so stabilized lines never fall short!
+    if (this.hasStrokeBuffer) {
+      const remDist = Math.hypot(this.lastRawPt.x - this.midPt.x, this.lastRawPt.y - this.midPt.y);
+      if (remDist > 0.35) {
+        const catchSteps = Math.max(2, Math.min(8, Math.ceil(remDist / 4)));
+        const startRx = this.ropeX;
+        const startRy = this.ropeY;
+        for (let s = 1; s <= catchSteps; s++) {
+          const t = s / catchSteps;
+          const ease = t * (2 - t);
+          const nx = startRx + (this.lastRawPt.x - startRx) * ease;
+          const ny = startRy + (this.lastRawPt.y - startRy) * ease;
+          const nextMid =
+            s === catchSteps
+              ? { x: this.lastRawPt.x, y: this.lastRawPt.y }
+              : { x: (this.prevPt.x + nx) * 0.5, y: (this.prevPt.y + ny) * 0.5 };
+          const taperW =
+            this.brush.tool === 'gpen'
+              ? Math.max(0.8, this.lastWidth * (1 - t * 0.18))
+              : this.lastWidth;
+          const pad = Math.max(this.lastWidth, taperW) * 2 + 16;
+          this.expandDirtyBounds(nx, ny, pad);
+          this.expandDirtyBounds(nextMid.x, nextMid.y, pad);
+          this.drawSymmetricSegment(
+            this.strokeCtx,
+            this.midPt,
+            this.prevPt,
+            nextMid,
+            this.lastWidth,
+            taperW,
+            this.lastPressure,
+            this.lastVelocity
+          );
+          this.midPt = nextMid;
+          this.prevPt = { x: nx, y: ny };
+          this.lastWidth = taperW;
+        }
+        this.ropeX = this.lastRawPt.x;
+        this.ropeY = this.lastRawPt.y;
+      }
+
+      if (active) {
+        this.commitStrokeBufferToLayer(active.id, active.ctx);
+      } else {
+        this.strokeCtx.clearRect(0, 0, this.width, this.height);
+        this.hasStrokeBuffer = false;
+        this.strokeLayerId = null;
+      }
     }
+
+    this.lastDryNormal = null;
+    this.lastDryNormalMirror = null;
   }
 
   private computeStrokeWidth(pressure: number, velocity: number): number {
     const base = this.brush.size;
-    const p = this.brush.pressureEnabled && pressure > 0 && pressure !== 0.5 ? pressure : 0.72;
+    // True stylus check (`pointerType === 'pen'`) — NEVER treat real 0.50 stylus pressure as fake mouse default!
+    const isRealPen =
+      this.brush.pressureEnabled && this.activePointerType === 'pen' && pressure > 0;
+    const p = isRealPen ? Math.max(0.05, Math.min(1, pressure)) : 0.72;
 
     if (this.brush.tool === 'gpen') {
       const velFactor = Math.max(0.38, Math.min(1.3, 1.22 - velocity * 0.26));
@@ -1270,7 +1552,7 @@ export class StudioCanvasEngine {
     pressure: number,
     velocity: number
   ): void {
-    this.drawBezierSegment(ctx, p0, ctrl, p1, w0, w1, pressure, velocity);
+    this.drawBezierSegment(ctx, p0, ctrl, p1, w0, w1, pressure, velocity, false);
     if (this.brush.symmetryX) {
       const mx = (v: number) => this.width - v;
       this.drawBezierSegment(
@@ -1281,12 +1563,72 @@ export class StudioCanvasEngine {
         w0,
         w1,
         pressure,
-        velocity
+        velocity,
+        true
       );
     }
   }
 
-  /** Renders 6 distinct artist brushes along a Quadratic Bezier curve */
+  private ensureGrainScratchSize(minSide: number): void {
+    if (this.grainScratch.width >= minSide && this.grainScratch.height >= minSide) return;
+    const next = Math.max(256, Math.ceil(minSide / 64) * 64);
+    this.grainScratch.width = next;
+    this.grainScratch.height = next;
+    this.grainScratchCtx = this.grainScratch.getContext('2d')!;
+  }
+
+  /** Fills a smooth variable-width tangent capsule between `(x0, y0, r0)` and `(x1, y1, r1)` (`0` beading!) */
+  private fillVariableCapsule(
+    ctx: CanvasRenderingContext2D,
+    x0: number,
+    y0: number,
+    r0: number,
+    x1: number,
+    y1: number,
+    r1: number
+  ): void {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const d = Math.hypot(dx, dy);
+    if (d < 0.001 || d <= Math.abs(r1 - r0)) {
+      ctx.beginPath();
+      if (r0 >= r1) {
+        ctx.arc(x0, y0, r0, 0, Math.PI * 2);
+      } else {
+        ctx.arc(x1, y1, r1, 0, Math.PI * 2);
+      }
+      ctx.fill();
+      return;
+    }
+
+    const ux = dx / d;
+    const uy = dy / d;
+    const nx = -uy;
+    const ny = ux;
+    const cosA = Math.max(-1, Math.min(1, (r0 - r1) / d));
+    const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+
+    // Left and right external tangent unit normals
+    const lnx = ux * cosA + nx * sinA;
+    const lny = uy * cosA + ny * sinA;
+    const rnx = ux * cosA - nx * sinA;
+    const rny = uy * cosA - ny * sinA;
+
+    ctx.beginPath();
+    ctx.arc(x0, y0, r0, 0, Math.PI * 2);
+    ctx.arc(x1, y1, r1, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(x0 + lnx * r0, y0 + lny * r0);
+    ctx.lineTo(x1 + lnx * r1, y1 + lny * r1);
+    ctx.lineTo(x1 + rnx * r1, y1 + rny * r1);
+    ctx.lineTo(x0 + rnx * r0, y0 + rny * r0);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  /** Renders 6 distinct artist brushes onto `strokeCanvas` (full base coverage; stroke opacity applied once!) */
   private drawBezierSegment(
     ctx: CanvasRenderingContext2D,
     p0: { x: number; y: number },
@@ -1295,15 +1637,18 @@ export class StudioCanvasEngine {
     w0: number,
     w1: number,
     pressure: number,
-    velocity: number
+    velocity: number,
+    isMirrored: boolean
   ): void {
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
     if (this.brush.tool === 'eraser') {
-      ctx.globalCompositeOperation = 'destination-out';
+      // Accumulate opaque mask on `strokeCanvas`; `destination-out` + `activeStrokeOpacity` applied once!
+      ctx.globalCompositeOperation = 'source-over';
       ctx.strokeStyle = 'rgba(0,0,0,1)';
+      ctx.globalAlpha = 1;
       ctx.lineWidth = (w0 + w1) * 0.5;
       ctx.beginPath();
       ctx.moveTo(p0.x, p0.y);
@@ -1314,9 +1659,10 @@ export class StudioCanvasEngine {
     }
 
     if (this.brush.tool === 'marker') {
+      // Drawn at alpha=1 on `strokeCanvas` so overlapping turns have ZERO dark joint blobs!
       ctx.globalCompositeOperation = 'source-over';
       ctx.strokeStyle = this.brush.color;
-      ctx.globalAlpha = Math.min(0.42, this.brush.opacity * 0.42);
+      ctx.globalAlpha = 1;
       ctx.lineWidth = (w0 + w1) * 0.5;
       ctx.lineCap = 'square';
       ctx.beginPath();
@@ -1331,7 +1677,7 @@ export class StudioCanvasEngine {
       const pattern = getScreentonePattern(ctx, this.brush.color);
       ctx.globalCompositeOperation = 'source-over';
       ctx.strokeStyle = pattern ?? this.brush.color;
-      ctx.globalAlpha = this.brush.opacity;
+      ctx.globalAlpha = 1;
       ctx.lineWidth = (w0 + w1) * 0.5;
       ctx.beginPath();
       ctx.moveTo(p0.x, p0.y);
@@ -1344,39 +1690,65 @@ export class StudioCanvasEngine {
     const chord =
       Math.hypot(ctrl.x - p0.x, ctrl.y - p0.y) + Math.hypot(p1.x - ctrl.x, p1.y - ctrl.y);
 
-    // 5-Bristle Dry Sumi-e Brush: bristles split authentically at faster stroke speeds!
+    // 5-Bristle Dry Sumi-e Brush with continuous normal interpolation across curves (`0` corner cracks!)
     if (this.brush.tool === 'dry-brush') {
-      const avgW = (w0 + w1) * 0.5;
       const dx = p1.x - p0.x;
       const dy = p1.y - p0.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len;
-      const ny = dx / len;
+      const len = Math.hypot(dx, dy);
+      const prevNorm = isMirrored ? this.lastDryNormalMirror : this.lastDryNormal;
+      const rawEnd =
+        len > 0.25 ? { nx: -dy / len, ny: dx / len } : (prevNorm ?? { nx: 0, ny: 1 });
+      const startN = prevNorm ?? rawEnd;
+      // Smoothly blend end normal to prevent bristle flip on sharp corners
+      const blendX = startN.nx * 0.35 + rawEnd.nx * 0.65;
+      const blendY = startN.ny * 0.35 + rawEnd.ny * 0.65;
+      const blendLen = Math.hypot(blendX, blendY) || 1;
+      const endN = { nx: blendX / blendLen, ny: blendY / blendLen };
+      const midNxRaw = (startN.nx + endN.nx) * 0.5;
+      const midNyRaw = (startN.ny + endN.ny) * 0.5;
+      const midLen = Math.hypot(midNxRaw, midNyRaw) || 1;
+      const midN = { nx: midNxRaw / midLen, ny: midNyRaw / midLen };
+
+      if (isMirrored) {
+        this.lastDryNormalMirror = endN;
+      } else {
+        this.lastDryNormal = endN;
+      }
+
+      const avgW = (w0 + w1) * 0.5;
+      const midW = avgW;
       const dryBreak = Math.min(0.75, velocity * 0.24);
       const bristles = [-0.42, -0.21, 0, 0.21, 0.42];
       ctx.strokeStyle = this.brush.color;
+      ctx.globalCompositeOperation = 'source-over';
 
       for (let b = 0; b < bristles.length; b++) {
-        const off = bristles[b] * avgW;
-        const bAlpha = this.brush.opacity * Math.max(0.24, 0.92 - dryBreak * (0.45 + (b % 2) * 0.4));
+        const bf = bristles[b];
+        const bAlpha = Math.max(0.24, 0.94 - dryBreak * (0.45 + (b % 2) * 0.4));
         ctx.globalAlpha = bAlpha;
         ctx.lineWidth = Math.max(1.1, avgW * (b === 2 ? 0.34 : 0.22));
         ctx.beginPath();
-        ctx.moveTo(p0.x + nx * off, p0.y + ny * off);
-        ctx.quadraticCurveTo(ctrl.x + nx * off, ctrl.y + ny * off, p1.x + nx * off, p1.y + ny * off);
+        ctx.moveTo(p0.x + startN.nx * (bf * w0), p0.y + startN.ny * (bf * w0));
+        ctx.quadraticCurveTo(
+          ctrl.x + midN.nx * (bf * midW),
+          ctrl.y + midN.ny * (bf * midW),
+          p1.x + endN.nx * (bf * w1),
+          p1.y + endN.ny * (bf * w1)
+        );
         ctx.stroke();
       }
       ctx.restore();
       return;
     }
 
-    // 2B Graphite Pencil & Non-Photo Blue Sketch Pencil with Procedural Paper-Tooth Mask!
+    // 2B Graphite Pencil & Non-Photo Blue Sketch Pencil with Seamless 128x128 World-Locked Paper Tooth!
     if (this.brush.tool === 'pencil' || this.brush.tool === 'blue-rough') {
       const color = this.brush.tool === 'blue-rough' ? '#2563EB' : this.brush.color;
-      const pAlpha =
-        this.brush.pressureEnabled && pressure > 0 ? Math.min(1, 0.4 + pressure * 0.65) : 0.78;
+      const isRealPen =
+        this.brush.pressureEnabled && this.activePointerType === 'pen' && pressure > 0;
+      const pAlpha = isRealPen ? Math.min(1, 0.4 + pressure * 0.65) : 0.78;
       const grain = getGraphiteGrainCanvas();
-      const gctx = this.grainScratchCtx;
+      const tile = GRAIN_TILE_SIZE;
       const steps = Math.max(1, Math.ceil(chord / Math.max(1.5, (w0 + w1) * 0.22)));
 
       ctx.globalCompositeOperation = 'source-over';
@@ -1386,45 +1758,66 @@ export class StudioCanvasEngine {
         const x = omt * omt * p0.x + 2 * omt * t * ctrl.x + t * t * p1.x;
         const y = omt * omt * p0.y + 2 * omt * t * ctrl.y + t * t * p1.y;
         const r = Math.max(1.2, (w0 + (w1 - w0) * t) * 0.62);
-        const diam = Math.min(64, Math.max(4, Math.ceil(r * 2 + 2)));
+        const diam = Math.max(4, Math.ceil(r * 2 + 4));
+        this.ensureGrainScratchSize(diam);
+        const gctx = this.grainScratchCtx;
+
+        // Snap dab box top-left to integer canvas coords so world grain NEVER crawls when `diam` changes!
+        const originX = Math.floor(x - diam * 0.5);
+        const originY = Math.floor(y - diam * 0.5);
+        const localCx = x - originX;
+        const localCy = y - originY;
 
         gctx.clearRect(0, 0, diam, diam);
         gctx.globalCompositeOperation = 'source-over';
         gctx.fillStyle = color;
         gctx.beginPath();
-        gctx.arc(diam / 2, diam / 2, r, 0, Math.PI * 2);
+        gctx.arc(localCx, localCy, r, 0, Math.PI * 2);
         gctx.fill();
 
-        // Mask circular graphite dab by paper tooth tile locked to world coords!
         gctx.globalCompositeOperation = 'destination-in';
-        const tx = ((Math.floor(x) % 64) + 64) % 64;
-        const ty = ((Math.floor(y) % 64) + 64) % 64;
-        gctx.drawImage(grain, -tx, -ty);
-        gctx.drawImage(grain, 64 - tx, -ty);
-        gctx.drawImage(grain, -tx, 64 - ty);
-        gctx.drawImage(grain, 64 - tx, 64 - ty);
+        const tx = ((originX % tile) + tile) % tile;
+        const ty = ((originY % tile) + tile) % tile;
+        for (let gy = -ty; gy < diam; gy += tile) {
+          for (let gx = -tx; gx < diam; gx += tile) {
+            gctx.drawImage(grain, gx, gy);
+          }
+        }
 
-        ctx.globalAlpha = this.brush.opacity * pAlpha * 0.72;
-        ctx.drawImage(this.grainScratch, 0, 0, diam, diam, x - diam / 2, y - diam / 2, diam, diam);
+        ctx.globalAlpha = pAlpha * 0.72;
+        ctx.drawImage(this.grainScratch, 0, 0, diam, diam, originX, originY, diam, diam);
       }
       ctx.restore();
       return;
     }
 
-    // G-Pen Manga Dip Nib: ultra-crisp distance-spaced variable-width Bezier capsules
+    // G-Pen Manga Dip Nib: continuous variable-width tangent capsules (`0` beading, `0` opacity knots!)
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = this.brush.color;
-    ctx.globalAlpha = this.brush.opacity;
-    const steps = Math.max(1, Math.ceil(chord / Math.max(0.75, Math.min(w0, w1) * 0.25)));
-    for (let i = 0; i <= steps; i++) {
+    ctx.globalAlpha = 1;
+    const steps = Math.max(1, Math.min(48, Math.ceil(chord / Math.max(2, Math.min(w0, w1) * 0.6))));
+    let prevX = p0.x;
+    let prevY = p0.y;
+    let prevR = Math.max(0.55, w0 * 0.5);
+
+    if (chord < 0.5) {
+      ctx.beginPath();
+      ctx.arc(prevX, prevY, prevR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const omt = 1 - t;
       const x = omt * omt * p0.x + 2 * omt * t * ctrl.x + t * t * p1.x;
       const y = omt * omt * p0.y + 2 * omt * t * ctrl.y + t * t * p1.y;
       const r = Math.max(0.55, (w0 + (w1 - w0) * t) * 0.5);
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
+      this.fillVariableCapsule(ctx, prevX, prevY, prevR, x, y, r);
+      prevX = x;
+      prevY = y;
+      prevR = r;
     }
     ctx.restore();
   }
@@ -1544,7 +1937,9 @@ export class StudioCanvasEngine {
   public transformFloating(delta: { rotation?: number; scale?: number; flipX?: boolean }): void {
     if (!this.floating) return;
     if (delta.rotation) this.floating.rotation += delta.rotation;
-    if (delta.scale) this.floating.scale = Math.max(0.2, Math.min(4, this.floating.scale * delta.scale));
+    if (delta.scale) {
+      this.floating.scale = Math.max(0.2, Math.min(4, this.floating.scale * delta.scale));
+    }
     if (delta.flipX) this.floating.flipX = !this.floating.flipX;
     this.requestRender();
   }
@@ -1587,64 +1982,72 @@ export class StudioCanvasEngine {
   }
 
   private pushUndo(entry: DirtyUndoEntry): void {
-    this.undoStack.push(entry);
-    const limit = getMaxUndoSteps();
-    while (this.undoStack.length > limit) {
-      this.undoStack.shift();
+    if (!this.frame) return;
+    const hist = this.getOrCreateFrameHistory(this.frame.id);
+    // Clear redo stack and reclaim its bytes
+    for (const r of hist.redo) {
+      hist.bytes = Math.max(0, hist.bytes - entryByteSize(r));
     }
-    this.redoStack = [];
-    this.onHistoryChange?.(this.undoStack.length > 0, false);
+    hist.redo = [];
+
+    hist.undo.push(entry);
+    hist.bytes += entryByteSize(entry);
+
+    const limit = getMaxUndoSteps();
+    while (hist.undo.length > limit) {
+      const dropped = hist.undo.shift()!;
+      hist.bytes = Math.max(0, hist.bytes - entryByteSize(dropped));
+    }
+    this.enforceTotalHistoryBudget(this.frame.id);
+    this.onHistoryChange?.(hist.undo.length > 0, false);
   }
 
   public undo(): string | null {
     if (this.floating) this.commitFloatingSelection();
-    const entry = this.undoStack.pop();
+    if (!this.frame) return null;
+    const hist = this.frameHistory.get(this.frame.id);
+    if (!hist) return null;
+    const entry = hist.undo.pop();
     if (!entry) return null;
+
     const lc = this.layerCanvases.get(entry.layerId);
     if (lc) {
-      const ctx = lc.getContext('2d')!;
-      const img = ctx.getImageData(0, 0, this.width, this.height);
-      applyRgbaRect(img.data, this.width, entry.rect, entry.before);
-      ctx.putImageData(img, 0, 0);
+      const ctx = lc.getContext('2d', { willReadFrequently: true })!;
+      ctx.putImageData(
+        new ImageData(new Uint8ClampedArray(entry.before), entry.rect.w, entry.rect.h),
+        entry.rect.x,
+        entry.rect.y
+      );
     }
-    this.redoStack.push(entry);
-    this.onHistoryChange?.(this.undoStack.length > 0, this.redoStack.length > 0);
+    hist.redo.push(entry);
+    this.onHistoryChange?.(hist.undo.length > 0, hist.redo.length > 0);
     this.requestRender();
     return entry.layerId;
   }
 
   public redo(): string | null {
-    const entry = this.redoStack.pop();
+    if (!this.frame) return null;
+    const hist = this.frameHistory.get(this.frame.id);
+    if (!hist) return null;
+    const entry = hist.redo.pop();
     if (!entry) return null;
+
     const lc = this.layerCanvases.get(entry.layerId);
     if (lc) {
-      const ctx = lc.getContext('2d')!;
-      const img = ctx.getImageData(0, 0, this.width, this.height);
-      applyRgbaRect(img.data, this.width, entry.rect, entry.after);
-      ctx.putImageData(img, 0, 0);
+      const ctx = lc.getContext('2d', { willReadFrequently: true })!;
+      ctx.putImageData(
+        new ImageData(new Uint8ClampedArray(entry.after), entry.rect.w, entry.rect.h),
+        entry.rect.x,
+        entry.rect.y
+      );
     }
-    this.undoStack.push(entry);
-    this.onHistoryChange?.(this.undoStack.length > 0, this.redoStack.length > 0);
+    hist.undo.push(entry);
+    this.onHistoryChange?.(hist.undo.length > 0, hist.redo.length > 0);
     this.requestRender();
     return entry.layerId;
   }
 
-  public async persistLayerAndThumb(
-    layerId: string,
-    existingLayerBlobKey: string | null,
-    existingThumbKey: string | null | undefined
-  ): Promise<{ layerBlobKey: string; thumbKey: string } | null> {
-    if (this.floating) this.commitFloatingSelection();
-    const lc = this.layerCanvases.get(layerId);
-    if (!lc) return null;
-
-    // Synchronously snapshot both the target layer & composite thumbnail BEFORE any await
-    // so rapid frame switches or subsequent strokes can NEVER race or corrupt persistence!
-    const layerSnap = document.createElement('canvas');
-    layerSnap.width = this.width;
-    layerSnap.height = this.height;
-    layerSnap.getContext('2d')!.drawImage(lc, 0, 0);
-
+  private createCompositeThumbCanvas(): HTMLCanvasElement {
     const tw = 512;
     const th = Math.max(180, Math.round((this.height / this.width) * tw));
     const tc = document.createElement('canvas');
@@ -1669,17 +2072,59 @@ export class StudioCanvasEngine {
         tctx.restore();
       }
     }
+    return tc;
+  }
 
+  /** Synchronously snapshots a layer canvas + composite thumbnail BEFORE any `await` so rapid frame switches NEVER race! */
+  public snapshotLayerAndThumbSync(
+    layerId: string
+  ): { layerSnap: HTMLCanvasElement; thumbSnap: HTMLCanvasElement } | null {
+    if (this.floating) this.commitFloatingSelection();
+    const lc = this.layerCanvases.get(layerId);
+    if (!lc) return null;
+
+    const layerSnap = document.createElement('canvas');
+    layerSnap.width = this.width;
+    layerSnap.height = this.height;
+    layerSnap.getContext('2d')!.drawImage(lc, 0, 0);
+
+    const thumbSnap = this.createCompositeThumbCanvas();
+    return { layerSnap, thumbSnap };
+  }
+
+  public async persistSnapshot(
+    snap: { layerSnap: HTMLCanvasElement; thumbSnap: HTMLCanvasElement },
+    existingLayerBlobKey: string | null,
+    existingThumbKey: string | null | undefined
+  ): Promise<{ layerBlobKey: string; thumbKey: string }> {
     const [pngBlob, thumbBlob] = await Promise.all([
-      canvasToPngBlob(layerSnap),
-      canvasToWebpOrJpegBlob(tc, 0.86),
+      canvasToPngBlob(snap.layerSnap),
+      canvasToWebpOrJpegBlob(snap.thumbSnap, 0.86),
     ]);
     const [layerBlobKey, thumbKey] = await Promise.all([
       saveBlob(pngBlob, existingLayerBlobKey ?? undefined),
       saveBlob(thumbBlob, existingThumbKey ?? undefined),
     ]);
-
     return { layerBlobKey, thumbKey };
+  }
+
+  public async persistThumbOnly(
+    existingThumbKey: string | null | undefined
+  ): Promise<string | null> {
+    if (!this.frame) return null;
+    const tc = this.createCompositeThumbCanvas();
+    const thumbBlob = await canvasToWebpOrJpegBlob(tc, 0.86);
+    return saveBlob(thumbBlob, existingThumbKey ?? undefined);
+  }
+
+  public async persistLayerAndThumb(
+    layerId: string,
+    existingLayerBlobKey: string | null,
+    existingThumbKey: string | null | undefined
+  ): Promise<{ layerBlobKey: string; thumbKey: string } | null> {
+    const snap = this.snapshotLayerAndThumbSync(layerId);
+    if (!snap) return null;
+    return this.persistSnapshot(snap, existingLayerBlobKey, existingThumbKey);
   }
 
   public dispose(): void {
@@ -1693,7 +2138,6 @@ export class StudioCanvasEngine {
     this.onionNextCanvases = [];
     this.bgCanvas = null;
     this.cleanTimelapseCanvas = null;
-    this.undoStack = [];
-    this.redoStack = [];
+    this.frameHistory.clear();
   }
 }

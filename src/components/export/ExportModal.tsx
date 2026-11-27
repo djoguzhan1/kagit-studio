@@ -2,16 +2,23 @@ import { useEffect, useState } from 'react';
 import {
   Archive,
   BookOpen,
+  Check,
   Clock,
+  Copy,
   FileArchive,
   Film,
   Grid,
   Image as ImageIcon,
+  Link2,
+  Share2,
+  Smartphone,
   Sparkles,
   X,
 } from 'lucide-react';
-import { useStudioStore } from '../../store/useStudioStore';
+import type { StudioProject } from '../../types/studio';
+import { flushActiveCanvasNow, useStudioStore } from '../../store/useStudioStore';
 import {
+  createProjectShareLink,
   exportAnimatedGif,
   exportBeforeAfterReel,
   exportPngSequenceZip,
@@ -20,6 +27,11 @@ import {
   exportSpriteSheetZip,
   exportVideoWithAudio,
 } from '../../engine/exportEngine';
+import {
+  resolveExportDimensions,
+  shareFileOnMobileIfSupported,
+  type ExportAspectPreset,
+} from '../../engine/videoExportEngine';
 import { timelapseRecorder } from '../../engine/timelapseRecorder';
 import { BlobImage, KeycapButton } from '../ui/KeycapButton';
 import { ToggleLeverSwitch } from '../ui/Studio3DControls';
@@ -27,6 +39,12 @@ import { TrayExportIcon } from '../ui/AnimatedStudioIcons';
 import { PocketFlipbook3DPreview } from '../ui/PocketFlipbook3DPreview';
 import { localizeProjectName, useT } from '../../i18n/translations';
 import { useModalA11y } from '../../hooks/useModalA11y';
+
+interface LastExportedArtifact {
+  filename: string;
+  blob: Blob;
+  mimeType: string;
+}
 
 export default function ExportModal() {
   const { projects, activeProjectId, exportOpen, setExportOpen, notify } = useStudioStore();
@@ -40,24 +58,34 @@ export default function ExportModal() {
   const [show3DFlipbook, setShow3DFlipbook] = useState(false);
   const [allScenes, setAllScenes] = useState(true);
   const [videoScale, setVideoScale] = useState<1 | 0.75 | 0.5>(1);
+  const [aspectPreset, setAspectPreset] = useState<ExportAspectPreset>('native');
   const [busy, setBusy] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [shareCopiedOk, setShareCopiedOk] = useState(false);
+  const [lastExported, setLastExported] = useState<LastExportedArtifact | null>(null);
+
   const dialogRef = useModalA11y<HTMLDivElement>({
     open: exportOpen,
     onClose: () => setExportOpen(false),
-    closeDisabled: busy,
+    closeDisabled: busy || shareBusy,
     modal: true,
   });
   const [progressLabel, setProgressLabel] = useState('');
   const [progressPct, setProgressPct] = useState(0);
 
   useEffect(() => {
-    if (!exportOpen) return;
+    if (!exportOpen) {
+      setShareUrl(null);
+      setShareCopiedOk(false);
+      return;
+    }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) setExportOpen(false);
+      if (e.key === 'Escape' && !busy && !shareBusy) setExportOpen(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [exportOpen, busy, setExportOpen]);
+  }, [exportOpen, busy, shareBusy, setExportOpen]);
 
   if (!exportOpen || !project) return null;
 
@@ -69,24 +97,106 @@ export default function ExportModal() {
 
   const totalExposures = activeFramesList.reduce((s, f) => s + Math.max(1, f.hold), 0);
   const durationSec = (totalExposures / project.fps).toFixed(2);
-  const a4Pages = Math.max(1, Math.ceil(activeFramesList.length / 8));
-  const outW = Math.round(project.width * videoScale);
-  const outH = Math.round(project.height * videoScale);
+  const cardsPerA4 = project.width / Math.max(1, project.height) >= 1.3 ? 10 : 8;
+  const a4Pages = Math.max(1, Math.ceil(totalExposures / cardsPerA4));
+  const resolvedDims = resolveExportDimensions(
+    project.width,
+    project.height,
+    videoScale,
+    aspectPreset
+  );
+  const outW = resolvedDims.width;
+  const outH = resolvedDims.height;
   const timelapseSteps = timelapseRecorder.getCount();
+  const canWebShareUrl =
+    typeof navigator !== 'undefined' && typeof navigator.share === 'function';
 
-  const runExport = async (task: () => Promise<string | { filename: string }>) => {
+  const getFreshProject = (): StudioProject => {
+    const st = useStudioStore.getState();
+    return st.projects.find((p) => p.id === st.activeProjectId) ?? project;
+  };
+
+  const runExport = async (
+    task: (
+      freshProject: StudioProject
+    ) => Promise<string | { filename: string; blob?: Blob; mimeType?: string }>
+  ) => {
     if (busy) return;
     setBusy(true);
     setProgressPct(5);
     setProgressLabel(t('exportPreparing'));
     try {
-      const res = await task();
+      await flushActiveCanvasNow();
+      const fresh = getFreshProject();
+      const res = await task(fresh);
       const name = typeof res === 'string' ? res : res.filename;
+      if (typeof res !== 'string' && res.blob) {
+        setLastExported({
+          filename: res.filename,
+          blob: res.blob,
+          mimeType: res.mimeType ?? (res.blob.type || 'application/octet-stream'),
+        });
+      }
       notify(`${t('exportDownloadedPrefix')} ${name}`);
     } catch (err) {
       notify(err instanceof Error ? err.message : t('exportFailed'), 'error');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const copyUrlSafely = async (url: string) => {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('clipboard_unavailable');
+      }
+      await navigator.clipboard.writeText(url);
+      setShareCopiedOk(true);
+      notify(t('shareCopied'));
+      setTimeout(() => setShareCopiedOk(false), 2000);
+    } catch {
+      setShareCopiedOk(false);
+      notify(t('shareManualCopyToast'), 'info');
+    }
+  };
+
+  const handleCreateShareLink = async () => {
+    if (shareBusy || busy) return;
+    setShareBusy(true);
+    try {
+      await flushActiveCanvasNow();
+      const fresh = getFreshProject();
+      const link = await createProjectShareLink(fresh);
+      setShareUrl(link);
+      await copyUrlSafely(link);
+    } catch (err) {
+      notify(err instanceof Error ? err.message : t('exportFailed'), 'error');
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const handleNativeUrlShare = async () => {
+    if (!shareUrl || !canWebShareUrl) return;
+    try {
+      await navigator.share({
+        title: localizeProjectName(project.name, locale),
+        url: shareUrl,
+      });
+    } catch {
+      // User dismissed OS share sheet
+    }
+  };
+
+  const handleMobileFileShare = async () => {
+    if (!lastExported) return;
+    const ok = await shareFileOnMobileIfSupported(
+      lastExported.blob,
+      lastExported.filename,
+      lastExported.mimeType
+    );
+    if (!ok) {
+      notify(t('shareManualCopyToast'), 'info');
     }
   };
 
@@ -97,7 +207,7 @@ export default function ExportModal() {
 
   return (
     <div
-      onClick={() => !busy && setExportOpen(false)}
+      onClick={() => !busy && !shareBusy && setExportOpen(false)}
       className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
     >
       <div
@@ -115,8 +225,9 @@ export default function ExportModal() {
               {t('exportTitle')}
             </h2>
             <p className="font-mono text-[11px] text-desk-muted">
-              {localizeProjectName(project.name, locale)} · {activeFramesList.length} {t('framesWord')} ({totalExposures}{' '}
-              {t('exportExposureWord')} · {durationSec}s) · {project.fps} FPS · {outW}×{outH}
+              {localizeProjectName(project.name, locale)} · {activeFramesList.length}{' '}
+              {t('framesWord')} ({totalExposures} {t('exportExposureWord')} · {durationSec}s) ·{' '}
+              {project.fps} FPS · {outW}×{outH}
               {sceneCount > 1
                 ? ` · ${allScenes ? `${sceneCount} ${t('scenesWord')}` : t('exportActiveOnly')}`
                 : ''}
@@ -124,7 +235,7 @@ export default function ExportModal() {
           </div>
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || shareBusy}
             onClick={() => setExportOpen(false)}
             className="min-w-[44px] min-h-[44px] p-2 rounded-xl inline-flex items-center justify-center console-well border border-desk-border text-desk-muted hover:text-desk-text"
             aria-label={t('exportCloseAria')}
@@ -133,7 +244,79 @@ export default function ExportModal() {
           </button>
         </div>
 
-        {/* Common Hardware Lever Switches */}
+        {/* Dedicated 1-Click Project Share Link & Mobile Send Strip */}
+        <div className="px-6 py-3.5 bg-desk-panel/55 border-b border-desk-border space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-bold text-desk-text">
+                <Link2 className="w-4 h-4 text-ink-brass shrink-0" />
+                <span>{t('exportShareSectionTitle')}</span>
+              </div>
+              <p className="text-xs text-desk-muted mt-0.5">{t('exportShareSectionDesc')}</p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {lastExported && (
+                <button
+                  type="button"
+                  onClick={() => void handleMobileFileShare()}
+                  className="min-h-[44px] px-3 rounded-xl console-well border border-ink-emerald/60 hover:border-ink-emerald text-xs font-bold text-desk-text inline-flex items-center gap-1.5 transition-colors"
+                >
+                  <Smartphone className="w-3.5 h-3.5 text-ink-emerald" />
+                  <span>{t('exportShareMobileFileBtn')}</span>
+                </button>
+              )}
+
+              <KeycapButton
+                variant="brass"
+                size="sm"
+                disabled={shareBusy || busy}
+                onClick={() => void handleCreateShareLink()}
+                className="min-h-[44px]"
+              >
+                <Share2 className="w-3.5 h-3.5" />
+                <span>{shareBusy ? t('exportShareCreating') : t('exportShareCreateBtn')}</span>
+              </KeycapButton>
+            </div>
+          </div>
+
+          {shareUrl && (
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              <input
+                type="text"
+                readOnly
+                value={shareUrl}
+                onFocus={(e) => e.currentTarget.select()}
+                aria-label={t('exportShareSectionTitle')}
+                className="flex-1 min-w-[200px] min-h-[40px] px-3 rounded-xl console-well border border-desk-border font-mono text-[11px] text-desk-text focus:outline-none focus:border-ink-brass"
+              />
+              <button
+                type="button"
+                onClick={() => void copyUrlSafely(shareUrl)}
+                className="min-h-[44px] px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-brass text-xs font-bold text-desk-text inline-flex items-center gap-1.5"
+              >
+                {shareCopiedOk ? (
+                  <Check className="w-3.5 h-3.5 text-ink-emerald" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5 text-ink-brass" />
+                )}
+                <span>{t('exportShareCopyBtn')}</span>
+              </button>
+              {canWebShareUrl && (
+                <button
+                  type="button"
+                  onClick={() => void handleNativeUrlShare()}
+                  className="min-h-[44px] px-3 rounded-xl bg-ink-vermilion text-white text-xs font-bold inline-flex items-center gap-1.5"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>{t('exportShareNativeBtn')}</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Common Hardware Lever Switches + Aspect & Scale Selectors */}
         <div className="px-6 py-3 bg-desk-well/60 border-b border-desk-border flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-4">
             <ToggleLeverSwitch
@@ -160,22 +343,50 @@ export default function ExportModal() {
             )}
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <span className="font-mono text-[11px] text-desk-muted">{t('exportScale')}</span>
-            {([1, 0.75, 0.5] as const).map((sc) => (
-              <button
-                key={sc}
-                type="button"
-                onClick={() => setVideoScale(sc)}
-                className={`px-2 py-0.5 rounded font-mono text-[11px] border ${
-                  videoScale === sc
-                    ? 'border-ink-brass text-ink-brass font-bold'
-                    : 'border-desk-border text-desk-muted'
-                }`}
-              >
-                {Math.round(sc * 100)}%
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1">
+              <span className="font-mono text-[11px] text-desk-muted">
+                {t('exportAspectLabel')}
+              </span>
+              {(
+                [
+                  { id: 'native', label: t('exportAspectNative') },
+                  { id: '9:16', label: t('exportAspect916') },
+                  { id: '1:1', label: t('exportAspect1x1') },
+                ] as const
+              ).map((ap) => (
+                <button
+                  key={ap.id}
+                  type="button"
+                  onClick={() => setAspectPreset(ap.id)}
+                  className={`px-2 py-1 rounded font-mono text-[11px] border ${
+                    aspectPreset === ap.id
+                      ? 'border-ink-vermilion text-ink-vermilion font-bold'
+                      : 'border-desk-border text-desk-muted hover:text-desk-text'
+                  }`}
+                >
+                  {ap.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-1">
+              <span className="font-mono text-[11px] text-desk-muted">{t('exportScale')}</span>
+              {([1, 0.75, 0.5] as const).map((sc) => (
+                <button
+                  key={sc}
+                  type="button"
+                  onClick={() => setVideoScale(sc)}
+                  className={`px-2 py-1 rounded font-mono text-[11px] border ${
+                    videoScale === sc
+                      ? 'border-ink-brass text-ink-brass font-bold'
+                      : 'border-desk-border text-desk-muted'
+                  }`}
+                >
+                  {Math.round(sc * 100)}%
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -200,10 +411,11 @@ export default function ExportModal() {
               sheenPulse
               disabled={busy}
               onClick={() =>
-                void runExport(() =>
-                  exportVideoWithAudio(project, {
+                void runExport((fresh) =>
+                  exportVideoWithAudio(fresh, {
                     hideRoughBlue,
                     scale: videoScale,
+                    aspectPreset,
                     allScenes,
                     includeSeal,
                     onProgress,
@@ -273,8 +485,13 @@ export default function ExportModal() {
                 size="md"
                 disabled={busy}
                 onClick={() =>
-                  void runExport(() =>
-                    exportPrintableFlipbookPdf(project, { hideRoughBlue, allScenes, onProgress })
+                  void runExport((fresh) =>
+                    exportPrintableFlipbookPdf(fresh, {
+                      hideRoughBlue,
+                      allScenes,
+                      locale,
+                      onProgress,
+                    })
                   )
                 }
                 className="flex-1"
@@ -299,8 +516,13 @@ export default function ExportModal() {
               size="sm"
               disabled={busy}
               onClick={() =>
-                void runExport(() =>
-                  exportAnimatedGif(project, { hideRoughBlue, allScenes, onProgress })
+                void runExport((fresh) =>
+                  exportAnimatedGif(fresh, {
+                    hideRoughBlue,
+                    aspectPreset,
+                    allScenes,
+                    onProgress,
+                  })
                 )
               }
               className="w-full"
@@ -321,8 +543,12 @@ export default function ExportModal() {
             <button
               type="button"
               disabled={busy}
-              onClick={() => void runExport(() => exportBeforeAfterReel(project, onProgress, includeSeal))}
-              className="w-full py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-vermilion text-xs font-bold text-desk-text transition-colors"
+              onClick={() =>
+                void runExport((fresh) =>
+                  exportBeforeAfterReel(fresh, onProgress, includeSeal, aspectPreset)
+                )
+              }
+              className="w-full min-h-[44px] py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-vermilion text-xs font-bold text-desk-text transition-colors"
             >
               {t('exportReelBtn')}
             </button>
@@ -341,9 +567,9 @@ export default function ExportModal() {
               type="button"
               disabled={busy || timelapseSteps < 2}
               onClick={() =>
-                void runExport(() => timelapseRecorder.exportVideo(project.name, onProgress))
+                void runExport((fresh) => timelapseRecorder.exportVideo(fresh.name, onProgress))
               }
-              className="w-full py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-brass text-xs font-bold text-desk-text disabled:opacity-40 transition-colors"
+              className="w-full min-h-[44px] py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-brass text-xs font-bold text-desk-text disabled:opacity-40 transition-colors"
             >
               {timelapseSteps < 2 ? t('exportTimelapseMin') : t('exportTimelapseBtn')}
             </button>
@@ -362,8 +588,8 @@ export default function ExportModal() {
               type="button"
               disabled={busy}
               onClick={() =>
-                void runExport(() =>
-                  exportPngSequenceZip(project, {
+                void runExport((fresh) =>
+                  exportPngSequenceZip(fresh, {
                     hideRoughBlue,
                     transparentBg: transparentPng,
                     allScenes,
@@ -371,7 +597,7 @@ export default function ExportModal() {
                   })
                 )
               }
-              className="w-full py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-emerald text-xs font-bold text-desk-text transition-colors"
+              className="w-full min-h-[44px] py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-emerald text-xs font-bold text-desk-text transition-colors"
             >
               {t('exportPngZipBtn')}
             </button>
@@ -390,8 +616,8 @@ export default function ExportModal() {
               type="button"
               disabled={busy}
               onClick={() =>
-                void runExport(() =>
-                  exportSpriteSheetZip(project, {
+                void runExport((fresh) =>
+                  exportSpriteSheetZip(fresh, {
                     hideRoughBlue,
                     transparentBg: transparentPng,
                     allScenes,
@@ -399,7 +625,7 @@ export default function ExportModal() {
                   })
                 )
               }
-              className="w-full py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-brass text-xs font-bold text-desk-text transition-colors"
+              className="w-full min-h-[44px] py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-ink-brass text-xs font-bold text-desk-text transition-colors"
             >
               {t('exportSpriteBtn')}
             </button>
@@ -417,10 +643,8 @@ export default function ExportModal() {
             <button
               type="button"
               disabled={busy}
-              onClick={() =>
-                void runExport(() => exportPortableBackupZip(project, onProgress))
-              }
-              className="w-full py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-desk-muted text-xs font-bold text-desk-text transition-colors"
+              onClick={() => void runExport((fresh) => exportPortableBackupZip(fresh, onProgress))}
+              className="w-full min-h-[44px] py-2 px-3 rounded-xl bg-desk-surface border border-desk-border hover:border-desk-muted text-xs font-bold text-desk-text transition-colors"
             >
               {t('exportBackupBtn')}
             </button>

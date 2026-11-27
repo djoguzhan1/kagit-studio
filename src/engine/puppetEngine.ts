@@ -8,7 +8,8 @@ import type {
 } from '../types/studio';
 import { canvasToPngBlob, getBlobBitmap, makeId, saveBlob } from './db';
 import { localizePinOrPartLabel, type StudioLocale } from '../i18n/translations';
-import { rmsToMouthViseme } from './audioEngine';
+import { getVoiceEffectRate, rmsToMouthViseme, type MouthViseme } from './audioEngine';
+import { drawCartoonMouth, type PrestonBlairViseme } from './cartoonMotionEngine';
 import { getOrBuildCachedRigPack } from './characterIntakeEngine';
 import type { LimbPartId } from './skeletonSkinEngine';
 
@@ -58,6 +59,15 @@ export interface WorldBoneGeometry {
   centerY: number;
   radius: number;
   worldRotationRad: number;
+}
+
+export interface RenderPuppetFrameOptions {
+  audio?: AudioTrackData | null;
+  selectedPartId?: string | null;
+  showSkeleton?: boolean;
+  paperColor?: string;
+  partBitmaps?: ReadonlyMap<string, CanvasImageSource>;
+  customMouths?: Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>>;
 }
 
 export function applyEasing(t: number, easing: EasingType): number {
@@ -201,12 +211,10 @@ export function computeRigWorldGeometry(
     const ctr = applyMat(m, part.x + part.w * 0.5, part.y + part.h * 0.5);
     const worldRot = Math.atan2(m[1], m[0]);
 
-    // Rotation gizmo handle extends from pivot along local -Y (upward) axis
     const handleDist = Math.max(46, Math.min(82, Math.max(part.w, part.h) * fitScale * 0.55));
     const hx = piv.x + Math.sin(worldRot) * handleDist;
     const hy = piv.y - Math.cos(worldRot) * handleDist;
 
-    // Squash & Stretch corner scale handle sits on lower-right rim of selection aura
     const radius = Math.max(24, Math.hypot(part.w, part.h) * fitScale * 0.36);
     const sx = ctr.x + Math.cos(worldRot + Math.PI * 0.25) * radius;
     const sy = ctr.y + Math.sin(worldRot + Math.PI * 0.25) * radius;
@@ -267,19 +275,29 @@ function applyParentChain(
   }
 }
 
-export async function renderPuppetFrame(
+function mapMouthVisemeToPrestonBlair(v: MouthViseme): PrestonBlairViseme {
+  if (v === 'closed') return 'closed';
+  if (v === 'half') return 'EE';
+  if (v === 'round') return 'OO';
+  return 'AA';
+}
+
+function mapPrestonBlairToMouthSlot(v: PrestonBlairViseme): MouthViseme {
+  if (v === 'closed') return 'closed';
+  if (v === 'EE' || v === 'FV') return 'half';
+  if (v === 'OH' || v === 'OO') return 'round';
+  return 'wide';
+}
+
+function drawPuppetFrameCore(
   ctx: CanvasRenderingContext2D,
   rig: PuppetRig,
   frameIndex: number,
   canvasW: number,
   canvasH: number,
-  options?: {
-    audio?: AudioTrackData | null;
-    selectedPartId?: string | null;
-    showSkeleton?: boolean;
-    paperColor?: string;
-  }
-): Promise<void> {
+  partBitmaps: ReadonlyMap<string, CanvasImageSource>,
+  options?: RenderPuppetFrameOptions
+): void {
   if (options?.paperColor) {
     ctx.fillStyle = options.paperColor;
     ctx.fillRect(0, 0, canvasW, canvasH);
@@ -293,26 +311,51 @@ export async function renderPuppetFrame(
   const offsetX = (canvasW - rig.sourceW * fitScale) / 2;
   const offsetY = (canvasH - rig.sourceH * fitScale) / 2;
 
-  const activeAudio = options?.audio;
+  const activeAudio = options?.audio && !options.audio.muted ? options.audio : null;
+  const fxRate = getVoiceEffectRate(activeAudio?.voiceEffect);
+  const audioIdx =
+    activeAudio && activeAudio.rmsPerFrame.length > 0
+      ? Math.floor(frameIndex * fxRate) % activeAudio.rmsPerFrame.length
+      : 0;
+  const prevAudioIdx =
+    activeAudio && activeAudio.rmsPerFrame.length > 0
+      ? Math.max(0, (Math.floor(frameIndex * fxRate) - 1 + activeAudio.rmsPerFrame.length) % activeAudio.rmsPerFrame.length)
+      : 0;
   const rms =
     activeAudio && activeAudio.rmsPerFrame.length > 0
-      ? activeAudio.rmsPerFrame[frameIndex % activeAudio.rmsPerFrame.length]
+      ? activeAudio.rmsPerFrame[audioIdx]
       : null;
   const prevRms =
     activeAudio && activeAudio.rmsPerFrame.length > 0
-      ? activeAudio.rmsPerFrame[Math.max(0, (frameIndex - 1) % activeAudio.rmsPerFrame.length)]
+      ? activeAudio.rmsPerFrame[prevAudioIdx]
       : 0;
-  const activeViseme = rms !== null ? rmsToMouthViseme(rms, prevRms) : null;
+
+  const formantViseme: PrestonBlairViseme | null =
+    activeAudio && activeAudio.visemesPerFrame && activeAudio.visemesPerFrame.length > 0
+      ? activeAudio.visemesPerFrame[audioIdx % activeAudio.visemesPerFrame.length]
+      : rms !== null
+        ? mapMouthVisemeToPrestonBlair(rmsToMouthViseme(rms, prevRms))
+        : null;
+
+  const activeSlotViseme: MouthViseme | null = formantViseme
+    ? mapPrestonBlairToMouthSlot(formantViseme)
+    : rms !== null
+      ? rmsToMouthViseme(rms, prevRms)
+      : null;
+
   const hasMouthSlots = rig.parts.some((p) => Boolean(p.mouthSlot));
+  const headPart =
+    rig.parts.find((p) => /baş|kafa|head/i.test(p.name)) ??
+    (rig.parts.length === 1 ? rig.parts[0] : null);
 
   const sorted = [...rig.parts].sort((a, b) => a.zIndex - b.zIndex);
 
   for (const part of sorted) {
-    if (hasMouthSlots && part.mouthSlot && activeViseme) {
-      if (part.mouthSlot !== activeViseme) continue;
+    if (hasMouthSlots && part.mouthSlot && activeSlotViseme) {
+      if (part.mouthSlot !== activeSlotViseme) continue;
     }
 
-    const bmp = await getBlobBitmap(part.blobKey);
+    const bmp = partBitmaps.get(part.blobKey);
     if (!bmp) continue;
 
     ctx.save();
@@ -320,19 +363,10 @@ export async function renderPuppetFrame(
     ctx.scale(fitScale, fitScale);
     applyParentChain(ctx, part, partsById, transforms);
 
-    if (!hasMouthSlots && rms !== null && rms > 0.14 && /baş|kafa|head|ağız|mouth/i.test(part.name)) {
-      const px = part.x + part.pivotX;
-      const py = part.y + part.pivotY;
-      ctx.translate(px, py);
-      ctx.scale(1 + rms * 0.04, 1 + rms * 0.07);
-      ctx.translate(-px, -py);
-    }
-
-    // V3 Seamless Cutout Socket Weld: when a child limb rotates > 15°, paint a subtle
-    // clipped circular joint patch centered on its pivot so shoulder/elbow/hip joints never show white wedges!
+    // Capsule ball-joint weld on large child limb rotations (zero white seam wedges)
     const ownTr = transforms[part.id] ?? IDENTITY_TRANSFORM;
-    if (part.parentId && Math.abs(ownTr.rotation) > 15) {
-      const sockR = Math.max(4, Math.min(part.w, part.h) * 0.24);
+    if (part.parentId && Math.abs(ownTr.rotation) > 12) {
+      const sockR = Math.max(6, Math.min(part.w, part.h) * 0.32);
       ctx.save();
       ctx.beginPath();
       ctx.arc(part.x + part.pivotX, part.y + part.pivotY, sockR, 0, Math.PI * 2);
@@ -342,6 +376,21 @@ export async function renderPuppetFrame(
     }
 
     ctx.drawImage(bmp, part.x, part.y, part.w, part.h);
+
+    // Clean lower-face viseme lip-sync (replaces vertical head stretching!)
+    if (!hasMouthSlots && headPart && part.id === headPart.id && (formantViseme || options?.customMouths?.closed)) {
+      const mouthVis = formantViseme ?? 'closed';
+      const mouthOpen = rms !== null ? Math.min(1, rms * 1.25) : 0;
+      if (mouthVis !== 'closed' || options?.customMouths?.closed) {
+        const mx = part.x + part.w * 0.5;
+        const my = part.y + (rig.parts.length === 1 ? part.h * 0.24 : part.h * 0.72);
+        const mScale = Math.max(0.55, Math.min(1.45, part.w / 145));
+        drawCartoonMouth(ctx, mx, my, mScale, mouthVis, mouthVis === 'closed' ? 0 : Math.max(0.35, mouthOpen), 0, {
+          customMouths: options?.customMouths,
+        });
+      }
+    }
+
     ctx.restore();
   }
 
@@ -349,7 +398,6 @@ export async function renderPuppetFrame(
   if (options?.showSkeleton && rig.parts.length > 0) {
     const { joints } = computeRigWorldGeometry(rig, frameIndex, canvasW, canvasH);
 
-    // 1. Parent -> Child tapered bone links
     for (const j of joints.values()) {
       if (j.parentPivotX !== null && j.parentPivotY !== null) {
         const dx = j.pivotX - j.parentPivotX;
@@ -374,13 +422,11 @@ export async function renderPuppetFrame(
       }
     }
 
-    // 2. Pivot Joint Pins + Active Selection Rotation Gizmo Arm
     for (const j of joints.values()) {
       const isSelected = j.partId === options.selectedPartId;
       ctx.save();
 
       if (isSelected) {
-        // Dashed selection aura
         ctx.strokeStyle = 'rgba(229, 77, 46, 0.65)';
         ctx.lineWidth = 1.8;
         ctx.setLineDash([6, 4]);
@@ -389,7 +435,6 @@ export async function renderPuppetFrame(
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Interactive Brass Rotation Handle stem + knob
         ctx.strokeStyle = '#E54D2E';
         ctx.lineWidth = 2.5;
         ctx.beginPath();
@@ -405,7 +450,6 @@ export async function renderPuppetFrame(
         ctx.lineWidth = 2.5;
         ctx.stroke();
 
-        // Squash & Stretch corner handle (emerald square diamond)
         ctx.save();
         ctx.translate(j.scaleHandleX, j.scaleHandleY);
         ctx.rotate(j.worldRotationRad + Math.PI * 0.25);
@@ -417,7 +461,6 @@ export async function renderPuppetFrame(
         ctx.restore();
       }
 
-      // Pivot pin dot
       ctx.fillStyle = isSelected ? '#E54D2E' : '#2563EB';
       ctx.beginPath();
       ctx.arc(j.pivotX, j.pivotY, isSelected ? 8 : 6, 0, Math.PI * 2);
@@ -428,6 +471,50 @@ export async function renderPuppetFrame(
       ctx.restore();
     }
   }
+}
+
+/**
+ * Synchronous zero-blocking cutout renderer for 60 FPS requestAnimationFrame playback
+ * when part bitmaps are pre-cached in memory.
+ */
+export function renderPuppetFrameSync(
+  ctx: CanvasRenderingContext2D,
+  rig: PuppetRig,
+  frameIndex: number,
+  canvasW: number,
+  canvasH: number,
+  partBitmaps: ReadonlyMap<string, CanvasImageSource>,
+  options?: RenderPuppetFrameOptions
+): boolean {
+  for (const part of rig.parts) {
+    if (!partBitmaps.has(part.blobKey)) return false;
+  }
+  drawPuppetFrameCore(ctx, rig, frameIndex, canvasW, canvasH, partBitmaps, options);
+  return true;
+}
+
+export async function renderPuppetFrame(
+  ctx: CanvasRenderingContext2D,
+  rig: PuppetRig,
+  frameIndex: number,
+  canvasW: number,
+  canvasH: number,
+  options?: RenderPuppetFrameOptions
+): Promise<void> {
+  if (options?.partBitmaps && renderPuppetFrameSync(ctx, rig, frameIndex, canvasW, canvasH, options.partBitmaps, options)) {
+    return;
+  }
+  const loaded = new Map<string, CanvasImageSource>();
+  for (const part of rig.parts) {
+    const cached = options?.partBitmaps?.get(part.blobKey);
+    if (cached) {
+      loaded.set(part.blobKey, cached);
+    } else {
+      const bmp = await getBlobBitmap(part.blobKey);
+      if (bmp) loaded.set(part.blobKey, bmp);
+    }
+  }
+  drawPuppetFrameCore(ctx, rig, frameIndex, canvasW, canvasH, loaded, options);
 }
 
 /** 1-Click Editable Physical Motion Presets honoring the real bone hierarchy */
@@ -458,8 +545,8 @@ export function generateMotionPresetKeyframes(
     const inhale = base();
     if (root) inhale[root.id] = { dx: 0, dy: -6, rotation: 0, scaleX: 1.03, scaleY: 1.05 };
     if (head) inhale[head.id] = { dx: 0, dy: -2, rotation: -3, scaleX: 1, scaleY: 1 };
-    if (armR) armR.id !== root?.id && (inhale[armR.id] = { dx: 0, dy: 0, rotation: -6, scaleX: 1, scaleY: 1 });
-    if (armL) armL.id !== root?.id && (inhale[armL.id] = { dx: 0, dy: 0, rotation: 6, scaleX: 1, scaleY: 1 });
+    if (armR && armR.id !== root?.id) inhale[armR.id] = { dx: 0, dy: 0, rotation: -6, scaleX: 1, scaleY: 1 };
+    if (armL && armL.id !== root?.id) inhale[armL.id] = { dx: 0, dy: 0, rotation: 6, scaleX: 1, scaleY: 1 };
 
     return [
       { id: makeId('kf'), frame: 0, easing: 'easeInOut', transforms: base() },
@@ -476,7 +563,6 @@ export function generateMotionPresetKeyframes(
       peak[root.id] = { dx: 0, dy: -60, rotation: 3, scaleX: 0.94, scaleY: 1.08 };
     }
     if (head && head.id !== root?.id) {
-      // Keep head seated snugly into neck without vertical gap when root squashes/stretches
       squash[head.id] = { dx: 0, dy: 4, rotation: 3, scaleX: 1, scaleY: 1 };
       peak[head.id] = { dx: 0, dy: -2, rotation: -6, scaleX: 1, scaleY: 1 };
     }
@@ -519,7 +605,6 @@ export function generateMotionPresetKeyframes(
   }
 
   if (preset === 'dance') {
-    // Rhythmic groove with weight transfer, squash knee-dip, alternating raised arms & joyful head lag!
     const grooveL = base();
     const dipMid = base();
     const grooveR = base();
@@ -560,13 +645,16 @@ export function generateMotionPresetKeyframes(
     ];
   }
 
-  // Genuine 8-Beat Richard Williams Walk Cycle: Contact -> Down (Squash) -> Passing -> Up (Repeat R/L)!
+  // Genuine 8-Beat Richard Williams Walk Cycle with Horizontal Weight Sway & Stride Translation!
   const makeWalkPose = (
+    hipDx: number,
     hipDy: number,
     hipRot: number,
     sqY: number,
     legLAng: number,
     legRAng: number,
+    legLDx: number,
+    legRDx: number,
     legLDy: number,
     legRDy: number,
     armLAng: number,
@@ -576,7 +664,7 @@ export function generateMotionPresetKeyframes(
     const tr = base();
     if (root) {
       tr[root.id] = {
-        dx: 0,
+        dx: hipDx,
         dy: hipDy,
         rotation: hipRot,
         scaleX: Number((1 / sqY).toFixed(3)),
@@ -584,23 +672,33 @@ export function generateMotionPresetKeyframes(
       };
     }
     if (head && head.id !== root?.id) {
-      tr[head.id] = { dx: 0, dy: Math.round(hipDy * 0.15), rotation: headRot, scaleX: 1, scaleY: 1 };
+      tr[head.id] = {
+        dx: Math.round(-hipDx * 0.25),
+        dy: Math.round(hipDy * 0.15),
+        rotation: headRot,
+        scaleX: 1,
+        scaleY: 1,
+      };
     }
-    if (legL && legL.id !== root?.id) tr[legL.id] = { dx: 0, dy: legLDy, rotation: legLAng, scaleX: 1, scaleY: 1 };
-    if (legR && legR.id !== root?.id) tr[legR.id] = { dx: 0, dy: legRDy, rotation: legRAng, scaleX: 1, scaleY: 1 };
-    if (armL && armL.id !== root?.id) tr[armL.id] = { dx: 0, dy: 0, rotation: armLAng, scaleX: 1, scaleY: 1 };
-    if (armR && armR.id !== root?.id) tr[armR.id] = { dx: 0, dy: 0, rotation: armRAng, scaleX: 1, scaleY: 1 };
+    if (legL && legL.id !== root?.id) tr[legL.id] = { dx: legLDx, dy: legLDy, rotation: legLAng, scaleX: 1, scaleY: 1 };
+    if (legR && legR.id !== root?.id) tr[legR.id] = { dx: legRDx, dy: legRDy, rotation: legRAng, scaleX: 1, scaleY: 1 };
+    if (armL && armL.id !== root?.id) {
+      tr[armL.id] = { dx: Math.round(-armLAng * 0.12), dy: 0, rotation: armLAng, scaleX: 1, scaleY: 1 };
+    }
+    if (armR && armR.id !== root?.id) {
+      tr[armR.id] = { dx: Math.round(-armRAng * 0.12), dy: 0, rotation: armRAng, scaleX: 1, scaleY: 1 };
+    }
     return tr;
   };
 
-  const contactA = makeWalkPose(0, 3, 1.0, 26, -24, 0, 0, -22, 22, -2);
-  const downA = makeWalkPose(8, 4, 0.94, 18, -14, 0, -4, -18, 18, 4);
-  const passingA = makeWalkPose(-4, 1, 1.02, -4, 6, 0, -14, 4, -4, 2);
-  const upA = makeWalkPose(-10, -2, 1.04, -18, 22, 0, -6, 18, -18, -3);
-  const contactB = makeWalkPose(0, -3, 1.0, -24, 26, 0, 0, 22, -22, 2);
-  const downB = makeWalkPose(8, -4, 0.94, -14, 18, -4, 0, 18, -18, -4);
-  const passingB = makeWalkPose(-4, -1, 1.02, 6, -4, -14, 0, -4, 4, -2);
-  const upB = makeWalkPose(-10, 2, 1.04, 22, -18, -6, 0, -18, 18, 3);
+  const contactA = makeWalkPose(4, 0, 3, 1.0, 26, -24, -6, 6, 0, 0, -22, 22, -2);
+  const downA = makeWalkPose(7, 8, 4, 0.94, 18, -14, -4, 4, 0, -4, -18, 18, 4);
+  const passingA = makeWalkPose(3, -4, 1, 1.02, -4, 6, 1, -2, 0, -14, 4, -4, 2);
+  const upA = makeWalkPose(-2, -10, -2, 1.04, -18, 22, 5, -5, 0, -6, 18, -18, -3);
+  const contactB = makeWalkPose(-4, 0, -3, 1.0, -24, 26, 6, -6, 0, 0, 22, -22, 2);
+  const downB = makeWalkPose(-7, 8, -4, 0.94, -14, 18, 4, -4, -4, 0, 18, -18, -4);
+  const passingB = makeWalkPose(-3, -4, -1, 1.02, 6, -4, -2, 1, -14, 0, -4, 4, -2);
+  const upB = makeWalkPose(2, -10, 2, 1.04, 22, -18, -5, 5, -6, 0, -18, 18, 3);
 
   const f = (u: number) => Math.max(0, Math.min(end, Math.round(u * end)));
   return [
@@ -656,10 +754,54 @@ export function extractLassoCutout(
   return { canvas: out, x, y, w, h };
 }
 
+function sampleLocalBodyFillStyle(
+  filledCanvas: HTMLCanvasElement,
+  cx: number,
+  cy: number,
+  fallback: string
+): string {
+  const ctx = filledCanvas.getContext('2d');
+  if (!ctx) return fallback;
+  const sw = filledCanvas.width;
+  const sh = filledCanvas.height;
+  const rx = Math.max(0, Math.min(sw - 1, Math.round(cx)));
+  const ry = Math.max(0, Math.min(sh - 1, Math.round(cy)));
+  const x0 = Math.max(0, rx - 8);
+  const y0 = Math.max(0, ry - 8);
+  const bw = Math.min(sw - x0, 17);
+  const bh = Math.min(sh - y0, 17);
+  const data = ctx.getImageData(x0, y0, bw, bh).data;
+  let sr = 0;
+  let sg = 0;
+  let sb = 0;
+  let cnt = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 200) continue;
+    const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    if (lum < 45) continue; // skip pure ink border pixels
+    sr += data[i];
+    sg += data[i + 1];
+    sb += data[i + 2];
+    cnt++;
+  }
+  if (cnt === 0) {
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 180) continue;
+      sr += data[i];
+      sg += data[i + 1];
+      sb += data[i + 2];
+      cnt++;
+    }
+  }
+  if (cnt === 0) return fallback;
+  return `rgb(${Math.round(sr / cnt)}, ${Math.round(sg / cnt)}, ${Math.round(sb / cnt)})`;
+}
+
 /**
  * 1-Click Geodesic Auto-Splitter for Parçalı Kukla (Cutout Puppet Mode):
  * Segments a character canvas into Torso (root) + Head + L/R Arms + L/R Legs with
- * real anatomical joint pivots and cycle-free parent hierarchy in ~10ms!
+ * circular ball-joint capsule overlap (`r_joint = 0.55 * limbWidth`) + inpainted torso sockets
+ * (`0 px` shoulder/crotch wedge gaps under ±35° rotation!).
  */
 export async function autoSplitCanvasToPuppetParts(
   sourceCanvas: HTMLCanvasElement,
@@ -687,8 +829,6 @@ export async function autoSplitCanvasToPuppetParts(
     { id: 'arm_r', nameTr: 'Sağ Kol', nameEn: 'Right Arm', zIndex: 6, isRoot: false },
   ];
 
-  // Check how many real distinct limbs exist before falling back to single-body cutout
-  // (never collapse a valid multi-limb cartoon character down to 1 single piece!)
   const distinctLimbCount = (['head', 'arm_l', 'arm_r', 'leg_l', 'leg_r'] as LimbPartId[]).filter(
     (id) => (pack.parts[id]?.pixelCount ?? 0) >= 24
   ).length;
@@ -712,16 +852,70 @@ export async function autoSplitCanvasToPuppetParts(
     ];
   }
 
+  // Optional pre-inpainted socket layer from conformingMeshEngine (`inpaintSocketRegion`)
+  let socketCanvas: HTMLCanvasElement | null = null;
+  const socketRgba = pack.skinnedMesh?.inpaintedSocketOnlyRgba;
+  if (socketRgba && socketRgba.length === sw * sh * 4) {
+    socketCanvas = document.createElement('canvas');
+    socketCanvas.width = sw;
+    socketCanvas.height = sh;
+    socketCanvas.getContext('2d')?.putImageData(new ImageData(new Uint8ClampedArray(socketRgba), sw, sh), 0, 0);
+  }
+
+  // Precompute per-part circular ball-joint capsule radius (`r_joint = 0.55 * limbWidth`)
+  const jointCapsuleByPart = new Map<LimbPartId, { pivX: number; pivY: number; rJoint: number }>();
+  for (const sp of specs) {
+    const seg = pack.parts[sp.id];
+    if (!seg || seg.pixelCount < 6) continue;
+    const rawW = Math.max(8, (seg.u1 - seg.u0) * sw);
+    const rawH = Math.max(8, (seg.v1 - seg.v0) * sh);
+    const limbWidth =
+      sp.id === 'head'
+        ? Math.max(14, rawW * 0.34)
+        : sp.id === 'torso'
+          ? Math.max(14, rawW * 0.3)
+          : Math.max(12, Math.min(rawW, rawH));
+    const rJoint = Math.max(8, Math.min(Math.round(Math.min(sw, sh) * 0.075), Math.round(0.55 * limbWidth)));
+    jointCapsuleByPart.set(sp.id, {
+      pivX: seg.root.x * sw,
+      pivY: seg.root.y * sh,
+      rJoint,
+    });
+  }
+
   const parts: PuppetPart[] = [];
   for (const sp of specs) {
     const seg = pack.parts[sp.id];
     if (!seg || seg.pixelCount < 6) continue;
-    // Add generous +6px joint socket overlap around pivot so rotating limbs 35° never opens harsh gaps!
+    const cap = jointCapsuleByPart.get(sp.id)!;
     const pad = 6;
-    const x0 = Math.max(0, Math.floor(seg.u0 * sw) - pad);
-    const y0 = Math.max(0, Math.floor(seg.v0 * sh) - pad);
-    const x1 = Math.min(sw, Math.ceil(seg.u1 * sw) + pad);
-    const y1 = Math.min(sh, Math.ceil(seg.v1 * sh) + pad);
+
+    let minPxX = Math.floor(seg.u0 * sw) - pad;
+    let minPxY = Math.floor(seg.v0 * sh) - pad;
+    let maxPxX = Math.ceil(seg.u1 * sw) + pad;
+    let maxPxY = Math.ceil(seg.v1 * sh) + pad;
+
+    // Expand bbox around own capsule ball-joint
+    minPxX = Math.min(minPxX, Math.floor(cap.pivX - cap.rJoint - 2));
+    minPxY = Math.min(minPxY, Math.floor(cap.pivY - cap.rJoint - 2));
+    maxPxX = Math.max(maxPxX, Math.ceil(cap.pivX + cap.rJoint + 2));
+    maxPxY = Math.max(maxPxY, Math.ceil(cap.pivY + cap.rJoint + 2));
+
+    // For torso root, also encompass every child limb's socket capsule so inpainted sockets never clip!
+    if (sp.isRoot) {
+      for (const [childId, cCap] of jointCapsuleByPart.entries()) {
+        if (childId === 'torso') continue;
+        minPxX = Math.min(minPxX, Math.floor(cCap.pivX - cCap.rJoint - 2));
+        minPxY = Math.min(minPxY, Math.floor(cCap.pivY - cCap.rJoint - 2));
+        maxPxX = Math.max(maxPxX, Math.ceil(cCap.pivX + cCap.rJoint + 2));
+        maxPxY = Math.max(maxPxY, Math.ceil(cCap.pivY + cCap.rJoint + 2));
+      }
+    }
+
+    const x0 = Math.max(0, minPxX);
+    const y0 = Math.max(0, minPxY);
+    const x1 = Math.min(sw, maxPxX);
+    const y1 = Math.min(sh, maxPxY);
     const pw = Math.max(8, x1 - x0);
     const ph = Math.max(8, y1 - y0);
 
@@ -729,19 +923,65 @@ export async function autoSplitCanvasToPuppetParts(
     pc.width = pw;
     pc.height = ph;
     const pctx = pc.getContext('2d')!;
-    // Soft feathered joint-socket overlap from full character under the pivot to seal rotational seams!
-    if (!sp.isRoot) {
-      const pivLx = seg.root.x * sw - x0;
-      const pivLy = seg.root.y * sh - y0;
-      const sockR = Math.max(8, Math.round(Math.min(sw, sh) * 0.045));
+
+    if (sp.isRoot) {
+      // 1) Inpaint circular ball sockets behind every child limb pivot (shoulders, hips, neck)
+      for (const childId of ['leg_l', 'leg_r', 'arm_l', 'arm_r', 'head'] as LimbPartId[]) {
+        const cCap = jointCapsuleByPart.get(childId);
+        if (!cCap) continue;
+        const sampleY =
+          childId === 'leg_l' || childId === 'leg_r'
+            ? Math.max(0, cCap.pivY - cCap.rJoint * 0.45)
+            : childId === 'head'
+              ? Math.min(sh - 1, cCap.pivY + cCap.rJoint * 0.45)
+              : cCap.pivY;
+        const sampleX =
+          childId === 'arm_l'
+            ? Math.min(sw - 1, cCap.pivX + cCap.rJoint * 0.45)
+            : childId === 'arm_r'
+              ? Math.max(0, cCap.pivX - cCap.rJoint * 0.45)
+              : cCap.pivX;
+        const fillStyle = sampleLocalBodyFillStyle(pack.filledCanvas, sampleX, sampleY, pack.faceFillColor);
+
+        pctx.save();
+        pctx.beginPath();
+        pctx.arc(cCap.pivX - x0, cCap.pivY - y0, cCap.rJoint * 0.92, 0, Math.PI * 2);
+        pctx.clip();
+        pctx.fillStyle = fillStyle;
+        pctx.fillRect(0, 0, pw, ph);
+        pctx.drawImage(pack.filledCanvas, x0, y0, pw, ph, 0, 0, pw, ph);
+        pctx.restore();
+      }
+      // 2) Composite conforming socket inpainting layer underneath torso strokes
+      if (socketCanvas) {
+        pctx.drawImage(socketCanvas, x0, y0, pw, ph, 0, 0, pw, ph);
+      }
+    } else {
+      // Child limb circular ball-joint capsule (`r_joint = 0.55 * limbWidth`)
+      const pivLx = cap.pivX - x0;
+      const pivLy = cap.pivY - y0;
+      const limbFill = sampleLocalBodyFillStyle(pack.filledCanvas, cap.pivX, cap.pivY, pack.faceFillColor);
       pctx.save();
       pctx.beginPath();
-      pctx.arc(pivLx, pivLy, sockR, 0, Math.PI * 2);
+      pctx.arc(pivLx, pivLy, cap.rJoint, 0, Math.PI * 2);
       pctx.clip();
+      // Draw character silhouette pixels inside the circular joint tab, backed by solid limb color inside the joint core
       pctx.drawImage(pack.filledCanvas, x0, y0, pw, ph, 0, 0, pw, ph);
+      pctx.globalCompositeOperation = 'destination-over';
+      pctx.fillStyle = limbFill;
+      pctx.beginPath();
+      pctx.arc(pivLx, pivLy, cap.rJoint * 0.78, 0, Math.PI * 2);
+      pctx.fill();
       pctx.restore();
     }
+
     pctx.drawImage(seg.canvas, x0, y0, pw, ph, 0, 0, pw, ph);
+    // Clip strictly to the character's original outer silhouette so joint capsules NEVER bulge into exterior air!
+    pctx.save();
+    pctx.globalCompositeOperation = 'destination-in';
+    pctx.drawImage(pack.filledCanvas, x0, y0, pw, ph, 0, 0, pw, ph);
+    pctx.restore();
+
     const blobKey = await saveBlob(await canvasToPngBlob(pc));
 
     parts.push({
@@ -753,14 +993,13 @@ export async function autoSplitCanvasToPuppetParts(
       y: y0,
       w: pw,
       h: ph,
-      pivotX: Math.max(0, Math.min(pw, Math.round(seg.root.x * sw - x0))),
-      pivotY: Math.max(0, Math.min(ph, Math.round(seg.root.y * sh - y0))),
+      pivotX: Math.max(0, Math.min(pw, Math.round(cap.pivX - x0))),
+      pivotY: Math.max(0, Math.min(ph, Math.round(cap.pivY - y0))),
       zIndex: sp.zIndex,
       mouthSlot: null,
     });
   }
 
-  // Ensure root part exists if torso was empty
   if (parts.length > 0 && !parts.some((p) => p.parentId === null)) {
     parts[0].parentId = null;
     const fallbackRoot = parts[0].id;

@@ -8,6 +8,7 @@ import {
   MoreHorizontal,
   Plus,
   Repeat,
+  RotateCcw,
   Square,
   StickyNote,
   Trash2,
@@ -41,6 +42,8 @@ export default function XSheetTimeline() {
     selectFrame,
     addFrameAfterCurrent,
     deleteFrame,
+    undoDeleteFrame,
+    lastDeletedFrame,
     setFrameHold,
     updateFrameNote,
     moveFrame,
@@ -134,7 +137,8 @@ export default function XSheetTimeline() {
     if (!project.frames.length) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const targetSlot = Math.floor(ratio * totalExposures);
+    const targetSec = project.audio ? ratio * project.audio.durationSec : ratio * (totalExposures / project.fps);
+    const targetSlot = Math.floor(targetSec * project.fps);
     let acc = 0;
     for (let i = 0; i < project.frames.length; i++) {
       acc += Math.max(1, project.frames[i].hold);
@@ -386,6 +390,18 @@ export default function XSheetTimeline() {
               <Trash2 className="w-3.5 h-3.5 text-ink-vermilion" />
             </KeycapButton>
 
+            {lastDeletedFrame?.projectId === project.id && (
+              <KeycapButton
+                size="sm"
+                variant="brass"
+                onClick={() => undoDeleteFrame()}
+                title={t('xsheetUndoDeleteBtn')}
+                aria-label={t('xsheetUndoDeleteBtn')}
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </KeycapButton>
+            )}
+
             {/* Active-Frame Hold Stepper (replaces 32 tiny 16x16 per-card buttons!) */}
             {activeFrame && (
               <div className="hidden lg:inline-flex items-center gap-1 px-1.5 min-h-[38px] rounded-xl console-well border border-desk-border">
@@ -545,6 +561,20 @@ export default function XSheetTimeline() {
                       <span className="truncate">{t('xsheetDeleteFrame')}</span>
                     </button>
                   </div>
+
+                  {lastDeletedFrame?.projectId === project.id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        undoDeleteFrame();
+                        setMobileMoreOpen(false);
+                      }}
+                      className="w-full min-h-[44px] px-3 rounded-xl console-well border border-ink-brass text-xs font-bold text-ink-brass flex items-center justify-center gap-1.5"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      <span className="truncate">{t('xsheetUndoDeleteBtn')}</span>
+                    </button>
+                  )}
 
                   {/* Mobile Frame Hold + Loop */}
                   {activeFrame && (

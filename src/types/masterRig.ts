@@ -52,6 +52,18 @@ export interface CustomFaceSprites {
   eyes?: Partial<Record<CustomEyeKey, string>>;
 }
 
+export interface WeightStroke {
+  /** Anatomical region id (0:head, 1:torso, 2:arm_l, 3:arm_r, 4:leg_l, 5:leg_r) */
+  region: number;
+  /** Normalized 0..1 UV stroke center */
+  x: number;
+  y: number;
+  /** Normalized 0..1 brush radius */
+  radius: number;
+  /** Brush blend strength 0..1 */
+  strength: number;
+}
+
 export interface CharacterMasterRig {
   id: string;
   name: string;
@@ -62,6 +74,8 @@ export interface CharacterMasterRig {
   customSlitLines?: CustomSlitLine[];
   /** Optional 5-second dragged joint pin overrides in normalized UV (0..1) */
   jointOverrides?: Record<string, { x: number; y: number }>;
+  /** Optional interactive weight/region paint strokes preserving Σw = 1 */
+  weightStrokes?: Array<{ region: number; x: number; y: number; radius: number; strength: number }>;
   /** Optional artist-drawn mouth/eye sprite replacements */
   faceSprites?: CustomFaceSprites;
   updatedAt: number;

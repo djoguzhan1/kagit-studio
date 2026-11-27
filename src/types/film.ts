@@ -13,6 +13,8 @@ export interface StyleDNA {
   palette: string[];
   inkColor: string;
   accentColor: string;
+  /** Optional sampled warm paper/face interior fill color for clean mouth underlay masking */
+  paperBaseColor?: string;
   /** -1 (cool moonlight/rain) .. 0 (neutral) .. +1 (warm sunset/parchment) */
   warmTemp: number;
   contrast: number; // 0..1
@@ -20,7 +22,19 @@ export interface StyleDNA {
   styleTag: FilmStyleTag;
 }
 
-export type WorldSetId = 'rainy-alley' | 'golden-hill' | 'moonlit-forest' | 'custom';
+export type WorldSetId =
+  | 'rainy-alley'
+  | 'golden-hill'
+  | 'moonlit-forest'
+  | 'cosmic-nebula'
+  | 'concert-stage'
+  | 'canyon-chase'
+  | 'custom';
+
+export type FilmAspectRatio = '16:9' | '9:16' | '1:1';
+export type FilmAudioMixMode = 'full' | 'voice-only' | 'muted';
+export type FilmGestureMode = 'none' | 'wave' | 'handsUp' | 'surprise';
+
 export type WeatherKind = 'none' | 'rain' | 'wind-leaves' | 'fireflies' | 'snow';
 export type CinemaLookId =
   | 'natural'
@@ -54,14 +68,14 @@ export type FilmEmotionId =
 export type FilmPropId = 'none' | 'glowing-letter' | 'lantern' | 'umbrella';
 
 export interface FilmCameraTrack {
-  fromX: number; // normalized pan -0.4..0.4
+  fromX: number; // normalized pan -0.45..0.45
   fromY: number;
-  fromZoom: number; // 0.9..2.6
+  fromZoom: number; // 0.85..3.0
   toX: number;
   toY: number;
   toZoom: number;
   tiltDeg: number; // -12..12
-  dofStrength: number; // 0..1 depth-of-field bokeh on far/near planes
+  dofStrength: number; // 0..1 depth-of-field bokeh on far/mid background planes
   handheld: number; // 0..1 subtle cinema camera breath
 }
 
@@ -109,6 +123,8 @@ export interface MotionCaptureSample {
   mouthOpen?: number;
   /** Optional synchronized mouth viseme */
   viseme?: VisemeId;
+  /** Optional upper-body gesture hint for IK mode selection */
+  gestureMode?: FilmGestureMode;
 }
 
 export interface MotionCaptureTrack {
@@ -130,6 +146,7 @@ export interface LivePerformanceOverride {
   squashY?: number;
   mouthOpen?: number;
   viseme?: VisemeId;
+  gestureMode?: FilmGestureMode;
 }
 
 export interface ShotActorTrack {

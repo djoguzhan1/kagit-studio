@@ -1,31 +1,66 @@
 import type { PaperStyleId } from '../types/studio';
 
-let graphiteMaskCache: HTMLCanvasElement | null = null;
-let screentoneCache: Map<string, CanvasPattern | null> = new Map();
+export const GRAIN_TILE_SIZE = 128;
 
-/** Procedural 64x64 paper-tooth alpha mask so 2B Graphite Pencil genuinely catches paper grain! */
+let graphiteMaskCache: HTMLCanvasElement | null = null;
+const screentoneCache: Map<string, CanvasPattern | null> = new Map();
+
+function hash2d(ix: number, iy: number, period: number): number {
+  const wx = ((ix % period) + period) % period;
+  const wy = ((iy % period) + period) % period;
+  let h = (wx * 374761393 + wy * 668265263) ^ 0x5bf03635;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+
+function seamlessValueNoise(x: number, y: number, cellSize: number, tileSize: number): number {
+  const period = Math.max(2, Math.round(tileSize / cellSize));
+  const gx = (x / tileSize) * period;
+  const gy = (y / tileSize) * period;
+  const x0 = Math.floor(gx);
+  const y0 = Math.floor(gy);
+  const fx = gx - x0;
+  const fy = gy - y0;
+  const u = fx * fx * (3 - 2 * fx);
+  const v = fy * fy * (3 - 2 * fy);
+
+  const n00 = hash2d(x0, y0, period);
+  const n10 = hash2d(x0 + 1, y0, period);
+  const n01 = hash2d(x0, y0 + 1, period);
+  const n11 = hash2d(x0 + 1, y0 + 1, period);
+  const nx0 = n00 + (n10 - n00) * u;
+  const nx1 = n01 + (n11 - n01) * u;
+  return nx0 + (nx1 - nx0) * v;
+}
+
+/**
+ * Seamless toroidal 128x128 multi-scale cold-press cotton paper tooth mask
+ * so 2B Graphite & Non-Photo Blue pencils catch authentic paper fibers without visible tiling or clipping!
+ */
 export function getGraphiteGrainCanvas(): HTMLCanvasElement {
   if (graphiteMaskCache) return graphiteMaskCache;
+  const size = GRAIN_TILE_SIZE;
   const c = document.createElement('canvas');
-  c.width = 64;
-  c.height = 64;
+  c.width = size;
+  c.height = size;
   const ctx = c.getContext('2d')!;
-  const img = ctx.createImageData(64, 64);
+  const img = ctx.createImageData(size, size);
   const d = img.data;
-  let seed = 1337;
-  const rand = () => {
-    seed = (seed * 16807) % 2147483647;
-    return (seed - 1) / 2147483646;
-  };
-  for (let i = 0; i < 64 * 64; i++) {
-    const n = rand();
-    // Paper tooth peaks catch dark graphite; valleys stay lightly untouched
-    const alpha = n > 0.38 ? Math.round((n - 0.35) * 320) : 0;
-    const p = i * 4;
-    d[p] = 255;
-    d[p + 1] = 255;
-    d[p + 2] = 255;
-    d[p + 3] = Math.min(255, alpha);
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const coarse = seamlessValueNoise(x, y, 6, size);
+      const medium = seamlessValueNoise(x + 37, y + 19, 3, size);
+      const fine = hash2d(x + 11, y + 73, size);
+      const tooth = coarse * 0.44 + medium * 0.34 + fine * 0.22;
+      // Peaks of cotton fibers catch graphite; valleys stay lightly untouched
+      const alpha = tooth > 0.35 ? Math.round(Math.min(255, (tooth - 0.32) * 380)) : 0;
+      const p = (y * size + x) * 4;
+      d[p] = 255;
+      d[p + 1] = 255;
+      d[p + 2] = 255;
+      d[p + 3] = alpha;
+    }
   }
   ctx.putImageData(img, 0, 0);
   graphiteMaskCache = c;
@@ -99,7 +134,6 @@ export function renderPaperSurface(
       ctx.lineTo(width, y + 0.5);
     }
     ctx.stroke();
-    // Classic red school notebook vertical margin rule
     ctx.strokeStyle = 'rgba(229, 77, 46, 0.28)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -108,7 +142,6 @@ export function renderPaperSurface(
     ctx.stroke();
     ctx.restore();
   } else if (paperStyle === 'acme12') {
-    // Classic Disney/Studio 12-Field Animation Graticule Chart
     ctx.save();
     const cx = width / 2;
     const cy = height / 2;
@@ -128,7 +161,6 @@ export function renderPaperSurface(
       ctx.lineTo(width, r * stepY);
     }
     ctx.stroke();
-    // Bold center axes & 10-field TV safe box
     ctx.strokeStyle = 'rgba(229, 77, 46, 0.24)';
     ctx.lineWidth = 1.4;
     ctx.beginPath();
@@ -140,12 +172,11 @@ export function renderPaperSurface(
     ctx.strokeRect(stepX, stepY, width - stepX * 2, height - stepY * 2);
     ctx.restore();
   } else if (paperStyle === 'kraft') {
-    // Warm subtle fiber specks for kraft drafting board
     ctx.save();
     ctx.fillStyle = 'rgba(84, 58, 34, 0.08)';
     for (let i = 0; i < 60; i++) {
-      const x = ((i * 197) % width);
-      const y = ((i * 313) % height);
+      const x = (i * 197) % width;
+      const y = (i * 313) % height;
       ctx.fillRect(x, y, 4, 1.5);
     }
     ctx.restore();

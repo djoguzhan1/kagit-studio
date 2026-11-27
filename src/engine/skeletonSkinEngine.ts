@@ -12,6 +12,7 @@ import {
 } from './universalCreatureRig';
 import {
   buildCreatureMeshAsync,
+  buildFullRigPackInWorkerAsync,
   buildHumanoidMeshAsync,
   buildSilhouetteMeshAsync,
 } from './rigWorkerClient';
@@ -101,6 +102,38 @@ export interface RiggedCharacterPack {
   skinnedMesh: ConformingSkinnedMesh | null;
   /** Air-split WebGL2 silhouette conforming mesh for quadrupeds, ghosts, clouds & custom-pin rigs (0 air webbing!) */
   silhouetteMesh: ConformingSkinnedMesh | null;
+  /** Optional artist-uploaded custom mouth sprites (closed, A, E, O) resolved for live lip-sync */
+  customMouthBitmaps?: Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>>;
+}
+
+export interface PreparedLimbPartRGBA {
+  id: LimbPartId;
+  rgba: Uint8ClampedArray;
+  darkRgba: Uint8ClampedArray;
+  nightRgba: Uint8ClampedArray;
+  nightFarRgba: Uint8ClampedArray;
+  u0: number;
+  v0: number;
+  u1: number;
+  v1: number;
+  root: Vec2;
+  mid: Vec2;
+  end: Vec2;
+  pixelCount: number;
+}
+
+export interface PreparedRigPackBaseRGBA {
+  filledRgba: Uint8ClampedArray;
+  nightFilledRgba: Uint8ClampedArray;
+  sw: number;
+  sh: number;
+  anatomy: DrawingAnatomy;
+  eyes: DetectedEyes;
+  partsRgba: Record<LimbPartId, PreparedLimbPartRGBA>;
+  archetype: CharacterArchetype;
+  faceFillColor: string;
+  inkColor: string;
+  hasDrawnMouth: boolean;
 }
 
 // ============================================================================
@@ -183,22 +216,65 @@ export function fillClosedContoursRGBA(
     }
   }
 
-  // Gentle 1-pixel morphological dilation ONLY for exterior flood leak prevention (seals 1-2px pen gaps!)
-  const sealed = new Uint8Array(wall);
-  for (let y = 1; y < ph - 1; y++) {
+  // Morphological closing (dilate R=3 -> erode R=3) ONLY for exterior flood leak prevention:
+  // Seals sketchy 1..6px hand-drawn loop endpoint gaps so 4-stroke faces NEVER crack,
+  // while keeping true wide U-cavities (between legs/arms > 8px) completely open!
+  const closeR = 3;
+  const dilH = new Uint8Array(total);
+  for (let y = 0; y < ph; y++) {
     const row = y * pw;
-    for (let x = 1; x < pw - 1; x++) {
-      const idx = row + x;
-      if (wall[idx]) continue;
-      // Seal tiny hairline gaps (horizontal, vertical, or diagonal pinch)
-      if (
-        (wall[idx - 1] && wall[idx + 1]) ||
-        (wall[idx - pw] && wall[idx + pw]) ||
-        (wall[idx - pw - 1] && wall[idx + pw + 1]) ||
-        (wall[idx - pw + 1] && wall[idx + pw - 1])
-      ) {
-        sealed[idx] = 1;
+    for (let x = 0; x < pw; x++) {
+      const x0 = Math.max(0, x - closeR);
+      const x1 = Math.min(pw - 1, x + closeR);
+      for (let kx = x0; kx <= x1; kx++) {
+        if (wall[row + kx]) {
+          dilH[row + x] = 1;
+          break;
+        }
       }
+    }
+  }
+  const dil = new Uint8Array(total);
+  for (let y = 0; y < ph; y++) {
+    const y0 = Math.max(0, y - closeR);
+    const y1 = Math.min(ph - 1, y + closeR);
+    const row = y * pw;
+    for (let x = 0; x < pw; x++) {
+      for (let ky = y0; ky <= y1; ky++) {
+        if (dilH[ky * pw + x]) {
+          dil[row + x] = 1;
+          break;
+        }
+      }
+    }
+  }
+  const eroH = new Uint8Array(total);
+  for (let y = 0; y < ph; y++) {
+    const row = y * pw;
+    for (let x = 0; x < pw; x++) {
+      if (x < closeR || x >= pw - closeR) continue;
+      let all = 1;
+      for (let kx = x - closeR; kx <= x + closeR; kx++) {
+        if (!dil[row + kx]) {
+          all = 0;
+          break;
+        }
+      }
+      eroH[row + x] = all;
+    }
+  }
+  const sealed = new Uint8Array(wall);
+  for (let y = closeR; y < ph - closeR; y++) {
+    const row = y * pw;
+    for (let x = closeR; x < pw - closeR; x++) {
+      let all = 1;
+      for (let ky = y - closeR; ky <= y + closeR; ky++) {
+        if (!eroH[ky * pw + x]) {
+          all = 0;
+          break;
+        }
+      }
+      if (all) sealed[row + x] = 1;
     }
   }
 
@@ -753,28 +829,23 @@ export function detectFaceEyesFromPixels(
  * Pure pixel-space baker for pre-tinted far limbs and crisp hand-cut paper-halo night cutouts!
  * Runs ONCE at rig-build time (<3ms) so the 60fps & GIF loops use ZERO ctx.filter calls!
  */
-function bakePartVariants(
+function bakePartVariantsRGBA(
   srcBuf: Uint8ClampedArray,
   sw: number,
   sh: number,
   bbox: { minX: number; minY: number; maxX: number; maxY: number },
-  haloRadius: number
+  haloRadius: number,
+  includeDarkAndFar = true
 ): {
-  darkCanvas: HTMLCanvasElement;
-  nightCanvas: HTMLCanvasElement;
-  nightFarCanvas: HTMLCanvasElement;
+  darkRgba: Uint8ClampedArray;
+  nightRgba: Uint8ClampedArray;
+  nightFarRgba: Uint8ClampedArray;
 } {
-  const mk = () => {
-    const c = document.createElement('canvas');
-    c.width = sw;
-    c.height = sh;
-    return c;
-  };
-  const darkCanvas = mk();
-  const nightCanvas = mk();
-  const nightFarCanvas = mk();
+  const darkBuf = includeDarkAndFar ? new Uint8ClampedArray(sw * sh * 4) : new Uint8ClampedArray(0);
+  const nightBuf = new Uint8ClampedArray(sw * sh * 4);
+  const nightFarBuf = includeDarkAndFar ? new Uint8ClampedArray(sw * sh * 4) : new Uint8ClampedArray(0);
   if (bbox.maxX < bbox.minX || bbox.maxY < bbox.minY) {
-    return { darkCanvas, nightCanvas, nightFarCanvas };
+    return { darkRgba: darkBuf, nightRgba: nightBuf, nightFarRgba: nightFarBuf };
   }
 
   const pad = haloRadius + 1;
@@ -783,11 +854,6 @@ function bakePartVariants(
   const x1 = Math.min(sw - 1, bbox.maxX + pad);
   const y1 = Math.min(sh - 1, bbox.maxY + pad);
 
-  const darkBuf = new Uint8ClampedArray(sw * sh * 4);
-  const nightBuf = new Uint8ClampedArray(sw * sh * 4);
-  const nightFarBuf = new Uint8ClampedArray(sw * sh * 4);
-
-  // Separable 2-pass max-alpha dilation for crisp 2.5px hand-cut cream paper sticker edge!
   const bw = x1 - x0 + 1;
   const bh = y1 - y0 + 1;
   const hMax = new Uint8Array(bw * bh);
@@ -831,24 +897,18 @@ function bakePartVariants(
       const a = srcBuf[off + 3];
       const haloA = dil[dRow + lx];
 
-      if (a > 0) {
-        const r = srcBuf[off];
-        const g = srcBuf[off + 1];
-        const b = srcBuf[off + 2];
-        // Slightly shaded far limb (daylight)
-        darkBuf[off] = Math.round(r * 0.85);
-        darkBuf[off + 1] = Math.round(g * 0.84);
-        darkBuf[off + 2] = Math.round(b * 0.87);
+      if (includeDarkAndFar && a > 0) {
+        darkBuf[off] = Math.round(srcBuf[off] * 0.85);
+        darkBuf[off + 1] = Math.round(srcBuf[off + 1] * 0.84);
+        darkBuf[off + 2] = Math.round(srcBuf[off + 2] * 0.87);
         darkBuf[off + 3] = a;
       }
 
       if (haloA > 16) {
-        // Composite original stroke crisp ON TOP of warm hand-cut cream paper halo!
         const sa = a / 255;
         const ha = Math.min(1, (haloA / 255) * 0.9);
         const outA = sa + ha * (1 - sa);
         if (outA > 0.01) {
-          // Warm candlelit ivory rim for front limbs (252, 241, 214)
           const nr = (srcBuf[off] * sa + 252 * ha * (1 - sa)) / outA;
           const ng = (srcBuf[off + 1] * sa + 240 * ha * (1 - sa)) / outA;
           const nb = (srcBuf[off + 2] * sa + 212 * ha * (1 - sa)) / outA;
@@ -857,74 +917,128 @@ function bakePartVariants(
           nightBuf[off + 2] = Math.min(255, Math.round(nb));
           nightBuf[off + 3] = Math.min(255, Math.round(outA * 255));
 
-          // Slightly cooler/dimmer rim for far limbs so depth overlap reads cleanly
-          const fr = (srcBuf[off] * 0.86 * sa + 218 * ha * (1 - sa)) / outA;
-          const fg = (srcBuf[off + 1] * 0.86 * sa + 212 * ha * (1 - sa)) / outA;
-          const fb = (srcBuf[off + 2] * 0.9 * sa + 196 * ha * (1 - sa)) / outA;
-          nightFarBuf[off] = Math.min(255, Math.round(fr));
-          nightFarBuf[off + 1] = Math.min(255, Math.round(fg));
-          nightFarBuf[off + 2] = Math.min(255, Math.round(fb));
-          nightFarBuf[off + 3] = Math.min(255, Math.round(outA * 255));
+          if (includeDarkAndFar) {
+            const fr = (srcBuf[off] * 0.86 * sa + 218 * ha * (1 - sa)) / outA;
+            const fg = (srcBuf[off + 1] * 0.86 * sa + 212 * ha * (1 - sa)) / outA;
+            const fb = (srcBuf[off + 2] * 0.9 * sa + 196 * ha * (1 - sa)) / outA;
+            nightFarBuf[off] = Math.min(255, Math.round(fr));
+            nightFarBuf[off + 1] = Math.min(255, Math.round(fg));
+            nightFarBuf[off + 2] = Math.min(255, Math.round(fb));
+            nightFarBuf[off + 3] = Math.min(255, Math.round(outA * 255));
+          }
         }
       }
     }
   }
 
-  darkCanvas.getContext('2d')!.putImageData(new ImageData(darkBuf, sw, sh), 0, 0);
-  nightCanvas.getContext('2d')!.putImageData(new ImageData(nightBuf, sw, sh), 0, 0);
-  nightFarCanvas.getContext('2d')!.putImageData(new ImageData(nightFarBuf, sw, sh), 0, 0);
-  return { darkCanvas, nightCanvas, nightFarCanvas };
+  return { darkRgba: darkBuf, nightRgba: nightBuf, nightFarRgba: nightFarBuf };
+}
+
+/** Pure Worker-safe box-area RGBA downsampler (replaces DOM gctx.drawImage) */
+function downsampleRgbaToGrid(
+  src: Uint8ClampedArray,
+  sw: number,
+  sh: number,
+  gw: number,
+  gh: number
+): Uint8ClampedArray {
+  if (sw === gw && sh === gh) return new Uint8ClampedArray(src);
+  const dst = new Uint8ClampedArray(gw * gh * 4);
+  const scaleX = sw / gw;
+  const scaleY = sh / gh;
+
+  for (let gy = 0; gy < gh; gy++) {
+    const sy0 = Math.floor(gy * scaleY);
+    const sy1 = Math.min(sh, Math.max(sy0 + 1, Math.ceil((gy + 1) * scaleY)));
+    for (let gx = 0; gx < gw; gx++) {
+      const sx0 = Math.floor(gx * scaleX);
+      const sx1 = Math.min(sw, Math.max(sx0 + 1, Math.ceil((gx + 1) * scaleX)));
+      let sr = 0;
+      let sg = 0;
+      let sb = 0;
+      let sa = 0;
+      let cnt = 0;
+      for (let sy = sy0; sy < sy1; sy++) {
+        const ro = sy * sw;
+        for (let sx = sx0; sx < sx1; sx++) {
+          const o = (ro + sx) * 4;
+          const a = src[o + 3];
+          sr += src[o] * a;
+          sg += src[o + 1] * a;
+          sb += src[o + 2] * a;
+          sa += a;
+          cnt++;
+        }
+      }
+      const dOff = (gy * gw + gx) * 4;
+      if (sa > 0 && cnt > 0) {
+        dst[dOff] = Math.round(sr / sa);
+        dst[dOff + 1] = Math.round(sg / sa);
+        dst[dOff + 2] = Math.round(sb / sa);
+        dst[dOff + 3] = Math.round(sa / cnt);
+      }
+    }
+  }
+  return dst;
+}
+
+function rgbaToHtmlCanvas(rgba: Uint8ClampedArray, w: number, h: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  if (rgba.length === w * h * 4) {
+    const ctx = c.getContext('2d');
+    if (ctx) {
+      const img = ctx.createImageData(w, h);
+      img.data.set(rgba);
+      ctx.putImageData(img, 0, 0);
+    }
+  }
+  return c;
 }
 
 // ============================================================================
-// 5. FULL CHARACTER PACK BUILDER (Browser Canvas Pipeline — <15ms!)
+// 5. PURE RGBA WORKER-SAFE PACK BUILDER + MAIN-THREAD CANVAS HYDRATION
 // ============================================================================
 
-function prepareRigPackBase(
-  sourceCanvas: HTMLCanvasElement,
-  anatomy: DrawingAnatomy
-) {
-  const sw = sourceCanvas.width;
-  const sh = sourceCanvas.height;
-  const sctx = sourceCanvas.getContext('2d')!;
-  const srcImgData = sctx.getImageData(0, 0, sw, sh);
+/**
+ * Pure pixel-buffer (`Uint8ClampedArray`) character base builder with ZERO DOM/HTMLCanvas dependencies.
+ * Runs identically inside `rigWorker.ts` (off-main-thread!), Node/Vitest, and browsers.
+ */
+export function prepareRigPackBaseRGBA(
+  srcRgba: Uint8ClampedArray,
+  sw: number,
+  sh: number,
+  initialAnatomy: DrawingAnatomy
+): PreparedRigPackBaseRGBA {
+  const anatomy: DrawingAnatomy = { ...initialAnatomy };
 
-  // 1. Auto-fill enclosed head/torso contours with warm gouache paper volume!
-  const { rgba: filledRgba } = fillClosedContoursRGBA(srcImgData.data, sw, sh, anatomy.headEndV);
-  const filledCanvas = document.createElement('canvas');
-  filledCanvas.width = sw;
-  filledCanvas.height = sh;
-  const fctx = filledCanvas.getContext('2d')!;
-  fctx.putImageData(new ImageData(new Uint8ClampedArray(filledRgba), sw, sh), 0, 0);
+  // 1. Auto-fill enclosed head/torso contours with warm gouache paper volume
+  const { rgba: filledRgba } = fillClosedContoursRGBA(srcRgba, sw, sh, anatomy.headEndV);
 
   const haloR = Math.max(2, Math.min(5, Math.round(Math.min(sw, sh) * 0.014)));
-  const { nightCanvas: nightFilledCanvas } = bakePartVariants(
+  const { nightRgba: nightFilledRgba } = bakePartVariantsRGBA(
     filledRgba,
     sw,
     sh,
     { minX: 0, minY: 0, maxX: sw - 1, maxY: sh - 1 },
-    haloR
+    haloR,
+    false
   );
 
   // 2. Detect real drawn eyes for natural blinking
-  const eyes = detectFaceEyesFromPixels(srcImgData.data, sw, sh, anatomy);
+  const eyes = detectFaceEyesFromPixels(srcRgba, sw, sh, anatomy);
 
-  // 3. Downscale to compact analysis grid (<= 112px) for <8ms geodesic ink-graph segmentation
+  // 3. Downscale to compact analysis grid (<= 112px) in pure RGBA (zero DOM canvas!)
   const maxGrid = 112;
   const scale = Math.min(1, maxGrid / Math.max(sw, sh));
   const gw = Math.max(24, Math.round(sw * scale));
   const gh = Math.max(24, Math.round(sh * scale));
-  const gCanvas = document.createElement('canvas');
-  gCanvas.width = gw;
-  gCanvas.height = gh;
-  const gctx = gCanvas.getContext('2d')!;
-  gctx.drawImage(filledCanvas, 0, 0, gw, gh);
-  const gData = gctx.getImageData(0, 0, gw, gh).data;
+  const gData = downsampleRgbaToGrid(filledRgba, sw, sh, gw, gh);
 
   const torsoWalls = detectTorsoWalls(gData, gw, gh, anatomy);
   const { labels, counts } = computeGeodesicPartLabels(gData, gw, gh, anatomy);
 
-  // Initial anatomical joint specs anchored DEAD ON true torso walls!
   const jointSpecs: Record<LimbPartId, { root: Vec2; mid: Vec2; end: Vec2 }> = {
     head: {
       root: { x: anatomy.neckX, y: anatomy.headEndV },
@@ -970,8 +1084,8 @@ function prepareRigPackBase(
     },
   };
 
-  // Refine real shoulder Y and hip X directly from segmented pixels BEFORE cutting joint overlap sockets!
-  const refineAnchorFromLabels = () => {
+  // Refine real shoulder Y and hip X directly from segmented pixels
+  {
     const armLCol = Math.round(torsoWalls.leftU * (gw - 1));
     const armRCol = Math.round(torsoWalls.rightU * (gw - 1));
     const armLYs: number[] = [];
@@ -1000,7 +1114,6 @@ function prepareRigPackBase(
         }
       }
     }
-    // Use upper 24th-percentile Y along the torso wall so hands resting on hips NEVER pull shoulder pivots down!
     if (armLYs.length > 2) {
       armLYs.sort((a, b) => a - b);
       jointSpecs.arm_l.root.y = armLYs[Math.floor(armLYs.length * 0.24)] / Math.max(1, gh - 1);
@@ -1011,20 +1124,14 @@ function prepareRigPackBase(
     }
     if (legLCnt > 1) jointSpecs.leg_l.root.x = Math.min(anatomy.centerX - 0.03, legLX / legLCnt / Math.max(1, gw - 1));
     if (legRCnt > 1) jointSpecs.leg_r.root.x = Math.max(anatomy.centerX + 0.03, legRX / legRCnt / Math.max(1, gw - 1));
-  };
-  refineAnchorFromLabels();
+  }
 
-  // Extract 6 crisp full-resolution RGBA part canvases with generous continuous joint-socket overlap!
-  const parts = {} as Record<LimbPartId, SegmentedLimbPart>;
+  const partsRgba = {} as Record<LimbPartId, PreparedLimbPartRGBA>;
   const jointOverlapPx = Math.max(10, Math.round(Math.min(sw, sh) * 0.068));
   const hipMaxY = Math.round(anatomy.hipV * (sh - 1)) + 4;
 
   PART_ORDER.forEach((partId, partIdx) => {
     const spec = jointSpecs[partId];
-    const pc = document.createElement('canvas');
-    pc.width = sw;
-    pc.height = sh;
-    const pctx = pc.getContext('2d')!;
     const outBuf = new Uint8ClampedArray(sw * sh * 4);
 
     const jxPx = spec.root.x * (sw - 1);
@@ -1051,7 +1158,6 @@ function prepareRigPackBase(
         if (owner === partIdx) {
           keepAlpha = 1;
         } else if (partId !== 'torso') {
-          // Generous socket overlap right into torso so continuous 3-stage skinning NEVER tears or leaves a gap!
           const isLeg = partId === 'leg_l' || partId === 'leg_r';
           const isArm = partId === 'arm_l' || partId === 'arm_r';
           const effectiveOverlap = isLeg ? jointOverlapPx * 1.45 : isArm ? jointOverlapPx * 1.4 : jointOverlapPx;
@@ -1060,7 +1166,6 @@ function prepareRigPackBase(
             const t = 1 - Math.sqrt(d2) / effectiveOverlap;
             keepAlpha = t * t * (3 - 2 * t) * 0.98;
           } else if (partId === 'head' && owner === 1) {
-            // Smooth neck collar weld under chin so head NEVER separates from neck during wild tilts!
             const dyNeck = y - anatomy.headEndV * (sh - 1);
             const dxNeck = Math.abs(x - anatomy.neckX * (sw - 1));
             if (dyNeck >= 0 && dyNeck < jointOverlapPx * 0.9 && dxNeck < sw * 0.16) {
@@ -1068,7 +1173,6 @@ function prepareRigPackBase(
             }
           }
         } else if (partId === 'torso' && y <= hipMaxY + jointOverlapPx * 1.2) {
-          // Torso seals cleanly under neck, inside shoulder sockets (including broad boxy shoulders!), AND inside both hip sockets!
           const nearNeck = Math.hypot(x - anatomy.neckX * sw, y - anatomy.headEndV * sh) < jointOverlapPx * 1.1;
           const nearShL = Math.hypot(x - jointSpecs.arm_l.root.x * sw, y - jointSpecs.arm_l.root.y * sh) < jointOverlapPx * 1.35;
           const nearShR = Math.hypot(x - jointSpecs.arm_r.root.x * sw, y - jointSpecs.arm_r.root.y * sh) < jointOverlapPx * 1.35;
@@ -1099,9 +1203,6 @@ function prepareRigPackBase(
       }
     }
 
-    pctx.putImageData(new ImageData(outBuf, sw, sh), 0, 0);
-
-    // Measure EXACT drawn end-effector (x, y) from actual owned pixels!
     let refinedEnd = { ...spec.end };
     if (pxCount > 12) {
       const tipBand = Math.max(4, Math.round((maxX - minX) * 0.14));
@@ -1158,20 +1259,21 @@ function prepareRigPackBase(
       y: (spec.root.y + refinedEnd.y) * 0.5,
     };
 
-    const { darkCanvas, nightCanvas, nightFarCanvas } = bakePartVariants(
+    const { darkRgba, nightRgba, nightFarRgba } = bakePartVariantsRGBA(
       outBuf,
       sw,
       sh,
       { minX, minY, maxX, maxY },
-      haloR
+      haloR,
+      true
     );
 
-    parts[partId] = {
+    partsRgba[partId] = {
       id: partId,
-      canvas: pc,
-      darkCanvas,
-      nightCanvas,
-      nightFarCanvas,
+      rgba: outBuf,
+      darkRgba,
+      nightRgba,
+      nightFarRgba,
       u0: maxX >= minX ? minX / sw : 0,
       v0: maxY >= minY ? minY / sh : 0,
       u1: maxX >= minX ? (maxX + 1) / sw : 1,
@@ -1190,7 +1292,7 @@ function prepareRigPackBase(
     counts.leg_l / totalOpaque > 0.012 &&
     counts.leg_r / totalOpaque > 0.012 &&
     counts.head / totalOpaque > 0.04;
-  // Measure neck narrowing vs torso/shoulder span so wide armless ghosts/clouds NEVER spoof a dress humanoid!
+
   let neckMinRowW = sw;
   let bodyMaxRowW = 1;
   const ny0 = Math.max(0, Math.floor((anatomy.headEndV - 0.06) * sh));
@@ -1215,7 +1317,6 @@ function prepareRigPackBase(
   }
   const hasRealNeckNarrowing = neckMinRowW < bodyMaxRowW * 0.66;
 
-  // Detect humanoid characters wearing a long dress/robe/skirt (no leg gap, but narrow neck + outstretched arms!)
   const hasDressHumanoidSilhouette =
     !anatomy.bipedal &&
     aspectWH <= 1.22 &&
@@ -1225,7 +1326,6 @@ function prepareRigPackBase(
     counts.arm_r / totalOpaque > 0.014 &&
     anatomy.handRightX - anatomy.handLeftX > 0.56;
 
-  // Auto-detect character archetype: horizontal 4-legged animal vs vertical humanoid vs floating/winged blob!
   let archetype: CharacterArchetype = 'floater';
   if (aspectWH > 1.22 && anatomy.bipedal) {
     archetype = 'quadruped';
@@ -1233,7 +1333,6 @@ function prepareRigPackBase(
     archetype = 'humanoid';
   }
 
-  // Sample face fill tone near headCenter so eyelid blinks blend seamlessly with the character's head!
   const fx = Math.max(0, Math.min(sw - 1, Math.round(anatomy.headCenterX * (sw - 1))));
   const fy = Math.max(0, Math.min(sh - 1, Math.round(anatomy.headCenterY * (sh - 1))));
   const fOff = (fy * sw + fx) * 4;
@@ -1242,7 +1341,6 @@ function prepareRigPackBase(
       ? `rgb(${filledRgba[fOff]}, ${filledRgba[fOff + 1]}, ${filledRgba[fOff + 2]})`
       : '#FAF3E4';
 
-  // Sample darkest dominant ink stroke color for invisible joint socket welds
   let inkR = 28;
   let inkG = 25;
   let inkB = 23;
@@ -1253,12 +1351,12 @@ function prepareRigPackBase(
   const stepInk = Math.max(1, Math.floor((sw * sh) / 2400));
   for (let i = 0; i < sw * sh; i += stepInk) {
     const o = i * 4;
-    if (srcImgData.data[o + 3] < 160) continue;
-    const lum = 0.299 * srcImgData.data[o] + 0.587 * srcImgData.data[o + 1] + 0.114 * srcImgData.data[o + 2];
+    if (srcRgba[o + 3] < 160) continue;
+    const lum = 0.299 * srcRgba[o] + 0.587 * srcRgba[o + 1] + 0.114 * srcRgba[o + 2];
     if (lum < 120) {
-      sumIR += srcImgData.data[o];
-      sumIG += srcImgData.data[o + 1];
-      sumIB += srcImgData.data[o + 2];
+      sumIR += srcRgba[o];
+      sumIG += srcRgba[o + 1];
+      sumIB += srcRgba[o + 2];
       inkCnt++;
     }
   }
@@ -1269,7 +1367,6 @@ function prepareRigPackBase(
   }
   const inkColor = `rgb(${inkR}, ${inkG}, ${inkB})`;
 
-  // Detect if the character ALREADY has a dark drawn mouth/grin so emotions don't stamp a 2nd mouth on top!
   const mx0 = Math.max(0, Math.floor((anatomy.mouthX - 0.065) * sw));
   const mx1 = Math.min(sw - 1, Math.ceil((anatomy.mouthX + 0.065) * sw));
   const my0 = Math.max(0, Math.floor((anatomy.mouthY - 0.038) * sh));
@@ -1290,14 +1387,12 @@ function prepareRigPackBase(
 
   return {
     filledRgba,
+    nightFilledRgba,
     sw,
     sh,
-    filledCanvas,
-    nightFilledCanvas,
-    sourceCanvas,
     anatomy,
     eyes,
-    parts,
+    partsRgba,
     archetype,
     faceFillColor,
     inkColor,
@@ -1305,16 +1400,50 @@ function prepareRigPackBase(
   };
 }
 
-function finalizeRigPackWithMesh(
-  base: ReturnType<typeof prepareRigPackBase>,
+export function resolveCreatureClassFromBaseRGBA(
+  base: PreparedRigPackBaseRGBA,
+  explicit?: UniversalCreatureClass
+): UniversalCreatureClass {
+  if (explicit) return explicit;
+  if (base.archetype === 'humanoid') return 'humanoid';
+  const auto = classifyUniversalCreatureRGBA(base.filledRgba, base.sw, base.sh, base.anatomy);
+  if (auto.creatureClass !== 'humanoid') return auto.creatureClass;
+  return base.archetype === 'quadruped' ? 'quadruped' : 'amorphous_vehicle';
+}
+
+export function hydrateRigPackFromWorkerData(
+  sourceCanvas: HTMLCanvasElement,
+  base: PreparedRigPackBaseRGBA,
   skinnedMesh: ConformingSkinnedMesh | null,
   silhouetteMesh: ConformingSkinnedMesh | null,
   creatureClass: UniversalCreatureClass
 ): RiggedCharacterPack {
-  const { parts, anatomy } = base;
+  const { sw, sh } = base;
+  const anatomy = base.anatomy;
+  const filledCanvas = rgbaToHtmlCanvas(base.filledRgba, sw, sh);
+  const nightFilledCanvas = rgbaToHtmlCanvas(base.nightFilledRgba, sw, sh);
+
+  const parts = {} as Record<LimbPartId, SegmentedLimbPart>;
+  for (const partId of PART_ORDER) {
+    const p = base.partsRgba[partId];
+    parts[partId] = {
+      id: partId,
+      canvas: rgbaToHtmlCanvas(p.rgba, sw, sh),
+      darkCanvas: rgbaToHtmlCanvas(p.darkRgba, sw, sh),
+      nightCanvas: rgbaToHtmlCanvas(p.nightRgba, sw, sh),
+      nightFarCanvas: rgbaToHtmlCanvas(p.nightFarRgba, sw, sh),
+      u0: p.u0,
+      v0: p.v0,
+      u1: p.u1,
+      v1: p.v1,
+      root: { ...p.root },
+      mid: { ...p.mid },
+      end: { ...p.end },
+      pixelCount: p.pixelCount,
+    };
+  }
+
   const isHumanoid = creatureClass === 'humanoid';
-  // Sync anatomical limb endpoints AND anatomy pin coords with the geodesic medial-axis skeleton so
-  // Canlı Kukla pins, Çekiştir pins, and IK targets ALL agree to 0.000 px!
   if (isHumanoid && skinnedMesh && skinnedMesh.bones.length >= 11) {
     parts.arm_l.root = { ...skinnedMesh.bones[3].start };
     parts.arm_l.mid = { ...skinnedMesh.bones[3].end };
@@ -1338,12 +1467,12 @@ function finalizeRigPackWithMesh(
   }
 
   return {
-    filledCanvas: base.filledCanvas,
-    nightFilledCanvas: base.nightFilledCanvas,
-    sourceCanvas: base.sourceCanvas,
-    anatomy: base.anatomy,
+    filledCanvas,
+    nightFilledCanvas,
+    sourceCanvas,
+    anatomy,
     eyes: base.eyes,
-    parts: base.parts,
+    parts,
     useMultiPart: isHumanoid,
     archetype: isHumanoid ? 'humanoid' : creatureClass === 'quadruped' ? 'quadruped' : base.archetype,
     creatureClass,
@@ -1358,17 +1487,9 @@ function finalizeRigPackWithMesh(
 export interface BuildRigPackOptions {
   creatureClass?: UniversalCreatureClass;
   meshOptions?: ConformingMeshBuildOptions;
-}
-
-function resolveCreatureClass(
-  base: ReturnType<typeof prepareRigPackBase>,
-  explicit?: UniversalCreatureClass
-): UniversalCreatureClass {
-  if (explicit) return explicit;
-  if (base.archetype === 'humanoid') return 'humanoid';
-  const auto = classifyUniversalCreatureRGBA(base.filledRgba, base.sw, base.sh, base.anatomy);
-  if (auto.creatureClass !== 'humanoid') return auto.creatureClass;
-  return base.archetype === 'quadruped' ? 'quadruped' : 'amorphous_vehicle';
+  /** Optional coalescing channel key: cancels any superseded in-flight worker request on the same channel */
+  channelKey?: string;
+  signal?: AbortSignal;
 }
 
 export function buildRiggedCharacterPack(
@@ -1376,34 +1497,65 @@ export function buildRiggedCharacterPack(
   anatomy: DrawingAnatomy,
   opts?: BuildRigPackOptions
 ): RiggedCharacterPack {
-  const base = prepareRigPackBase(sourceCanvas, anatomy);
-  const creatureClass = resolveCreatureClass(base, opts?.creatureClass);
+  const sw = sourceCanvas.width;
+  const sh = sourceCanvas.height;
+  const sctx = sourceCanvas.getContext('2d', { willReadFrequently: true })!;
+  const srcRgba = sctx.getImageData(0, 0, sw, sh).data;
+
+  const base = prepareRigPackBaseRGBA(srcRgba, sw, sh, anatomy);
+  const creatureClass = resolveCreatureClassFromBaseRGBA(base, opts?.creatureClass);
   const skinnedMesh =
     creatureClass === 'humanoid'
       ? buildConformingSkinnedMeshRGBA(base.filledRgba, base.sw, base.sh, base.anatomy, opts?.meshOptions)
       : buildUniversalCreatureMeshRGBA(base.filledRgba, base.sw, base.sh, base.anatomy, creatureClass, opts?.meshOptions);
   const silhouetteMesh =
     skinnedMesh ?? buildSilhouetteConformingMeshRGBA(base.filledRgba, base.sw, base.sh);
-  return finalizeRigPackWithMesh(base, skinnedMesh, silhouetteMesh, creatureClass);
+  return hydrateRigPackFromWorkerData(sourceCanvas, base, skinnedMesh, silhouetteMesh, creatureClass);
 }
 
 /**
- * INKTROPE V4 Async Rig Builder — offloads 200px Viterbi Ink-Watershed topology,
- * 64-iteration Harmonic Laplacian weights, 7-creature universal skeletons, and CoR pivot
- * precomputation to the dedicated Web Worker (`rigWorker.ts`) for 0 ms UI freeze on mobile!
+ * INKTROPE V4 Full-Pipeline Async Rig Builder — offloads BOTH `prepareRigPackBaseRGBA`
+ * (gouache contour fill, halo variants, geodesic limb segmentation) AND conforming mesh
+ * construction (`rigWorker.ts`) off the UI thread with cancellable request coalescing!
  */
 export async function buildRiggedCharacterPackAsync(
   sourceCanvas: HTMLCanvasElement,
   anatomy: DrawingAnatomy,
   opts?: BuildRigPackOptions
 ): Promise<RiggedCharacterPack> {
-  const base = prepareRigPackBase(sourceCanvas, anatomy);
-  const creatureClass = resolveCreatureClass(base, opts?.creatureClass);
+  const sw = sourceCanvas.width;
+  const sh = sourceCanvas.height;
+  const sctx = sourceCanvas.getContext('2d', { willReadFrequently: true });
+  if (!sctx) {
+    return buildRiggedCharacterPack(sourceCanvas, anatomy, opts);
+  }
+  const srcRgba = sctx.getImageData(0, 0, sw, sh).data;
+
+  const fullWorkerRes = await buildFullRigPackInWorkerAsync(srcRgba, sw, sh, anatomy, {
+    creatureClass: opts?.creatureClass,
+    meshOptions: opts?.meshOptions,
+    channelKey: opts?.channelKey,
+    signal: opts?.signal,
+  });
+
+  if (fullWorkerRes) {
+    return hydrateRigPackFromWorkerData(
+      sourceCanvas,
+      fullWorkerRes.base,
+      fullWorkerRes.skinnedMesh,
+      fullWorkerRes.silhouetteMesh,
+      fullWorkerRes.creatureClass
+    );
+  }
+
+  // Fallback path if Worker is disabled in Node/Vitest
+  const base = prepareRigPackBaseRGBA(srcRgba, sw, sh, anatomy);
+  const creatureClass = resolveCreatureClassFromBaseRGBA(base, opts?.creatureClass);
   const skinnedMesh =
     creatureClass === 'humanoid'
       ? await buildHumanoidMeshAsync(base.filledRgba, base.sw, base.sh, base.anatomy, opts?.meshOptions)
       : await buildCreatureMeshAsync(base.filledRgba, base.sw, base.sh, base.anatomy, creatureClass, opts?.meshOptions);
   const silhouetteMesh =
     skinnedMesh ?? (await buildSilhouetteMeshAsync(base.filledRgba, base.sw, base.sh));
-  return finalizeRigPackWithMesh(base, skinnedMesh, silhouetteMesh, creatureClass);
+  return hydrateRigPackFromWorkerData(sourceCanvas, base, skinnedMesh, silhouetteMesh, creatureClass);
 }

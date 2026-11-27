@@ -18,7 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
-import { localizeActorName, localizePinOrPartLabel, useT, useTFmt } from '../../i18n/translations';
+import { localizeActorName, localizePinOrPartLabel, useT, useTFmt, type TranslationKey } from '../../i18n/translations';
 import { safeSetPointerCapture } from '../../utils/pointerCapture';
 import { useModalA11y } from '../../hooks/useModalA11y';
 import type {
@@ -37,6 +37,7 @@ import {
   IDENTITY_TRANSFORM,
   interpolateRigTransforms,
   renderPuppetFrame,
+  renderPuppetFrameSync,
   wouldCreateBoneCycle,
   type RigPresetId,
 } from '../../engine/puppetEngine';
@@ -48,7 +49,10 @@ import {
 import { renderFrameComposite } from '../../engine/frameComposite';
 import {
   analyzeAndStoreAudio,
+  decodeAudioBlobToMonoPCM,
+  isAudioBufferSilent,
   MicVoiceRecorder,
+  renderAudioTrackOffline,
   rmsToMouthViseme,
   StudioAudioPlayer,
 } from '../../engine/audioEngine';
@@ -78,6 +82,7 @@ export default function PuppetStudio() {
     bakeRenderedShotToFrames,
     setAudioTrack,
     notify,
+    activeMasterRig,
   } = useStudioStore();
 
   const project = projects.find((p) => p.id === activeProjectId);
@@ -137,6 +142,10 @@ export default function PuppetStudio() {
   } | null>(null);
 
   const stageCanvasRef = useRef<HTMLCanvasElement>(null);
+  const timelineRangeRef = useRef<HTMLInputElement>(null);
+  const frameReadoutRef = useRef<HTMLSpanElement>(null);
+  const partBitmapMapRef = useRef<Map<string, CanvasImageSource>>(new Map());
+  const customMouthImagesRef = useRef<Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>>>({});
   const audioPlayerRef = useRef<StudioAudioPlayer | null>(null);
   const recorderRef = useRef<MicVoiceRecorder | null>(null);
   const [recording, setRecording] = useState(false);
@@ -149,6 +158,58 @@ export default function PuppetStudio() {
   activeRigRef.current = activeRig;
   const rigFrameRef = useRef(rigFrame);
   rigFrameRef.current = rigFrame;
+
+  // Pre-warm part ImageBitmaps in RAM for 0-blocking synchronous rAF playback
+  useEffect(() => {
+    if (!activeRig) {
+      partBitmapMapRef.current.clear();
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const next = new Map<string, CanvasImageSource>();
+      for (const part of activeRig.parts) {
+        const cached = partBitmapMapRef.current.get(part.blobKey);
+        if (cached) {
+          next.set(part.blobKey, cached);
+        } else {
+          const bmp = await getBlobBitmap(part.blobKey);
+          if (bmp) next.set(part.blobKey, bmp);
+        }
+      }
+      if (!cancelled) {
+        partBitmapMapRef.current = next;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRig]);
+
+  useEffect(() => {
+    const mouths = activeMasterRig?.faceSprites?.mouths;
+    if (!mouths) {
+      customMouthImagesRef.current = {};
+      return;
+    }
+    let cancelled = false;
+    const nextMap: Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>> = {};
+    for (const k of ['closed', 'A', 'E', 'O'] as const) {
+      const url = mouths[k];
+      if (!url) continue;
+      const img = new Image();
+      img.onload = () => {
+        if (!cancelled) {
+          nextMap[k] = img;
+          customMouthImagesRef.current = { ...nextMap };
+        }
+      };
+      img.src = url;
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMasterRig?.faceSprites?.mouths, activeMasterRig?.updatedAt]);
 
   const easingOptions = useMemo<{ id: EasingType; label: string }[]>(
     () => [
@@ -437,14 +498,16 @@ export default function PuppetStudio() {
       const rig = rigOverride ?? activeRigRef.current;
       const canvas = stageCanvasRef.current;
       if (!canvas || !rig || !project) return;
-      canvas.width = project.width;
-      canvas.height = project.height;
+      if (canvas.width !== project.width) canvas.width = project.width;
+      if (canvas.height !== project.height) canvas.height = project.height;
       const ctx = canvas.getContext('2d')!;
       await renderPuppetFrame(ctx, rig, frameIdx, project.width, project.height, {
         audio: project.audio,
         selectedPartId,
         showSkeleton: !playing,
         paperColor: project.paperColor,
+        partBitmaps: partBitmapMapRef.current,
+        customMouths: customMouthImagesRef.current,
       });
     },
     [project, selectedPartId, playing]
@@ -456,7 +519,7 @@ export default function PuppetStudio() {
     }
   }, [engineTab, subMode, rigFrame, activeRig, playing, redrawAnimStage]);
 
-  // Smooth Playback Loop (Stable refs, zero audio restart on edits!)
+  // Zero-Blocking Playback Loop: renders directly to Canvas via cached ImageBitmaps & updates DOM refs without 60Hz React re-renders!
   useEffect(() => {
     if (engineTab !== 'cutout' || !playing || !activeRigRef.current || !project) {
       audioPlayerRef.current?.stop();
@@ -471,22 +534,65 @@ export default function PuppetStudio() {
       const canAudio = Boolean(project.audio && !project.audio.muted && soundEnabled);
       if (canAudio && project.audio) {
         await player.ensureLoaded(project.audio);
-        if (!cancelled) player.startAt(0, project.audio.volume, false);
+        if (!cancelled) {
+          player.startAt(0, project.audio.volume, false, project.audio.voiceEffect ?? 'natural');
+        }
       }
       const start = performance.now();
       let lastF = -1;
-      const tick = () => {
+      let lastReactSyncMs = 0;
+
+      const tick = (nowMs: number) => {
         if (cancelled || !activeRigRef.current) return;
-        const elapsed = (performance.now() - start) / 1000;
-        const f = Math.floor(elapsed * project.fps) % Math.max(1, activeRigRef.current.totalFrames);
+        const curRig = activeRigRef.current;
+        const totalFrames = Math.max(1, curRig.totalFrames);
+        const elapsed = (nowMs - start) / 1000;
+        const f = Math.floor(elapsed * project.fps) % totalFrames;
         if (f !== lastF) {
           if (f < lastF && canAudio && project.audio) {
-            player.startAt(0, project.audio.volume, false);
+            player.startAt(0, project.audio.volume, false, project.audio.voiceEffect ?? 'natural');
           }
           lastF = f;
           rigFrameRef.current = f;
-          setRigFrame(f);
-          void redrawAnimStage(f);
+
+          // Update timeline slider & frame readout directly via DOM refs (< 0.05 ms, 0 React reconciliation!)
+          if (timelineRangeRef.current) {
+            timelineRangeRef.current.value = String(f);
+          }
+          if (frameReadoutRef.current) {
+            frameReadoutRef.current.textContent = `${f + 1} / ${totalFrames}`;
+          }
+          // Throttle React state sync to ~8 Hz solely for keyframe badge / viseme pill display
+          if (nowMs - lastReactSyncMs >= 120) {
+            lastReactSyncMs = nowMs;
+            setRigFrame(f);
+          }
+
+          const canvas = stageCanvasRef.current;
+          if (canvas) {
+            if (canvas.width !== project.width) canvas.width = project.width;
+            if (canvas.height !== project.height) canvas.height = project.height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              const drawnSync = renderPuppetFrameSync(
+                ctx,
+                curRig,
+                f,
+                project.width,
+                project.height,
+                partBitmapMapRef.current,
+                {
+                  audio: project.audio,
+                  showSkeleton: false,
+                  paperColor: project.paperColor,
+                  customMouths: customMouthImagesRef.current,
+                }
+              );
+              if (!drawnSync) {
+                void redrawAnimStage(f);
+              }
+            }
+          }
         }
         raf = requestAnimationFrame(tick);
       };
@@ -498,6 +604,7 @@ export default function PuppetStudio() {
       cancelled = true;
       cancelAnimationFrame(raf);
       player.stop();
+      setRigFrame(rigFrameRef.current);
     };
   }, [engineTab, playing, project, soundEnabled, redrawAnimStage]);
 
@@ -848,13 +955,29 @@ export default function PuppetStudio() {
       off.height = H;
       const ctx = off.getContext('2d', { alpha: false })!;
       const totalSteps = activeRig.totalFrames * 2;
-      const chosen = pickBestMediaRecorderFormat();
-      if (!chosen || chosen.ext !== 'mp4') {
+      let offlineAudio: AudioBuffer | null = null;
+      if (project.audio && !project.audio.muted && project.audio.volume > 0.001) {
+        await exportPlayer.ensureLoaded(project.audio);
+        const rawBuf = exportPlayer.getDecodedBuffer();
+        if (rawBuf) {
+          offlineAudio = await renderAudioTrackOffline({
+            sourceBuffer: rawBuf,
+            durationSec: totalSteps / project.fps,
+            volume: project.audio.volume,
+            voiceEffect: project.audio.voiceEffect ?? 'natural',
+            loop: true,
+          }).catch(() => rawBuf);
+        }
+      }
+
+      if (typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
         const mp4Blob = await encodeFramesToMp4WebCodecs({
           width: W,
           height: H,
           fps: project.fps,
           totalFrames: totalSteps,
+          audioBuffer: offlineAudio,
+          audioVolume: 1,
           shouldAbort: () => exportAbortRef.current,
           onProgress: (done, total) => setExportPct(Math.min(96, Math.round((done / Math.max(1, total)) * 90) + 5)),
           drawFrame: async (wctx, i) => {
@@ -875,6 +998,7 @@ export default function PuppetStudio() {
           return;
         }
       }
+      const chosen = pickBestMediaRecorderFormat(Boolean(project.audio && !project.audio.muted));
       if (!chosen || typeof off.captureStream !== 'function') {
         notify(t('exportWebViewFallbackToast'), 'info');
         return;
@@ -953,6 +1077,19 @@ export default function PuppetStudio() {
       try {
         const blob = await recorderRef.current.stop();
         setRecording(false);
+        const { pcm } = await decodeAudioBlobToMonoPCM(blob);
+        let peak = 0;
+        let sumSq = 0;
+        for (let i = 0; i < pcm.length; i++) {
+          const v = Math.abs(pcm[i]);
+          if (v > peak) peak = v;
+          sumSq += pcm[i] * pcm[i];
+        }
+        const rms = pcm.length > 0 ? Math.sqrt(sumSq / pcm.length) : 0;
+        if (pcm.length === 0 || peak < 0.015 || rms < 0.003 || isAudioBufferSilent(pcm)) {
+          notify(t('micSilentWarning' as TranslationKey), 'error');
+          return;
+        }
         const track = await analyzeAndStoreAudio(
           blob,
           t('puppetVoiceTrackLabel'),
@@ -1363,12 +1500,16 @@ export default function PuppetStudio() {
                               <MotionPlayIcon playing={playing} className="w-3.5 h-3.5" />
                               {playing ? t('puppetStop') : t('puppetPlay')}
                             </KeycapButton>
-                            <span className="font-mono text-xs text-desk-text tabular-nums">
+                            <span
+                              ref={frameReadoutRef}
+                              className="font-mono text-xs text-desk-text tabular-nums"
+                            >
                               {rigFrame + 1} / {activeRig.totalFrames}
                             </span>
                           </div>
 
                           <input
+                            ref={timelineRangeRef}
                             type="range"
                             min={0}
                             max={Math.max(1, activeRig.totalFrames - 1)}

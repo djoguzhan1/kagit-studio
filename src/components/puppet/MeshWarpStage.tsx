@@ -23,7 +23,7 @@ import {
   X,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
-import { localizeActorName, useT, useTFmt } from '../../i18n/translations';
+import { localizeActorName, useT, useTFmt, type TranslationKey } from '../../i18n/translations';
 import { safeSetPointerCapture } from '../../utils/pointerCapture';
 import { useModalA11y } from '../../hooks/useModalA11y';
 import type { MeshFrameOffsets, MeshPin, MeshWarpRig } from '../../types/studio';
@@ -49,7 +49,14 @@ import {
 } from '../../engine/characterIntakeEngine';
 import { renderFrameComposite } from '../../engine/frameComposite';
 import { canvasToPngBlob, getBlobBitmap, makeId, saveBlob } from '../../engine/db';
-import { analyzeAndStoreAudio, MicVoiceRecorder, StudioAudioPlayer } from '../../engine/audioEngine';
+import {
+  analyzeAndStoreAudio,
+  decodeAudioBlobToMonoPCM,
+  isAudioBufferSilent,
+  MicVoiceRecorder,
+  renderAudioTrackOffline,
+  StudioAudioPlayer,
+} from '../../engine/audioEngine';
 import { synthesizeCartoonDialogueWav } from '../../engine/filmMocapLipSync';
 import { createSampleMeshWarpRig } from '../../engine/starterPresets';
 import { drawKagitSealStamp, triggerDownload } from '../../engine/exportEngine';
@@ -138,6 +145,51 @@ export default function MeshWarpStage() {
   const [modalInitialRig, setModalInitialRig] = useState<CharacterMasterRig | null>(null);
   const [puppetAngleDeg, setPuppetAngleDeg] = useState(0);
   const puppetMasterCacheRef = useRef<MasterRigRuntimeCache | null>(null);
+  const customMouthImagesRef = useRef<Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>>>({});
+  const isMultiAngleMaster = Boolean(activeMasterRig && countRigViews(activeMasterRig) >= 2);
+
+  useEffect(() => {
+    if (!isMultiAngleMaster && Math.abs(puppetAngleDeg) > 35) {
+      setPuppetAngleDeg((deg) => Math.max(-35, Math.min(35, deg)));
+    }
+  }, [isMultiAngleMaster, puppetAngleDeg]);
+
+  useEffect(() => {
+    const mouths = activeMasterRig?.faceSprites?.mouths;
+    if (!mouths) {
+      customMouthImagesRef.current = {};
+      return;
+    }
+    let cancelled = false;
+    const nextMap: Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>> = {};
+    const keys: Array<'closed' | 'A' | 'E' | 'O'> = ['closed', 'A', 'E', 'O'];
+    let pending = 0;
+    for (const k of keys) {
+      const url = mouths[k];
+      if (!url) continue;
+      pending++;
+      const img = new Image();
+      img.onload = () => {
+        if (cancelled) return;
+        nextMap[k] = img;
+        customMouthImagesRef.current = { ...nextMap };
+        pending--;
+        if (pending <= 0 && !playing && !liveRecording) {
+          void redrawStage(rigFrameRef.current);
+        }
+      };
+      img.onerror = () => {
+        pending--;
+      };
+      img.src = url;
+    }
+    if (pending === 0) {
+      customMouthImagesRef.current = {};
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMasterRig?.faceSprites?.mouths, activeMasterRig?.updatedAt]);
   const activeDragOffsetRef = useRef<{ pinId: string; dx: number; dy: number } | null>(null);
   const lastPinPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
 
@@ -302,7 +354,7 @@ export default function MeshWarpStage() {
           }
           const tSec = fIdx / Math.max(8, project.fps || 12);
           const pose = evaluateCartoonDancePose(tSec, null, 24, 'natural');
-          const layout = getMeshStageLayout(project.width, project.height, rig.sourceW, rig.sourceH);
+          const layout = getMeshStageLayout(rig.sourceW, rig.sourceH, project.width, project.height);
           renderMasterRigCharacter(
             ctx,
             puppetMasterCacheRef.current,
@@ -313,6 +365,7 @@ export default function MeshWarpStage() {
               boilTick: fIdx,
               yawDeg: puppetAngleDeg,
               universalAction: UNIVERSAL_CREATURE_CATALOG[activeMasterRig.creatureClass].defaultAction,
+              customMouths: customMouthImagesRef.current,
             }
           );
           return;
@@ -328,6 +381,9 @@ export default function MeshWarpStage() {
         showMouthMarker: toolMode === 'mouth',
         isRecording: liveRecording,
         liveDragOverride: liveRecording ? null : activeDragOffsetRef.current,
+        yawDeg: puppetAngleDeg,
+        fps: project.fps,
+        customMouths: customMouthImagesRef.current,
         outPinPositions: lastPinPositionsRef.current,
       });
     },
@@ -916,6 +972,19 @@ export default function MeshWarpStage() {
       try {
         const blob = await recorderRef.current.stop();
         setMicRecording(false);
+        const { pcm } = await decodeAudioBlobToMonoPCM(blob);
+        let peak = 0;
+        let sumSq = 0;
+        for (let i = 0; i < pcm.length; i++) {
+          const v = Math.abs(pcm[i]);
+          if (v > peak) peak = v;
+          sumSq += pcm[i] * pcm[i];
+        }
+        const rms = pcm.length > 0 ? Math.sqrt(sumSq / pcm.length) : 0;
+        if (pcm.length === 0 || peak < 0.015 || rms < 0.003 || isAudioBufferSilent(pcm)) {
+          notify(t('micSilentWarning' as TranslationKey), 'error');
+          return;
+        }
         const track = await analyzeAndStoreAudio(
           blob,
           t('puppetLiveVoiceLabel'),
@@ -964,16 +1033,30 @@ export default function MeshWarpStage() {
 
       const loops = project.audio ? Math.max(2, Math.min(4, Math.ceil((project.audio.durationSec * fps) / activeRig.totalFrames))) : 2;
       const totalSteps = activeRig.totalFrames * loops;
-      const chosen = pickBestMediaRecorderFormat();
+      const exportFps = Math.max(8, Math.round(fps * playSpeed));
+      let offlineAudio: AudioBuffer | null = null;
+      if (project.audio && !project.audio.muted && project.audio.volume > 0.001) {
+        await exportPlayer.ensureLoaded(project.audio);
+        const rawBuf = exportPlayer.getDecodedBuffer();
+        if (rawBuf) {
+          offlineAudio = await renderAudioTrackOffline({
+            sourceBuffer: rawBuf,
+            durationSec: totalSteps / exportFps,
+            volume: project.audio.volume,
+            voiceEffect: project.audio.voiceEffect ?? 'natural',
+            loop: true,
+          }).catch(() => rawBuf);
+        }
+      }
 
-      // Universal WhatsApp/iPhone MP4 path via WebCodecs H.264 when native MP4 MediaRecorder isn't available!
-      if (!chosen || chosen.ext !== 'mp4') {
-        const exportFps = Math.max(8, Math.round(fps * playSpeed));
+      if (typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
         const mp4Blob = await encodeFramesToMp4WebCodecs({
           width: W,
           height: H,
           fps: exportFps,
           totalFrames: totalSteps,
+          audioBuffer: offlineAudio,
+          audioVolume: 1,
           shouldAbort: () => exportAbortRef.current,
           onProgress: (done, total) => {
             setExportPct(Math.min(96, Math.round((done / Math.max(1, total)) * 90) + 5));
@@ -987,6 +1070,9 @@ export default function MeshWarpStage() {
               audio: project.audio,
               showPins: false,
               showMeshGrid: false,
+              yawDeg: puppetAngleDeg,
+              fps: exportFps,
+              customMouths: customMouthImagesRef.current,
             });
             if (i >= totalSteps - Math.round(exportFps * 0.5)) {
               drawKagitSealStamp(wctx, W, H, 0.85);
@@ -1003,6 +1089,7 @@ export default function MeshWarpStage() {
         }
       }
 
+      const chosen = pickBestMediaRecorderFormat(Boolean(project.audio && !project.audio.muted));
       if (!chosen || typeof off.captureStream !== 'function') {
         notify(t('exportWebViewFallbackToast'), 'info');
         return;
@@ -1047,6 +1134,9 @@ export default function MeshWarpStage() {
           audio: project.audio,
           showPins: false,
           showMeshGrid: false,
+          yawDeg: puppetAngleDeg,
+          fps: project.fps,
+          customMouths: customMouthImagesRef.current,
         });
         if (i >= totalSteps - Math.round(fps * 0.5)) {
           drawKagitSealStamp(ctx, W, H, 0.85);
@@ -1107,6 +1197,9 @@ export default function MeshWarpStage() {
           audio: project.audio,
           showPins: false,
           showMeshGrid: false,
+          yawDeg: puppetAngleDeg,
+          fps: project.fps,
+          customMouths: customMouthImagesRef.current,
         });
         frames.push({ rgba: new Uint8ClampedArray(ctx.getImageData(0, 0, W, H).data), hold: 1 });
         setExportPct(5 + Math.round(((f + 1) / activeRig.totalFrames) * 68));
@@ -1148,6 +1241,9 @@ export default function MeshWarpStage() {
       audio: project.audio,
       showPins: false,
       showMeshGrid: false,
+      yawDeg: puppetAngleDeg,
+      fps: project.fps,
+      customMouths: customMouthImagesRef.current,
     });
     const blob = await canvasToPngBlob(c);
     const safe = activeRig.name.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_').slice(0, 32) || 'kukla';
@@ -1176,6 +1272,9 @@ export default function MeshWarpStage() {
           audio: project.audio,
           showPins: false,
           showMeshGrid: false,
+          yawDeg: puppetAngleDeg,
+          fps: project.fps,
+          customMouths: customMouthImagesRef.current,
         });
         preRendered.push(await createImageBitmap(work));
         setExportPct(Math.round(((f + 1) / framesToBake) * 45));
@@ -1490,33 +1589,36 @@ export default function MeshWarpStage() {
               </div>
             </div>
 
-            {/* Conditional sleek 360° turn slider — ONLY appears when 2+ angles exist! */}
-            {activeMasterRig && countRigViews(activeMasterRig) >= 2 && (
-              <div className="shrink-0 px-3 py-1.5 rounded-xl console-well border border-ink-brass/35 flex items-center gap-2.5 text-[11px]">
-                <span className="font-bold text-ink-brass shrink-0">{t('v4TurnPreviewLabel')}</span>
-                <input
-                  type="range"
-                  min={-180}
-                  max={180}
-                  step={5}
-                  value={puppetAngleDeg}
-                  onChange={(e) => setPuppetAngleDeg(Number(e.target.value))}
-                  className="flex-1 accent-ink-brass h-1.5 cursor-pointer"
-                />
-                <span className="font-mono text-desk-muted w-9 text-right shrink-0">
-                  {puppetAngleDeg > 0 ? `+${puppetAngleDeg}°` : `${puppetAngleDeg}°`}
-                </span>
-                {puppetAngleDeg !== 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setPuppetAngleDeg(0)}
-                    className="text-[11px] font-bold text-desk-muted hover:text-ink-brass"
-                  >
-                    0°
-                  </button>
-                )}
-              </div>
-            )}
+            {/* 2.5D Perspective & 360° Turn Slider (-35°..+35° on single view, -180°..+180° when 2+ views exist) */}
+            <div className="shrink-0 px-3 py-1.5 rounded-xl console-well border border-ink-brass/35 flex items-center gap-2.5 text-[11px]">
+              <span className="font-bold text-ink-brass shrink-0">
+                {isMultiAngleMaster
+                  ? t('v4TurnPreviewLabel')
+                  : t('puppetViewYawLabel' as TranslationKey)}
+              </span>
+              <input
+                type="range"
+                aria-label={t('puppetViewYawLabel' as TranslationKey)}
+                min={isMultiAngleMaster ? -180 : -35}
+                max={isMultiAngleMaster ? 180 : 35}
+                step={isMultiAngleMaster ? 5 : 1}
+                value={puppetAngleDeg}
+                onChange={(e) => setPuppetAngleDeg(Number(e.target.value))}
+                className="flex-1 accent-ink-brass h-1.5 cursor-pointer"
+              />
+              <span className="font-mono text-desk-muted w-10 text-right shrink-0 tabular-nums">
+                {puppetAngleDeg > 0 ? `+${puppetAngleDeg}°` : `${puppetAngleDeg}°`}
+              </span>
+              {puppetAngleDeg !== 0 && (
+                <button
+                  type="button"
+                  onClick={() => setPuppetAngleDeg(0)}
+                  className="text-[11px] font-bold text-desk-muted hover:text-ink-brass"
+                >
+                  0°
+                </button>
+              )}
+            </div>
 
             {/* Bottom Transport & Direct Export Bar */}
             <div className="rounded-2xl bg-desk-surface border border-desk-border px-3 py-2 flex flex-wrap items-center gap-2 shrink-0">

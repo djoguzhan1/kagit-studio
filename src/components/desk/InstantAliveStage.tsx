@@ -39,10 +39,7 @@ import { soundEngine } from '../../engine/soundEngine';
 import { solveGeodesicArapMesh } from '../../engine/arapSolver';
 import { prepareCharacterCanvas } from '../../engine/characterIntakeEngine';
 import { renderConformingMeshAuto } from '../../engine/webglSkinnedRenderer';
-import {
-  encodeFramesToMp4WebCodecs,
-  pickBestMediaRecorderFormat,
-} from '../../engine/videoExportEngine';
+import { encodeFramesToMp4WebCodecs } from '../../engine/videoExportEngine';
 import { runGifEncode } from '../../engine/paperWorkerClient';
 import { evaluateDeterministicVerletRibbon } from '../../engine/verletPhysics';
 import {
@@ -78,8 +75,13 @@ import { drawStorybookWorldBackdrop, drawStorybookWorldForeground } from '../../
 import {
   recordAndEchoVoiceFx,
   recordSoundtrackVideo,
+  renderProceduralSoundtrackOffline,
   type VoiceEffectId,
 } from '../../engine/liveAudioStudio';
+import {
+  createStageImageShareLink,
+  resolveSharedSnapshotFromLocation,
+} from '../../engine/exportEngine';
 import {
   decodeSharedStage,
   encodeSharedStage,
@@ -1548,6 +1550,7 @@ export function InstantAliveStage({
   const guideCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const aliveCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [openAliveMenu, setOpenAliveMenu] = useState<'world' | 'cast' | 'fx' | 'export' | null>(null);
+  const [manualShareUrl, setManualShareUrl] = useState<string | null>(null);
 
   const heroStrokesRef = useRef<StrokeRecord[]>([]);
   const heroUnderlayRef = useRef<HTMLCanvasElement | null>(null);
@@ -1699,6 +1702,44 @@ export function InstantAliveStage({
         .notify(translate(curLocale, duet ? 'aliveSharedTwoToast' : 'aliveSharedOneToast'));
     };
     hydrateFromHash();
+
+    // Also hydrate shared raster character snapshots (?s=<id> or #inktrope-snap=...) when kind === 'stage-image'
+    if (
+      typeof window !== 'undefined' &&
+      (window.location.search.includes('s=') || window.location.hash.startsWith('#inktrope-snap='))
+    ) {
+      void resolveSharedSnapshotFromLocation().then(async (shared) => {
+        if (!shared || shared.kind !== 'stage-image') return;
+        const img = new Image();
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('load failed'));
+          img.src = shared.dataUrl;
+        }).catch(() => {});
+        if (!img.naturalWidth || !img.naturalHeight) return;
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        c.getContext('2d')!.drawImage(img, 0, 0);
+        const anatomy = analyzeCanvasAnatomy(c);
+        const pack = await buildRiggedCharacterPackAsync(c, anatomy);
+        heroStrokesRef.current = [];
+        heroUnderlayRef.current = c;
+        rigPackRef.current = pack;
+        pinsRef.current = createAnatomyPins(pack.anatomy);
+        setStrokeCount(1);
+        setGhostDismissed(true);
+        setToy(shared.snapshot.mode);
+        setMood(shared.snapshot.mood);
+        setWorld(shared.snapshot.world);
+        if (shared.snapshot.prop) setProp(shared.snapshot.prop);
+        setPhase('alive');
+        repositionHeroForLane(false);
+        const curLocale = useStudioStore.getState().locale;
+        useStudioStore.getState().notify(translate(curLocale, 'shareProjectLoadedToast'));
+      });
+    }
+
     window.addEventListener('hashchange', hydrateFromHash);
     return () => window.removeEventListener('hashchange', hydrateFromHash);
   }, [repositionHeroForLane]);
@@ -2874,7 +2915,7 @@ export function InstantAliveStage({
     }
   };
 
-  // --- 1-Click Soundtrack + Universal MP4 Video Download (WebCodecs H.264 + MediaRecorder!) ---
+  // --- 1-Click Soundtrack + Universal MP4 Video Download (WebCodecs H.264 Primary + Offline Audio!) ---
   const handleDownloadLiveVideo = async () => {
     const c = aliveCanvasRef.current;
     const pack = rigPackRef.current;
@@ -2882,18 +2923,25 @@ export function InstantAliveStage({
     setVideoExporting(true);
     soundEngine.clapperSnap();
     try {
-      const chosen = pickBestMediaRecorderFormat();
-      // Prefer frame-accurate WebCodecs MP4 when browser lacks native MP4 MediaRecorder (e.g. Firefox/WebView!)
-      if (!chosen || chosen.ext !== 'mp4') {
+      const useLiveMicRecorder = Boolean(toy === 'talk' && micStreamRef.current);
+      // Primary Universal MP4 Path: WebCodecs H.264 + fastStart mp4-muxer + Offline 48kHz Soundtrack!
+      if (!useLiveMicRecorder && typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
         const vw = 960;
         const vh = 540;
         const vFps = 24;
         const totalF = 72;
+        const offlineAudio = await renderProceduralSoundtrackOffline(
+          totalF / vFps,
+          toy,
+          world,
+          voiceFx
+        );
         const mp4Blob = await encodeFramesToMp4WebCodecs({
           width: vw,
           height: vh,
           fps: vFps,
           totalFrames: totalF,
+          audioBuffer: offlineAudio,
           drawFrame: (octx, i) => {
             const tSec = i / vFps;
             const defaultHeroX = buddyPackRef.current ? vw * 0.33 : vw * 0.5;
@@ -2962,30 +3010,59 @@ export function InstantAliveStage({
     }
   };
 
-  // --- 1-Click Zero-Server Remix Share Link (`#kagit=...`) ---
+  // --- 1-Click Share Link (Supports both Vector Strokes & Uploaded PNG/Paper Characters + Honest Clipboard Fallback!) ---
   const handleShareRemixLink = async () => {
-    if (heroStrokesRef.current.length === 0) return;
     soundEngine.click(1.22);
-    const token = encodeSharedStage({
-      strokes: heroStrokesRef.current,
-      buddyStrokes: hasBuddy && buddyStrokesRef.current.length > 0 ? buddyStrokesRef.current : undefined,
-      toy,
-      world,
-      mood,
-      prop,
-      voiceFx,
-    });
-    const hashStr = `#inktrope=${token}`;
-    hydratedHashRef.current = hashStr;
-    const shareUrl = `${window.location.origin}${window.location.pathname}${hashStr}`;
-    try {
-      window.history.replaceState(null, '', hashStr);
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(shareUrl);
+    let shareUrl = '';
+
+    if (heroStrokesRef.current.length > 0) {
+      const dropped =
+        Math.max(0, heroStrokesRef.current.length - 256) +
+        Math.max(0, (hasBuddy ? buddyStrokesRef.current.length : 0) - 128);
+      const token = encodeSharedStage({
+        strokes: heroStrokesRef.current,
+        buddyStrokes:
+          hasBuddy && buddyStrokesRef.current.length > 0 ? buddyStrokesRef.current : undefined,
+        toy,
+        world,
+        mood,
+        prop,
+        voiceFx,
+      });
+      const hashStr = `#inktrope=${token}`;
+      hydratedHashRef.current = hashStr;
+      shareUrl = `${window.location.origin}${window.location.pathname}${hashStr}`;
+      try {
+        window.history.replaceState(null, '', hashStr);
+      } catch {
+        // ignore history error
       }
+      if (dropped > 0) {
+        notify(tf('shareStrokesClippedToast', { dropped }), 'info');
+      }
+    } else if (rigPackRef.current?.sourceCanvas) {
+      shareUrl = await createStageImageShareLink({
+        canvas: rigPackRef.current.sourceCanvas,
+        mode: toy,
+        mood,
+        world,
+        prop,
+      });
+    } else {
+      notify(t('shareEmptyStageToast'), 'info');
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('clipboard_blocked');
+      }
+      await navigator.clipboard.writeText(shareUrl);
+      setManualShareUrl(null);
       notify(t('shareCopied'));
     } catch {
-      notify(t('shareCopied'));
+      setManualShareUrl(shareUrl);
+      notify(t('shareManualCopyToast'), 'info');
     }
   };
 
@@ -3032,6 +3109,26 @@ export function InstantAliveStage({
           if (files.length > 0) void handleUploadImageFiles(files);
         }}
       />
+      {manualShareUrl && (
+        <div className="rounded-2xl console-well border border-ink-brass px-3 py-2 flex items-center gap-2">
+          <input
+            type="text"
+            readOnly
+            value={manualShareUrl}
+            onFocus={(e) => e.currentTarget.select()}
+            aria-label={t('shareLink')}
+            className="flex-1 min-w-0 bg-transparent font-mono text-[11px] text-desk-text focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => setManualShareUrl(null)}
+            className="min-w-[36px] min-h-[36px] rounded-lg text-xs font-bold text-desk-muted hover:text-desk-text"
+            aria-label={t('exportCloseAria')}
+          >
+            ×
+          </button>
+        </div>
+      )}
       {/* Glowing Lightbox Glass Window with Registration Pegbar (Hides cleanly in dark Film Cinema!) */}
       <div className="relative pt-3" onClick={() => openAliveMenu && setOpenAliveMenu(null)}>
         <div

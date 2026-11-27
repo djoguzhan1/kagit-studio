@@ -9,7 +9,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { registerCanvasFlusher, useStudioStore } from '../../store/useStudioStore';
+import { flushActiveCanvasNow, registerCanvasFlusher, useStudioStore } from '../../store/useStudioStore';
 import { StudioCanvasEngine } from '../../engine/canvasEngine';
 import { renderFrameComposite } from '../../engine/frameComposite';
 import { StudioAudioPlayer } from '../../engine/audioEngine';
@@ -99,6 +99,19 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
     maxCount: number;
   } | null>(null);
 
+  const [isInteractingView, setIsInteractingView] = useState(false);
+  const zoomPanRef = useRef({ zoom: 1, pan: { x: 0, y: 0 } });
+  zoomPanRef.current = { zoom, pan };
+
+  const pendingTouchBucketRef = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    startClientX: number;
+    startClientY: number;
+    cancelled: boolean;
+  } | null>(null);
+
   const panDragRef = useRef<{ active: boolean; startX: number; startY: number; ox: number; oy: number }>({
     active: false,
     startX: 0,
@@ -108,11 +121,21 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
   });
 
   const persistQueueRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingPersistRef = useRef<{ frameId: string; layerId: string } | null>(null);
+  const pendingPersistRef = useRef<{
+    projectId: string;
+    sceneId?: string;
+    frameId: string;
+    layerId: string;
+  } | null>(null);
   const inFlightPersistRef = useRef<Promise<void> | null>(null);
 
   const flushPersistNow = useCallback(
-    async (explicit?: { frameId: string; layerId: string }): Promise<void> => {
+    (explicit?: {
+      projectId?: string;
+      sceneId?: string;
+      frameId: string;
+      layerId: string;
+    }): Promise<void> => {
       if (persistQueueRef.current) {
         clearTimeout(persistQueueRef.current);
         persistQueueRef.current = null;
@@ -120,32 +143,53 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
       const target = explicit ?? pendingPersistRef.current;
       pendingPersistRef.current = null;
       if (!target) {
-        if (inFlightPersistRef.current) await inFlightPersistRef.current;
-        return;
+        return inFlightPersistRef.current ?? Promise.resolve();
       }
 
       const eng = engineRef.current;
       const state = useStudioStore.getState();
-      const curProj = state.projects.find((p) => p.id === state.activeProjectId);
-      const curFrame = curProj?.frames.find((f) => f.id === target.frameId);
+      const targetProjId = target.projectId ?? state.activeProjectId;
+      const curProj = state.projects.find((p) => p.id === targetProjId);
+      const targetSceneId = target.sceneId ?? curProj?.activeSceneId;
+      const curScene = curProj?.scenes?.find((s) => s.id === targetSceneId);
+      const framesPool = curScene?.frames ?? curProj?.frames ?? [];
+      const curFrame = framesPool.find((f) => f.id === target.frameId);
       const curLayer = curFrame?.layers.find((l) => l.id === target.layerId);
-      if (!eng || !curFrame || !curLayer || eng.getLoadedFrameId() !== curFrame.id) {
-        return;
+      if (!eng || !curProj || !curFrame || !curLayer || eng.getLoadedFrameId() !== curFrame.id) {
+        return inFlightPersistRef.current ?? Promise.resolve();
       }
 
-      // Synchronously triggers canvas snapshot inside persistLayerAndThumb before any await!
-      const p = eng
-        .persistLayerAndThumb(curLayer.id, curLayer.blobKey, curFrame.thumbKey)
+      // Synchronously snapshot layer + composite thumbnail BEFORE any await so frame/scene/project transitions NEVER race!
+      const snap = eng.snapshotLayerAndThumbSync(curLayer.id);
+      if (!snap) {
+        return inFlightPersistRef.current ?? Promise.resolve();
+      }
+
+      const prevPromise = inFlightPersistRef.current ?? Promise.resolve();
+      const capturedProjId = curProj.id;
+      const capturedSceneId = targetSceneId;
+      const capturedFrameId = curFrame.id;
+      const capturedLayerId = curLayer.id;
+      const existingLayerBlobKey = curLayer.blobKey;
+      const existingThumbKey = curFrame.thumbKey;
+
+      const p = prevPromise
+        .then(() => eng.persistSnapshot(snap, existingLayerBlobKey, existingThumbKey))
         .then((res) => {
-          if (res) {
-            updateLayerBlobAndThumb(curFrame.id, curLayer.id, res.layerBlobKey, res.thumbKey);
-          }
+          updateLayerBlobAndThumb(
+            capturedFrameId,
+            capturedLayerId,
+            res.layerBlobKey,
+            res.thumbKey,
+            capturedProjId,
+            capturedSceneId
+          );
         })
         .finally(() => {
           if (inFlightPersistRef.current === p) inFlightPersistRef.current = null;
         });
       inFlightPersistRef.current = p;
-      await p;
+      return p;
     },
     [engineRef, updateLayerBlobAndThumb]
   );
@@ -155,8 +199,13 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
       const state = useStudioStore.getState();
       const curProj = state.projects.find((p) => p.id === state.activeProjectId);
       const fid = targetFrameId ?? curProj?.frames[state.activeFrameIndex]?.id;
-      if (!fid) return;
-      pendingPersistRef.current = { frameId: fid, layerId };
+      if (!curProj || !fid) return;
+      pendingPersistRef.current = {
+        projectId: curProj.id,
+        sceneId: curProj.activeSceneId,
+        frameId: fid,
+        layerId,
+      };
       if (persistQueueRef.current) clearTimeout(persistQueueRef.current);
       persistQueueRef.current = setTimeout(() => {
         persistQueueRef.current = null;
@@ -193,7 +242,13 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
       const sec = frameStartSlot / project.fps;
       if (!audioPlayerRef.current) audioPlayerRef.current = new StudioAudioPlayer();
       void audioPlayerRef.current.ensureLoaded(project.audio).then(() => {
-        audioPlayerRef.current?.playScrubSlice(sec, project.audio!.volume, project.audio!.muted, 0.085);
+        audioPlayerRef.current?.playScrubSlice(
+          sec,
+          project.audio!.volume,
+          project.audio!.muted,
+          0.085,
+          project.audio!.voiceEffect ?? 'natural'
+        );
       });
     }
 
@@ -292,7 +347,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
 
   const frameId = frame?.id;
   useEffect(() => {
-    // NEVER reload the editing canvas (or wipe Undo history!) during playback!
+    // NEVER reload the editing canvas during playback, and await in-flight canvas flushes before loading target frame blobs!
     if (isPlaying || !engineRef.current || !project || !frame) return;
     if (
       engineRef.current.getLoadedFrameId() === frame.id &&
@@ -300,18 +355,41 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
     ) {
       return;
     }
-    loadedFrameIdxRef.current = activeFrameIndex;
-    const prevFrames = [];
-    for (let i = 1; i <= 3; i++) {
-      if (activeFrameIndex - i >= 0) prevFrames.push(project.frames[activeFrameIndex - i]);
-    }
-    const nextFrames = [];
-    for (let i = 1; i <= 3; i++) {
-      if (activeFrameIndex + i < project.frames.length) {
-        nextFrames.push(project.frames[activeFrameIndex + i]);
+    let cancelled = false;
+    const targetFrameIdx = activeFrameIndex;
+    const targetFrameId = frame.id;
+
+    void (async () => {
+      await flushActiveCanvasNow();
+      if (cancelled || !engineRef.current) return;
+      const latestState = useStudioStore.getState();
+      const latestProj = latestState.projects.find((p) => p.id === latestState.activeProjectId);
+      const latestFrame = latestProj?.frames[targetFrameIdx];
+      if (!latestProj || !latestFrame || latestFrame.id !== targetFrameId) return;
+
+      loadedFrameIdxRef.current = targetFrameIdx;
+      const prevFrames = [];
+      for (let i = 1; i <= 3; i++) {
+        if (targetFrameIdx - i >= 0) prevFrames.push(latestProj.frames[targetFrameIdx - i]);
       }
-    }
-    void engineRef.current.loadFrame(frame, activeLayerId, prevFrames, nextFrames, activeFrameIndex);
+      const nextFrames = [];
+      for (let i = 1; i <= 3; i++) {
+        if (targetFrameIdx + i < latestProj.frames.length) {
+          nextFrames.push(latestProj.frames[targetFrameIdx + i]);
+        }
+      }
+      await engineRef.current.loadFrame(
+        latestFrame,
+        latestState.activeLayerId,
+        prevFrames,
+        nextFrames,
+        targetFrameIdx
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [frameId, project?.id, project?.activeSceneId, activeFrameIndex, isPlaying]);
 
@@ -399,15 +477,44 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
       setPlaybackFrameIndex(timelineSlots[0]);
       prefetchAhead(1);
 
+      let rangeStartExposureSlot = 0;
+      for (let idx = 0; idx < rangeStart; idx++) {
+        rangeStartExposureSlot += Math.max(1, project.frames[idx]?.hold ?? 1);
+      }
+      const rangeStartOffsetSec = rangeStartExposureSlot / project.fps;
+
       if (project.audio && !project.audio.muted) {
         await audioPlayerRef.current!.ensureLoaded(project.audio);
         if (!cancelled) {
-          audioPlayerRef.current!.startAt(0, project.audio.volume, project.audio.muted);
+          const liveAudio =
+            useStudioStore.getState().projects.find((p) => p.id === project.id)?.audio ??
+            project.audio;
+          audioPlayerRef.current!.startAt(
+            rangeStartOffsetSec,
+            liveAudio.volume,
+            liveAudio.muted,
+            liveAudio.voiceEffect ?? 'natural'
+          );
         }
       }
 
       const startTime = performance.now();
       let lastSlot = -1;
+      let slotRenderSeq = 0;
+
+      const drawSlotSafely = (fIdx: number) => {
+        const seq = ++slotRenderSeq;
+        const cached = ringCache.get(fIdx);
+        if (cached) {
+          ctx.drawImage(cached, 0, 0);
+        } else {
+          void renderSingleFrame(fIdx).then((c) => {
+            if (c && !cancelled && seq === slotRenderSeq) {
+              ctx.drawImage(c, 0, 0);
+            }
+          });
+        }
+      };
 
       const tick = () => {
         if (cancelled) return;
@@ -417,15 +524,23 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
         if (rawSlot >= timelineSlots.length) {
           if (loopPlayback) {
             const loopSlot = rawSlot % timelineSlots.length;
-            if (loopSlot < lastSlot && project.audio && !project.audio.muted) {
-              audioPlayerRef.current?.startAt(0, project.audio.volume, project.audio.muted);
+            if (loopSlot < lastSlot) {
+              const liveAudio = useStudioStore
+                .getState()
+                .projects.find((p) => p.id === project.id)?.audio;
+              if (liveAudio && !liveAudio.muted) {
+                audioPlayerRef.current?.startAt(
+                  rangeStartOffsetSec,
+                  liveAudio.volume,
+                  liveAudio.muted,
+                  liveAudio.voiceEffect ?? 'natural'
+                );
+              }
             }
             if (loopSlot !== lastSlot) {
               lastSlot = loopSlot;
               const fIdx = timelineSlots[loopSlot];
-              const cached = ringCache.get(fIdx);
-              if (cached) ctx.drawImage(cached, 0, 0);
-              else void renderSingleFrame(fIdx).then((c) => c && !cancelled && ctx.drawImage(c, 0, 0));
+              drawSlotSafely(fIdx);
               prefetchAhead(loopSlot + 1);
               setPlaybackFrameIndex(fIdx);
             }
@@ -436,9 +551,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
         } else if (rawSlot !== lastSlot) {
           lastSlot = rawSlot;
           const fIdx = timelineSlots[rawSlot];
-          const cached = ringCache.get(fIdx);
-          if (cached) ctx.drawImage(cached, 0, 0);
-          else void renderSingleFrame(fIdx).then((c) => c && !cancelled && ctx.drawImage(c, 0, 0));
+          drawSlotSafely(fIdx);
           prefetchAhead(rawSlot + 1);
           setPlaybackFrameIndex(fIdx);
         }
@@ -461,10 +574,62 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
   }, [isPlaying, loopPlayback, loopRange, project?.id, project?.activeSceneId, project?.fps]);
 
   useEffect(() => {
+    if (!isPlaying || !project?.audio) return;
+    audioPlayerRef.current?.setLiveVolumeAndMute(project.audio.volume, project.audio.muted);
+  }, [isPlaying, project?.audio?.volume, project?.audio?.muted, project?.audio]);
+
+  useEffect(() => {
     return () => {
       audioPlayerRef.current?.dispose();
     };
   }, []);
+
+  // Non-passive native Wheel listener: cursor-anchored Ctrl/Cmd+Wheel zoom ('0' passive listener console errors!) + smooth 2-finger trackpad pan
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    let wheelIdleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const onNativeWheel = (e: WheelEvent) => {
+      if (useStudioStore.getState().isPlaying) return;
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        setIsInteractingView(true);
+        const rect = el.getBoundingClientRect();
+        const mx = e.clientX - (rect.left + rect.width / 2);
+        const my = e.clientY - (rect.top + rect.height / 2);
+        const cur = zoomPanRef.current;
+        const factor = e.deltaY < 0 ? 1.1 : 0.9;
+        const nextZoom = Math.max(0.25, Math.min(6, Number((cur.zoom * factor).toFixed(3))));
+        const ratio = nextZoom / Math.max(0.05, cur.zoom);
+        const nextPan = {
+          x: Math.round(mx - (mx - cur.pan.x) * ratio),
+          y: Math.round(my - (my - cur.pan.y) * ratio),
+        };
+        zoomPanRef.current = { zoom: nextZoom, pan: nextPan };
+        setZoom(nextZoom);
+        setPan(nextPan);
+      } else if (Math.abs(e.deltaX) > 0.5 || Math.abs(e.deltaY) > 0.5) {
+        e.preventDefault();
+        setIsInteractingView(true);
+        const cur = zoomPanRef.current;
+        const nextPan = {
+          x: Math.round(cur.pan.x - e.deltaX),
+          y: Math.round(cur.pan.y - e.deltaY),
+        };
+        zoomPanRef.current = { zoom: cur.zoom, pan: nextPan };
+        setPan(nextPan);
+      }
+      if (wheelIdleTimer) clearTimeout(wheelIdleTimer);
+      wheelIdleTimer = setTimeout(() => setIsInteractingView(false), 120);
+    };
+
+    el.addEventListener('wheel', onNativeWheel, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', onNativeWheel);
+      if (wheelIdleTimer) clearTimeout(wheelIdleTimer);
+    };
+  }, [project?.id, Boolean(frame)]);
 
   // Animator Keyboard Shortcuts + Cross-Frame Ctrl+C / Ctrl+V + Smart Space Pan/Play + Ctrl+S Flush
   useEffect(() => {
@@ -697,8 +862,13 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
       activeTouchesRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
       const count = activeTouchesRef.current.size;
       if (count >= 2) {
-        // Cancel any accidental single-finger stroke immediately when 2nd finger lands!
+        // Cancel any accidental single-finger stroke or deferred touch bucket immediately when 2nd finger lands!
         engineRef.current?.cancelActiveStroke();
+        if (pendingTouchBucketRef.current) {
+          pendingTouchBucketRef.current.cancelled = true;
+          pendingTouchBucketRef.current = null;
+        }
+        setIsInteractingView(true);
         const pts = [...activeTouchesRef.current.values()];
         const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
         const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
@@ -724,6 +894,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
     if (spacePanning || e.button === 1) {
       if (spacePanning) spaceUsedPanRef.current = true;
       safeSetPointerCapture(e.currentTarget, e.pointerId);
+      setIsInteractingView(true);
       panDragRef.current = {
         active: true,
         startX: e.clientX,
@@ -736,10 +907,24 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
 
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     safeSetPointerCapture(e.currentTarget, e.pointerId);
+    const pos = clientToCanvas(e.clientX, e.clientY);
+
+    // Pinch-Safe Touch Bucket: defer single-finger touch flood fill to pointerup so 2-finger pinch never floods canvas!
+    if (e.pointerType === 'touch' && brush.tool === 'bucket' && !e.altKey) {
+      pendingTouchBucketRef.current = {
+        pointerId: e.pointerId,
+        x: pos.x,
+        y: pos.y,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        cancelled: false,
+      };
+      return;
+    }
+
     if (!activeLayerBlocked) {
       setHasSessionStroke(true);
     }
-    const pos = clientToCanvas(e.clientX, e.clientY);
     void engineRef.current?.handlePointerDown(
       pos.x,
       pos.y,
@@ -755,6 +940,17 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
 
     if (e.pointerType === 'touch' && activeTouchesRef.current.has(e.pointerId)) {
       activeTouchesRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (
+        pendingTouchBucketRef.current &&
+        pendingTouchBucketRef.current.pointerId === e.pointerId &&
+        Math.hypot(
+          e.clientX - pendingTouchBucketRef.current.startClientX,
+          e.clientY - pendingTouchBucketRef.current.startClientY
+        ) > 10
+      ) {
+        pendingTouchBucketRef.current.cancelled = true;
+        pendingTouchBucketRef.current = null;
+      }
       if (activeTouchesRef.current.size >= 2 && pinchStartRef.current) {
         const pts = [...activeTouchesRef.current.values()];
         const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
@@ -765,7 +961,7 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
         if (Math.abs(dist - ps.dist) > 10 || Math.hypot(cx - ps.cx, cy - ps.cy) > 10) {
           ps.moved = true;
         }
-        const nextZoom = Math.max(0.35, Math.min(4, ps.zoom * (dist / ps.dist)));
+        const nextZoom = Math.max(0.25, Math.min(6, ps.zoom * (dist / ps.dist)));
         const deltaDeg = ((angle - ps.angle) * 180) / Math.PI;
         setZoom(Number(nextZoom.toFixed(2)));
         setPan({ x: ps.panX + (cx - ps.cx), y: ps.panY + (cy - ps.cy) });
@@ -782,16 +978,41 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
       return;
     }
     if (isPlaying) return;
-    const pos = clientToCanvas(e.clientX, e.clientY);
-    engineRef.current?.handlePointerMove(pos.x, pos.y, e.pressure, e.pointerId);
+
+    // W3C Pointer Events Level 3 'getCoalescedEvents()' for 120Hz/240Hz Apple Pencil & Wacom precision!
+    const rawEv = e.nativeEvent;
+    const coalesced =
+      typeof rawEv.getCoalescedEvents === 'function' ? rawEv.getCoalescedEvents() : [];
+    const samples = coalesced.length > 0 ? coalesced : [rawEv];
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      const pos = clientToCanvas(s.clientX, s.clientY);
+      engineRef.current?.handlePointerMove(pos.x, pos.y, s.pressure, e.pointerId);
+    }
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.pointerType === 'touch') {
       activeTouchesRef.current.delete(e.pointerId);
+      const pendingBucket = pendingTouchBucketRef.current;
+      if (pendingBucket && pendingBucket.pointerId === e.pointerId) {
+        pendingTouchBucketRef.current = null;
+        if (!pendingBucket.cancelled && !pinchStartRef.current) {
+          if (!activeLayerBlocked) setHasSessionStroke(true);
+          void engineRef.current?.handlePointerDown(
+            pendingBucket.x,
+            pendingBucket.y,
+            0.5,
+            e.pointerId,
+            'touch'
+          );
+        }
+        return;
+      }
       if (activeTouchesRef.current.size === 0 && pinchStartRef.current) {
         const ps = pinchStartRef.current;
         pinchStartRef.current = null;
+        setIsInteractingView(false);
         // Quick 2-finger tap -> Undo; quick 3-finger tap -> Redo!
         if (!ps.moved && performance.now() - ps.startTime < 280) {
           if (ps.maxCount >= 3) {
@@ -812,17 +1033,10 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
 
     if (panDragRef.current.active) {
       panDragRef.current.active = false;
+      setIsInteractingView(false);
       return;
     }
     engineRef.current?.handlePointerUp(e.pointerId);
-  };
-
-  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      const delta = e.deltaY < 0 ? 1.1 : 0.9;
-      setZoom((z) => Math.max(0.35, Math.min(4, Number((z * delta).toFixed(2)))));
-    }
   };
 
   const resetDeskView = () => {
@@ -850,7 +1064,6 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
   return (
     <div
       ref={stageRef}
-      onWheel={handleWheel}
       className="relative flex-1 desk-surface-mat overflow-hidden flex items-center justify-center px-3 pb-7 pt-11 sm:px-5 sm:pb-8 sm:pt-10 select-none"
     >
       {/* Live 120 FPS Dual-Contrast Brush Size Ring Cursor (stage-relative at all breakpoints!) */}
@@ -996,7 +1209,9 @@ export default function DrawingStage({ onHistoryState, engineRef }: DrawingStage
 
       {/* Physical Backlit Animation Paper Sheet with Interactive ACME 3-Hole Pegbar */}
       <div
-        className="relative max-w-full max-h-full transition-transform duration-75"
+        className={`relative max-w-full max-h-full ${
+          isInteractingView ? 'transition-none' : 'transition-transform duration-75'
+        }`}
         style={{
           width: isPortraitOrSquare ? 'auto' : 'min(96%, 1040px)',
           height: isPortraitOrSquare ? 'min(90%, 540px)' : 'auto',

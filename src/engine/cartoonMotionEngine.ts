@@ -24,6 +24,7 @@ import type { KlausLightConfig } from './cpuRasterizer';
 import { probeSoftwareRenderer } from './deviceTierEngine';
 
 export type CartoonMoodId = 'natural' | 'joy' | 'cool' | 'sneak' | 'sprint';
+export type PrestonBlairViseme = VisemeId;
 
 /**
  * KÂĞIT Cartoon Motion Engine — Disney 12 Principles & Richard Williams Motion Craft.
@@ -112,6 +113,12 @@ export interface ArticulatedCartoonPose {
   blink: number;
   /** Facing direction (+1 right, -1 left) */
   facing: 1 | -1;
+  /** Optional 2.5D horizontal camera/character yaw angle in radians (0 = front, ±π/2 = side profile) */
+  viewYawRad?: number;
+  /** Optional high-level acting gesture mode for overhead 2-bone IK & free-hand wave routing */
+  gestureMode?: 'none' | 'wave' | 'handsUp' | 'surprise';
+  /** Optional continuous animation timestamp in seconds (drives 60 FPS creature/cloth kinematics) */
+  timeSec?: number;
 }
 
 export interface SpringPinState {
@@ -614,6 +621,7 @@ export function evaluateCartoonDancePose(
         viseme: 'closed',
         blink,
         facing: dir,
+        timeSec: tSec,
       };
     }
   }
@@ -1003,6 +1011,7 @@ export function evaluateCartoonRainWalkPose(
     viseme: st > 0.25 ? 'OH' : 'closed',
     blink,
     facing,
+    timeSec: tSec,
   };
 }
 
@@ -1064,6 +1073,7 @@ export function evaluateCartoonTalkPose(
     viseme,
     blink,
     facing: 1,
+    timeSec: tSec,
   };
 }
 
@@ -1371,7 +1381,9 @@ export function renderArticulatedCharacter(
   };
 }
 
-/** Draws an expressive 6-shape hand-drawn cartoon mouth matching real animation acting */
+export type CustomMouthBitmapRecord = Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>>;
+
+/** Draws an expressive 6-shape hand-drawn cartoon mouth (or artist custom mouth sprite) with drawn-mouth underlay masking */
 export function drawCartoonMouth(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -1379,13 +1391,63 @@ export function drawCartoonMouth(
   scale: number,
   viseme: VisemeId,
   mouthOpen: number,
-  tiltRad: number
+  tiltRad: number,
+  opts?: {
+    maskUnderlayColor?: string;
+    hasDrawnMouth?: boolean;
+    customMouths?: CustomMouthBitmapRecord;
+  }
 ) {
-  if (viseme === 'closed' || mouthOpen < 0.06) return;
+  const isSilentClosed = viseme === 'closed' || mouthOpen < 0.06;
+  const customMouths = opts?.customMouths;
+  const mappedKey: 'closed' | 'A' | 'E' | 'O' = isSilentClosed
+    ? 'closed'
+    : viseme === 'AA'
+      ? 'A'
+      : viseme === 'EE' || viseme === 'FV'
+        ? 'E'
+        : 'O';
+  const customSprite = isSilentClosed
+    ? customMouths?.closed
+    : customMouths?.[mappedKey] ?? customMouths?.A ?? customMouths?.O ?? customMouths?.E;
+
+  if (isSilentClosed && !customSprite) return;
+
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(tiltRad);
   const s = Math.max(0.7, Math.min(1.45, scale));
+
+  // Mask existing static drawn mouth with soft-edged skin/face ellipse so double-mouth NEVER appears!
+  if (opts?.hasDrawnMouth && (mouthOpen > 0.08 || Boolean(customSprite))) {
+    const maskCol = opts.maskUnderlayColor || '#F6E8D5';
+    const mRx = Math.max(16, 18.5 * s);
+    const mRy = Math.max(11, 12.5 * s);
+    const prevAlpha = ctx.globalAlpha;
+    ctx.fillStyle = maskCol;
+    for (const [mult, alpha] of [
+      [1.30, 0.36],
+      [1.14, 0.72],
+      [0.98, 1.0],
+    ] as const) {
+      ctx.globalAlpha = prevAlpha * alpha;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, mRx * mult, mRy * mult, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = prevAlpha;
+  }
+
+  if (customSprite) {
+    const rawDim = customSprite as { width?: number; height?: number; naturalWidth?: number; naturalHeight?: number };
+    const iw = Math.max(1, rawDim.naturalWidth ?? rawDim.width ?? 64);
+    const ih = Math.max(1, rawDim.naturalHeight ?? rawDim.height ?? 48);
+    const drawW = Math.max(20, 30 * s * (isSilentClosed ? 0.92 : 0.96 + Math.min(0.35, mouthOpen * 0.28)));
+    const drawH = drawW * (ih / iw);
+    ctx.drawImage(customSprite, -drawW * 0.5, -drawH * 0.5, drawW, drawH);
+    ctx.restore();
+    return;
+  }
 
   let rx = 11 * s;
   let ry = 4 * s;
@@ -1681,16 +1743,16 @@ function drawNaturalBlinkEyelids(
   headRot: number
 ) {
   if (!pack.eyes.found || blink < 0.14) return;
-  const rPx = Math.max(4, pack.eyes.radius * actorW * 1.45);
+  const rPx = Math.max(3.5, Math.min(actorW * 0.045, pack.eyes.radius * actorW * 1.05));
   for (const eye of [pack.eyes.left, pack.eyes.right]) {
     const pt = headMap(eye.x, eye.y);
     ctx.save();
     ctx.translate(pt.x, pt.y);
     ctx.rotate(headRot);
-    // Warm paper eyelid cover closing over the drawn dot
+    // Tight socket-confined eyelid cover so blinks never bleed onto hat brims or hair
     ctx.fillStyle = pack.faceFillColor;
     ctx.beginPath();
-    ctx.ellipse(0, 0, rPx * 1.1, rPx * Math.min(1.15, blink * 1.25), 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, rPx * 0.92, rPx * Math.min(0.92, blink * 0.98), 0, 0, Math.PI * 2);
     ctx.fill();
     // Friendly closed-eye curved ink lash
     if (blink > 0.45) {
@@ -1722,11 +1784,12 @@ export function drawCharacterFacialActing(
     actorW: number;
     headRot: number;
     mouthOpen?: number;
+    suppressCheekBlush?: boolean;
   }
 ) {
   const { blink, emotion = 'neutral', eyeLeadX = 0, headMap, actorW, headRot, mouthOpen = 0 } = opts;
   const eyes = pack.eyes;
-  const rPx = Math.max(4, eyes.radius * actorW * 1.38);
+  const rPx = Math.max(3.5, Math.min(actorW * 0.048, eyes.radius * actorW * 1.08));
   const ink = pack.inkColor || '#1C1917';
   const leftPt = headMap(eyes.left.x, eyes.left.y);
   const rightPt = headMap(eyes.right.x, eyes.right.y);
@@ -1754,34 +1817,36 @@ export function drawCharacterFacialActing(
   // 3. Expressive Cartoon Emotions (Brows, Heavy Lids, Blush, Joy Squints & Surprise Accents!)
   if (emotion === 'neutral') return;
 
-  const browOffsetY = -rPx * 1.38;
-  const browHalfW = rPx * 1.05;
-  const browLineW = Math.max(2, rPx * 0.34);
+  const browOffsetY = -rPx * 1.28;
+  const browHalfW = rPx * 0.98;
+  const browLineW = Math.max(2, rPx * 0.32);
 
   if (emotion === 'tired') {
-    // Heavy half-closed upper eyelids + soft under-eye fatigue arcs
+    // Heavy half-closed upper eyelids confined strictly inside detected eye socket (zero rectangular box over hat brims!)
     for (const pt of [leftPt, rightPt]) {
       ctx.save();
       ctx.translate(pt.x, pt.y);
       ctx.rotate(headRot);
-      // Droopy upper lid mask matching character's sampled face color
-      ctx.fillStyle = pack.faceFillColor;
-      ctx.beginPath();
-      ctx.rect(-rPx * 1.25, -rPx * 1.2, rPx * 2.5, rPx * 1.15);
-      ctx.fill();
+      if (eyes.found) {
+        ctx.fillStyle = pack.faceFillColor;
+        ctx.beginPath();
+        ctx.arc(0, 0, rPx * 0.84, Math.PI, 0, false);
+        ctx.closePath();
+        ctx.fill();
+      }
       // Heavy lid line
       ctx.strokeStyle = ink;
-      ctx.lineWidth = Math.max(1.8, rPx * 0.26);
+      ctx.lineWidth = Math.max(1.6, rPx * 0.24);
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(-rPx * 1.05, -rPx * 0.05);
-      ctx.quadraticCurveTo(0, rPx * 0.12, rPx * 1.05, -rPx * 0.05);
+      ctx.moveTo(-rPx * 0.88, -rPx * 0.04);
+      ctx.quadraticCurveTo(0, rPx * 0.1, rPx * 0.88, -rPx * 0.04);
       ctx.stroke();
       // Subtle under-eye tired bag
-      ctx.strokeStyle = 'rgba(72, 62, 58, 0.42)';
-      ctx.lineWidth = Math.max(1.2, rPx * 0.16);
+      ctx.strokeStyle = 'rgba(72, 62, 58, 0.38)';
+      ctx.lineWidth = Math.max(1.1, rPx * 0.15);
       ctx.beginPath();
-      ctx.arc(0, rPx * 0.65, rPx * 0.72, 0.25, Math.PI - 0.25);
+      ctx.arc(0, rPx * 0.58, rPx * 0.64, 0.25, Math.PI - 0.25);
       ctx.stroke();
       ctx.restore();
     }
@@ -1789,7 +1854,7 @@ export function drawCharacterFacialActing(
   }
 
   if (emotion === 'angry') {
-    // Sharp V-angled furrowed studio cartoon eyebrows + subtle brow tension crease
+    // Sharp V-angled furrowed studio cartoon eyebrows + socket-clipped squint
     const pairs: { pt: Vec2; side: -1 | 1 }[] = [
       { pt: leftPt, side: -1 },
       { pt: rightPt, side: 1 },
@@ -1798,15 +1863,21 @@ export function drawCharacterFacialActing(
       ctx.save();
       ctx.translate(pt.x, pt.y);
       ctx.rotate(headRot);
-      // Slight angled upper lid trim for fierce squint
-      ctx.fillStyle = pack.faceFillColor;
-      ctx.beginPath();
-      ctx.moveTo(-rPx * 1.25, -rPx * 1.3);
-      ctx.lineTo(rPx * 1.25, -rPx * 1.3);
-      ctx.lineTo(rPx * 1.25, side < 0 ? -rPx * 0.1 : -rPx * 0.75);
-      ctx.lineTo(-rPx * 1.25, side < 0 ? -rPx * 0.75 : -rPx * 0.1);
-      ctx.closePath();
-      ctx.fill();
+      if (eyes.found) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(0, 0, rPx * 0.84, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.fillStyle = pack.faceFillColor;
+        ctx.beginPath();
+        ctx.moveTo(-rPx, -rPx);
+        ctx.lineTo(rPx, -rPx);
+        ctx.lineTo(rPx, side < 0 ? -rPx * 0.08 : -rPx * 0.58);
+        ctx.lineTo(-rPx, side < 0 ? -rPx * 0.58 : -rPx * 0.08);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
 
       ctx.strokeStyle = ink;
       ctx.lineWidth = browLineW * 1.1;
@@ -1849,11 +1920,13 @@ export function drawCharacterFacialActing(
       ctx.save();
       ctx.translate(pt.x, pt.y);
       ctx.rotate(headRot);
-      // Warm coral cartoon cheek blush
-      ctx.fillStyle = 'rgba(235, 108, 92, 0.34)';
-      ctx.beginPath();
-      ctx.ellipse(0, rPx * 1.45, rPx * 1.15, rPx * 0.58, 0, 0, Math.PI * 2);
-      ctx.fill();
+      // Optional subtle cheek warmth (suppressed by default on drawn-mouth characters or when requested)
+      if (!opts.suppressCheekBlush && !pack.hasDrawnMouth) {
+        ctx.fillStyle = 'rgba(235, 108, 92, 0.14)';
+        ctx.beginPath();
+        ctx.ellipse(0, rPx * 1.45, rPx * 1.0, rPx * 0.48, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
       // Cheerful arched eyebrows
       ctx.strokeStyle = ink;
       ctx.lineWidth = Math.max(1.8, browLineW * 0.82);
@@ -2062,30 +2135,68 @@ export interface RiggedIKOverrides {
  * on dark stages (ZERO internal white seam cuts across joints!), true horizontal facing mirror,
  * full 6-emotion facial acting + 3-frame eye-lead + organic blinking, and direct IK pin targets!
  */
+export interface CartoonRenderOptions {
+  boilTick?: number;
+  timeSec?: number;
+  nightHalo?: boolean;
+  nightLampPos?: Vec2 | null;
+  smearVelX?: number;
+  isReflection?: boolean;
+  emotion?: FilmEmotionId;
+  eyeLeadX?: number;
+  ikOverrides?: RiggedIKOverrides | null;
+  klausLight?: KlausLightConfig | null;
+  forceCpuRaster?: boolean;
+  universalAction?: UniversalActionId;
+  yawDeg?: number;
+  ambientTint?: { r: number; g: number; b: number; strength: number } | null;
+  suppressCheekBlush?: boolean;
+  customMouths?: CustomMouthBitmapRecord | null;
+}
+
 export function renderMultiLayerRiggedCharacter(
   ctx: CanvasRenderingContext2D,
   pack: RiggedCharacterPack,
   pose: ArticulatedCartoonPose,
   bounds: { x: number; y: number; w: number; h: number },
-  opts?: {
-    boilTick?: number;
-    nightLampPos?: Vec2 | null;
-    smearVelX?: number;
-    isReflection?: boolean;
-    emotion?: FilmEmotionId;
-    eyeLeadX?: number;
-    ikOverrides?: RiggedIKOverrides | null;
-    klausLight?: KlausLightConfig | null;
-    forceCpuRaster?: boolean;
-    universalAction?: UniversalActionId;
-    yawDeg?: number;
-  }
+  opts?: CartoonRenderOptions
 ): CharacterLiveAnchors {
   const { anatomy } = pack;
   const W = bounds.w;
   const H = bounds.h;
   const boilTick = opts?.boilTick ?? 0;
-  const isNight = Boolean(opts?.nightLampPos);
+  const continuousTimeSec = opts?.timeSec ?? pose.timeSec ?? boilTick * 0.165;
+  const isNight = Boolean(opts?.nightHalo);
+  const effectiveKlausLight: KlausLightConfig | null | undefined = (() => {
+    const base = opts?.klausLight ?? null;
+    const tint = opts?.ambientTint;
+    if (!tint || tint.strength <= 0.005) return base;
+    const tr = Math.max(0, Math.min(1, tint.r > 1 ? tint.r / 255 : tint.r));
+    const tg = Math.max(0, Math.min(1, tint.g > 1 ? tint.g / 255 : tint.g));
+    const tb = Math.max(0, Math.min(1, tint.b > 1 ? tint.b / 255 : tint.b));
+    const ts = Math.max(0, Math.min(0.6, tint.strength));
+    if (base) {
+      return {
+        ...base,
+        shadowR: base.shadowR * 0.65 + tr * 0.35,
+        shadowG: base.shadowG * 0.65 + tg * 0.35,
+        shadowB: base.shadowB * 0.65 + tb * 0.35,
+        shadowStrength: Math.min(0.58, base.shadowStrength + ts * 0.45),
+      };
+    }
+    return {
+      lx: opts?.nightLampPos ? (opts.nightLampPos.x >= bounds.x + W * 0.5 ? 0.72 : -0.72) : 0.35,
+      ly: -0.45,
+      rimR: 0.96,
+      rimG: 0.82,
+      rimB: 0.54,
+      rimStrength: opts?.nightLampPos ? 0.52 : 0.18,
+      shadowR: tr,
+      shadowG: tg,
+      shadowB: tb,
+      shadowStrength: ts,
+    };
+  })();
   const facingLeft = pose.facing < 0;
   const emotion = opts?.emotion ?? 'neutral';
   const rawEyeLead = opts?.eyeLeadX ?? 0;
@@ -2105,7 +2216,7 @@ export function renderMultiLayerRiggedCharacter(
     ) {
       const cMesh = pack.skinnedMesh;
       const cls = cMesh.creatureClass ?? 'humanoid';
-      const phaseSec = boilTick * 0.165;
+      const phaseSec = continuousTimeSec;
       const action: UniversalActionId =
         opts?.universalAction ?? UNIVERSAL_CREATURE_CATALOG[cls].defaultAction;
       const useGpuSkin = !opts?.forceCpuRaster && !probeSoftwareRenderer();
@@ -2127,7 +2238,8 @@ export function renderMultiLayerRiggedCharacter(
         isReflection: opts?.isReflection,
         mirroredOrder: facingLeft,
         mirrorAxisX: facingLeft ? pelvisX : null,
-        klausLight: opts?.klausLight,
+        klausLight: effectiveKlausLight,
+        gpuBones: ev.gpuBones,
         forceCpuRaster: opts?.forceCpuRaster,
       };
       let cDrawn = false;
@@ -2182,7 +2294,7 @@ export function renderMultiLayerRiggedCharacter(
         _skinnedPosBuf = new Float32Array(silMesh.vertexCount * 2);
       }
       const archKind = pack.archetype === 'quadruped' ? 'quadruped' : 'floater';
-      const phaseSec = boilTick * 0.165;
+      const phaseSec = continuousTimeSec;
       const ev = evaluateArchetypeSilhouetteMesh(
         silMesh,
         archKind,
@@ -2197,7 +2309,8 @@ export function renderMultiLayerRiggedCharacter(
         isReflection: opts?.isReflection,
         mirroredOrder: facingLeft,
         mirrorAxisX: facingLeft ? ev.pelvisX : null,
-        klausLight: opts?.klausLight,
+        klausLight: effectiveKlausLight,
+        gpuBones: ev.gpuBones,
         forceCpuRaster: opts?.forceCpuRaster,
       });
       if (!opts?.isReflection) {
@@ -2215,6 +2328,7 @@ export function renderMultiLayerRiggedCharacter(
           actorW: W,
           headRot: ev.headTotalRot,
           mouthOpen: pose.mouthOpen,
+          suppressCheekBlush: opts?.suppressCheekBlush,
         });
         ctx.restore();
       }
@@ -2293,12 +2407,8 @@ export function renderMultiLayerRiggedCharacter(
       _skinnedPosBuf = new Float32Array(mesh.vertexCount * 2);
     }
 
-    // Use pure 0ms GPU Vertex-Shader Skinning on hardware GPUs when fine CPU head-turn micro-parallax isn't needed!
-    const canPureGpuSkin =
-      !opts?.forceCpuRaster &&
-      !probeSoftwareRenderer() &&
-      Math.abs(pose.headTurnX) < 0.06 &&
-      Math.abs(pose.headLagY) < 0.015;
+    // Full hardware GPU Vertex-Shader Skinning on all frames (head-turn parallax & hat lag run natively in VERT_GPU_SKIN_SRC!)
+    const canPureGpuSkin = !opts?.forceCpuRaster && !probeSoftwareRenderer();
 
     const ev = evaluateConformingSkinnedMesh(
       mesh,
@@ -2344,12 +2454,25 @@ export function renderMultiLayerRiggedCharacter(
       ctx.restore();
     }
 
+    const headTurnLocalGpu = Math.max(-1, Math.min(1, facingLeft ? -pose.headTurnX : pose.headTurnX));
+    const faceParallaxAmpPx =
+      Math.abs(headTurnLocalGpu) > 0.04 ? Math.sin(headTurnLocalGpu * 0.46) * W * 0.016 : 0;
+    const hatFollowPx = Math.max(-3.2, Math.min(3.2, pose.headLagY * H * 0.35));
+
     const renderOpts = {
       mirroredOrder: facingLeft,
       nightHalo: isNight,
       isReflection: opts?.isReflection,
       mirrorAxisX: facingLeft ? ev.pelvisX : null,
-      klausLight: opts?.klausLight,
+      klausLight: effectiveKlausLight,
+      headParallax: {
+        ampPx: faceParallaxAmpPx,
+        headCenterX: anatomy.headCenterX,
+        headCenterY: anatomy.headCenterY,
+        headEndV: anatomy.headEndV,
+      },
+      hatFollowPx,
+      gpuBones: ev.gpuBones,
       forceCpuRaster: opts?.forceCpuRaster,
     };
 
@@ -2381,7 +2504,7 @@ export function renderMultiLayerRiggedCharacter(
     }
     if (!drawn) {
       if (!opts?.isReflection && ev.gpuBones.length > 1) {
-        drawInpaintedSocketBackingPass(ctx, mesh, ev.gpuBones[1], bounds, renderOpts.mirrorAxisX);
+        drawInpaintedSocketBackingPass(ctx, mesh, ev.gpuBones, bounds, renderOpts.mirrorAxisX, renderOpts.klausLight);
       }
       renderConformingMeshAuto(ctx, pack.filledCanvas, mesh, ev.positions, renderOpts);
     }
@@ -2599,6 +2722,7 @@ export function renderMultiLayerRiggedCharacter(
           actorW: W,
           headRot: headTotalRot,
           mouthOpen: pose.mouthOpen,
+          suppressCheekBlush: opts?.suppressCheekBlush,
         });
       }
     };

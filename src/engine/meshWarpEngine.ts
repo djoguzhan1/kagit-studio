@@ -19,6 +19,7 @@ import {
   stripPaperBackgroundBfsRGBA,
 } from './characterIntakeEngine';
 import type { CharacterArchetype } from './skeletonSkinEngine';
+import type { ConformingSkinnedMesh } from './conformingMeshEngine';
 import { solveGeodesicArapMesh } from './arapSolver';
 import { renderConformingMeshAuto } from './webglSkinnedRenderer';
 
@@ -29,6 +30,255 @@ export type PuppetBackdropId = 'paper' | 'transparent' | 'night' | 'sunset';
 export interface Vec2 {
   x: number;
   y: number;
+}
+
+export interface BarycentricMeshAnchor {
+  i0: number;
+  i1: number;
+  i2: number;
+  b0: number;
+  b1: number;
+  b2: number;
+  /** Residual UV offset (0,0 when strictly inside the triangle) rotated rigidly with the triangle */
+  du: number;
+  dv: number;
+  restUx: number;
+  restUy: number;
+}
+
+const _baryAnchorCache = new WeakMap<ConformingSkinnedMesh, Map<string, BarycentricMeshAnchor>>();
+
+function projectPointToTriangle2D(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number
+): { b0: number; b1: number; b2: number; qx: number; qy: number; dist2: number } {
+  const v0x = bx - ax;
+  const v0y = by - ay;
+  const v1x = cx - ax;
+  const v1y = cy - ay;
+  const v2x = px - ax;
+  const v2y = py - ay;
+
+  const d00 = v0x * v0x + v0y * v0y;
+  const d01 = v0x * v1x + v0y * v1y;
+  const d11 = v1x * v1x + v1y * v1y;
+  const denom = d00 * d11 - d01 * d01;
+
+  if (Math.abs(denom) > 1e-11) {
+    const d20 = v2x * v0x + v2y * v0y;
+    const d21 = v2x * v1x + v2y * v1y;
+    const v = (d11 * d20 - d01 * d21) / denom;
+    const w = (d00 * d21 - d01 * d20) / denom;
+    const u = 1 - v - w;
+    if (u >= -1e-4 && v >= -1e-4 && w >= -1e-4) {
+      const cu = Math.max(0, u);
+      const cv = Math.max(0, v);
+      const cw = Math.max(0, w);
+      const s = cu + cv + cw || 1;
+      return {
+        b0: cu / s,
+        b1: cv / s,
+        b2: cw / s,
+        qx: px,
+        qy: py,
+        dist2: 0,
+      };
+    }
+  }
+
+  // Closest point on the 3 triangle edges
+  const edges: Array<[number, number, number, number, number, number]> = [
+    [ax, ay, bx, by, 0, 1],
+    [bx, by, cx, cy, 1, 2],
+    [cx, cy, ax, ay, 2, 0],
+  ];
+  let bestD2 = Infinity;
+  let bestQx = ax;
+  let bestQy = ay;
+  let bestB: [number, number, number] = [1, 0, 0];
+
+  for (const [x0, y0, x1, y1, idx0, idx1] of edges) {
+    const ex = x1 - x0;
+    const ey = y1 - y0;
+    const el2 = ex * ex + ey * ey;
+    const t = el2 > 1e-12 ? Math.max(0, Math.min(1, ((px - x0) * ex + (py - y0) * ey) / el2)) : 0;
+    const qx = x0 + ex * t;
+    const qy = y0 + ey * t;
+    const d2 = (px - qx) * (px - qx) + (py - qy) * (py - qy);
+    if (d2 < bestD2) {
+      bestD2 = d2;
+      bestQx = qx;
+      bestQy = qy;
+      const bw: [number, number, number] = [0, 0, 0];
+      bw[idx0] = 1 - t;
+      bw[idx1] = t;
+      bestB = bw;
+    }
+  }
+
+  return {
+    b0: bestB[0],
+    b1: bestB[1],
+    b2: bestB[2],
+    qx: bestQx,
+    qy: bestQy,
+    dist2: bestD2,
+  };
+}
+
+/**
+ * Binds any normalized (u, v) landmark (eye, mouth, headCenter, crown) onto the containing
+ * (or closest) triangle of a ConformingSkinnedMesh with cached barycentric weights.
+ * Eliminates Euclidean Shepard `deformPoint` drift completely (`0.000 px` facial slip).
+ */
+export function bindBarycentricMeshAnchor(
+  mesh: ConformingSkinnedMesh,
+  u: number,
+  v: number
+): BarycentricMeshAnchor {
+  let perMesh = _baryAnchorCache.get(mesh);
+  if (!perMesh) {
+    perMesh = new Map<string, BarycentricMeshAnchor>();
+    _baryAnchorCache.set(mesh, perMesh);
+  }
+  const key = `${Math.round(u * 2048)},${Math.round(v * 2048)}`;
+  const hit = perMesh.get(key);
+  if (hit) return hit;
+
+  const uv = mesh.restUV;
+  const tris = mesh.triangles;
+  let bestAnchor: BarycentricMeshAnchor = {
+    i0: 0,
+    i1: 0,
+    i2: 0,
+    b0: 1,
+    b1: 0,
+    b2: 0,
+    du: 0,
+    dv: 0,
+    restUx: 1,
+    restUy: 0,
+  };
+  let bestDist2 = Infinity;
+
+  for (let t = 0; t + 2 < tris.length; t += 3) {
+    const i0 = tris[t];
+    const i1 = tris[t + 1];
+    const i2 = tris[t + 2];
+    const u0 = uv[i0 * 2];
+    const v0 = uv[i0 * 2 + 1];
+    const u1 = uv[i1 * 2];
+    const v1 = uv[i1 * 2 + 1];
+    const u2 = uv[i2 * 2];
+    const v2 = uv[i2 * 2 + 1];
+
+    const proj = projectPointToTriangle2D(u, v, u0, v0, u1, v1, u2, v2);
+    if (proj.dist2 < bestDist2) {
+      bestDist2 = proj.dist2;
+      const ex = u1 - u0;
+      const ey = v1 - v0;
+      const el = Math.hypot(ex, ey) || 1;
+      bestAnchor = {
+        i0,
+        i1,
+        i2,
+        b0: proj.b0,
+        b1: proj.b1,
+        b2: proj.b2,
+        du: u - proj.qx,
+        dv: v - proj.qy,
+        restUx: ex / el,
+        restUy: ey / el,
+      };
+      if (proj.dist2 === 0) break;
+    }
+  }
+
+  perMesh.set(key, bestAnchor);
+  return bestAnchor;
+}
+
+/**
+ * Evaluates a cached barycentric mesh anchor directly from deformed screen-space vertex positions.
+ */
+export function evalBarycentricMeshAnchor(
+  anchor: BarycentricMeshAnchor,
+  positions: Float32Array,
+  drawW: number,
+  drawH: number
+): Vec2 {
+  const x0 = positions[anchor.i0 * 2];
+  const y0 = positions[anchor.i0 * 2 + 1];
+  const x1 = positions[anchor.i1 * 2];
+  const y1 = positions[anchor.i1 * 2 + 1];
+  const x2 = positions[anchor.i2 * 2];
+  const y2 = positions[anchor.i2 * 2 + 1];
+
+  let x = anchor.b0 * x0 + anchor.b1 * x1 + anchor.b2 * x2;
+  let y = anchor.b0 * y0 + anchor.b1 * y1 + anchor.b2 * y2;
+
+  if (Math.abs(anchor.du) > 1e-6 || Math.abs(anchor.dv) > 1e-6) {
+    const defEx = x1 - x0;
+    const defEy = y1 - y0;
+    const defLen = Math.hypot(defEx, defEy);
+    const curUx = defLen > 1e-4 ? defEx / defLen : anchor.restUx;
+    const curUy = defLen > 1e-4 ? defEy / defLen : anchor.restUy;
+    // Rotation from rest edge direction to deformed edge direction
+    const cosR = anchor.restUx * curUx + anchor.restUy * curUy;
+    const sinR = anchor.restUx * curUy - anchor.restUy * curUx;
+    const ox = anchor.du * drawW;
+    const oy = anchor.dv * drawH;
+    x += cosR * ox - sinR * oy;
+    y += sinR * ox + cosR * oy;
+  }
+
+  return { x, y };
+}
+
+/** Evaluates exact triangle barycentric coordinates on the fallback elastic grid (zero Shepard drift) */
+function evalGridBarycentricScreen(
+  u: number,
+  v: number,
+  verts: Vec2[],
+  cols: number,
+  rows: number,
+  layout: { drawX: number; drawY: number; drawW: number; drawH: number }
+): Vec2 {
+  const cu = Math.max(0, Math.min(1, u)) * cols;
+  const cv = Math.max(0, Math.min(1, v)) * rows;
+  const c = Math.min(cols - 1, Math.floor(cu));
+  const r = Math.min(rows - 1, Math.floor(cv));
+  const fx = cu - c;
+  const fy = cv - r;
+
+  const i00 = r * (cols + 1) + c;
+  const p00 = verts[i00];
+  const p10 = verts[i00 + 1];
+  const p01 = verts[i00 + cols + 1];
+  const p11 = verts[i00 + cols + 2];
+
+  // Match exact diagonal split used in drawTexturedTriangle loop:
+  // Upper-right triangle (fx >= fy): (0,0)-(1,0)-(1,1)
+  // Lower-left triangle (fx < fy):  (0,0)-(1,1)-(0,1)
+  let nx: number;
+  let ny: number;
+  if (fx >= fy) {
+    nx = p00.x * (1 - fx) + p10.x * (fx - fy) + p11.x * fy;
+    ny = p00.y * (1 - fx) + p10.y * (fx - fy) + p11.y * fy;
+  } else {
+    nx = p00.x * (1 - fy) + p11.x * fx + p01.x * (fy - fx);
+    ny = p00.y * (1 - fy) + p11.y * fx + p01.y * (fy - fx);
+  }
+  return {
+    x: layout.drawX + nx * layout.drawW,
+    y: layout.drawY + ny * layout.drawH,
+  };
 }
 
 /** Maps auto-detected silhouette archetype into the ideal default Canlı Kukla pin template */
@@ -183,8 +433,7 @@ function boilNoise(idx: number, boilPhase: number): number {
 }
 
 /**
- * Pure 2D Radial-Basis / Soft-Cage Vertex Deformation.
- * Smoothly bends any single drawing around user pins with zero tearing and <2ms cost.
+ * Pure 2D Radial-Basis / Soft-Cage Vertex Deformation (used for simple grid fallback).
  */
 export function deformPoint(
   u: number,
@@ -204,7 +453,6 @@ export function deformPoint(
     const dx = u - p.x;
     const dy = v - p.y;
     const d2 = dx * dx + dy * dy;
-    // Smooth Shepard weight with generous falloff for rubber-hose cartoon flexibility
     const w = 1 / Math.pow(d2 + 0.014, 1.45);
     sumW += w;
     if (off) {
@@ -272,7 +520,6 @@ function drawTexturedTriangle(
   const denom = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
   if (Math.abs(denom) < 1e-6) return;
 
-  // Expand destination triangle slightly (~0.55px) from centroid to hide seams
   const cx = (dx0 + dx1 + dx2) / 3;
   const cy = (dy0 + dy1 + dy2) / 3;
   const expand = (px: number, py: number) => {
@@ -310,27 +557,55 @@ function drawCartoonMouthViseme(
   cx: number,
   cy: number,
   size: number,
-  viseme: MouthViseme
+  viseme: MouthViseme,
+  opts?: {
+    maskUnderlayColor?: string;
+    hasDrawnMouth?: boolean;
+    customMouths?: Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>>;
+  }
 ): void {
+  const customKey: 'closed' | 'A' | 'E' | 'O' =
+    viseme === 'closed' ? 'closed' : viseme === 'half' ? 'E' : viseme === 'round' ? 'O' : 'A';
+  const customSprite = opts?.customMouths?.[customKey];
+
   ctx.save();
   ctx.translate(cx, cy);
+
+  if (opts?.hasDrawnMouth && viseme !== 'closed') {
+    ctx.save();
+    ctx.fillStyle = opts.maskUnderlayColor || '#FAF3E4';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size * 0.62, size * 0.44, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  if (customSprite) {
+    const sw = size * 1.35;
+    const sh = size * 1.1;
+    ctx.drawImage(customSprite, -sw * 0.5, -sh * 0.5, sw, sh);
+    ctx.restore();
+    return;
+  }
+
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.strokeStyle = '#1C1917';
   ctx.lineWidth = Math.max(2.2, size * 0.12);
 
   if (viseme === 'closed') {
-    ctx.beginPath();
-    ctx.moveTo(-size * 0.45, 0);
-    ctx.quadraticCurveTo(0, size * 0.16, size * 0.45, 0);
-    ctx.stroke();
+    if (!opts?.hasDrawnMouth) {
+      ctx.beginPath();
+      ctx.moveTo(-size * 0.45, 0);
+      ctx.quadraticCurveTo(0, size * 0.16, size * 0.45, 0);
+      ctx.stroke();
+    }
   } else if (viseme === 'half') {
     ctx.fillStyle = '#B83324';
     ctx.beginPath();
     ctx.ellipse(0, 0, size * 0.46, size * 0.22, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    // Tiny upper teeth highlight
     ctx.fillStyle = '#FAF6EE';
     ctx.fillRect(-size * 0.24, -size * 0.18, size * 0.48, size * 0.1);
   } else if (viseme === 'round') {
@@ -340,7 +615,6 @@ function drawCartoonMouthViseme(
     ctx.fill();
     ctx.stroke();
   } else {
-    // 'wide' — joyful loud cartoon 'A' mouth with tongue!
     ctx.fillStyle = '#8F2418';
     ctx.beginPath();
     ctx.moveTo(-size * 0.52, -size * 0.15);
@@ -349,12 +623,10 @@ function drawCartoonMouthViseme(
     ctx.quadraticCurveTo(-size * 0.45, size * 0.48, -size * 0.52, -size * 0.15);
     ctx.closePath();
     ctx.fill();
-    // Tongue accent
     ctx.fillStyle = '#E55A47';
     ctx.beginPath();
     ctx.ellipse(0, size * 0.32, size * 0.28, size * 0.14, 0, 0, Math.PI * 2);
     ctx.fill();
-    // Upper teeth
     ctx.fillStyle = '#FAF6EE';
     ctx.fillRect(-size * 0.34, -size * 0.15, size * 0.68, size * 0.14);
     ctx.stroke();
@@ -362,25 +634,35 @@ function drawCartoonMouthViseme(
   ctx.restore();
 }
 
+/**
+ * Computes grounded 16:9 stage layout with 74% vertical occupancy and 0.91*canvasH sole alignment
+ * (>= 17% net top headroom -> 0 px hat/ear/horn clipping at jump/bounce apex!).
+ */
 export function getMeshStageLayout(
   sourceW: number,
   sourceH: number,
   canvasW: number,
   canvasH: number
 ): { drawX: number; drawY: number; drawW: number; drawH: number; scale: number } {
-  const scale = Math.min((canvasW * 0.82) / sourceW, (canvasH * 0.82) / sourceH);
-  const drawW = sourceW * scale;
-  const drawH = sourceH * scale;
+  const sw = Math.max(1, sourceW);
+  const sh = Math.max(1, sourceH);
+  const scale = Math.min((canvasW * 0.82) / sw, (canvasH * 0.74) / sh);
+  const drawW = sw * scale;
+  const drawH = sh * scale;
+  const minTopHeadroom = canvasH * 0.17;
+  const floorAlignedY = canvasH * 0.91 - drawH;
+  const centeredY = (canvasH - drawH) * 0.62;
+  const drawY = Math.max(minTopHeadroom, Math.min(floorAlignedY, centeredY));
   return {
     drawX: (canvasW - drawW) / 2,
-    drawY: (canvasH - drawH) / 2,
+    drawY,
     drawW,
     drawH,
     scale,
   };
 }
 
-/** Renders one frame of a 2D Mesh Warp rig (zero WebGL, silky 60 FPS on phones & desktops) */
+/** Renders one frame of a 2D/2.5D Mesh Warp rig */
 export async function renderMeshWarpFrame(
   ctx: CanvasRenderingContext2D,
   rig: MeshWarpRig,
@@ -397,6 +679,10 @@ export async function renderMeshWarpFrame(
     showMouthMarker?: boolean;
     isRecording?: boolean;
     liveDragOverride?: { pinId: string; dx: number; dy: number } | null;
+    /** Optional 2.5D view yaw angle in degrees (-35..+35 on single-angle rigs) */
+    yawDeg?: number;
+    fps?: number;
+    customMouths?: Partial<Record<'closed' | 'A' | 'E' | 'O', CanvasImageSource>>;
     /** Optional output map populated with exact rendered screen coordinates of every pin (100% accurate hit-test!) */
     outPinPositions?: Map<string, Vec2> | null;
   }
@@ -409,7 +695,6 @@ export async function renderMeshWarpFrame(
     g.addColorStop(1, '#0F172A');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, canvasW, canvasH);
-    // Warm spotlight pool behind puppet
     const spot = ctx.createRadialGradient(
       canvasW * 0.5,
       canvasH * 0.48,
@@ -485,9 +770,12 @@ export async function renderMeshWarpFrame(
   const pack = getOrBuildCachedRigPack(bmp);
   const { anatomy } = pack;
   const emotion = rig.emotion ?? 'neutral';
+  const yawDeg = options?.yawDeg ?? 0;
+  const yawRad = (yawDeg * Math.PI) / 180;
+  const sinYaw = Math.sin(yawRad);
+  const cosYaw = Math.cos(yawRad);
+  const customMouths = options?.customMouths ?? pack.customMouthBitmaps;
 
-  // Determine whether to run Studio 2-Bone IK + Continuous LBS (zero jelly sticking!)
-  // or Enhanced Gouache Elastic Cage (for quadrupeds, ghosts, clouds, custom extra pins, or mesh-grid inspection!)
   const rootPin = rig.pins.find((p) => p.role === 'root');
   const headPin = rig.pins.find((p) => p.role === 'head');
   const handLPin = rig.pins.find((p) => p.role === 'hand-l');
@@ -521,7 +809,6 @@ export async function renderMeshWarpFrame(
     );
 
     ctx.save();
-    // Soft outer ambient shadow
     ctx.fillStyle =
       backdrop === 'night'
         ? `rgba(4, 6, 14, ${(shadowAlpha * 1.15).toFixed(3)})`
@@ -530,7 +817,6 @@ export async function renderMeshWarpFrame(
     ctx.ellipse(floorX, floorY + 2, layout.drawW * 0.36 * shadowScale, Math.max(7, layout.drawH * 0.036 * shadowScale), 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Tight crisp foot contact shadow
     ctx.fillStyle =
       backdrop === 'night'
         ? `rgba(2, 4, 10, ${(shadowAlpha * 1.35).toFixed(3)})`
@@ -539,15 +825,11 @@ export async function renderMeshWarpFrame(
     ctx.ellipse(floorX, floorY, layout.drawW * 0.22 * shadowScale, Math.max(4, layout.drawH * 0.02 * shadowScale), 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Deterministic cartoon impact dust puffs when landing from a jump/bounce or heavy crouch!
     const impactStrength = Math.max(
       0,
       Math.min(1, (rOff.dy - prevRootDy) * 14 + (prevRootDy < -0.02 && rOff.dy >= -0.01 ? 0.85 : 0))
     );
-    const echoStrength = Math.max(
-      0,
-      Math.min(1, (prevRootDy - prev2RootDy) * 10)
-    );
+    const echoStrength = Math.max(0, Math.min(1, (prevRootDy - prev2RootDy) * 10));
     const dustPower = Math.max(impactStrength, echoStrength * 0.65);
     if (dustPower > 0.16 && liftNorm < 0.04) {
       const dustAge = impactStrength > 0.16 ? 0.25 : 0.65;
@@ -570,7 +852,6 @@ export async function renderMeshWarpFrame(
     ctx.restore();
   }
 
-  // Smooth organic periodic blink curve (0..1)
   let blinkVal = 0;
   if (rig.autoBlink) {
     const blinkCycle = Math.max(20, rig.totalFrames);
@@ -580,11 +861,12 @@ export async function renderMeshWarpFrame(
     else if (blinkPhase === blinkCycle - 1) blinkVal = 0.45;
   }
 
+  const headTopRestV = Math.max(0.03, anatomy.headCenterY - 0.13);
   let liveMouthX = layout.drawX + (rig.mouthPos?.x ?? anatomy.mouthX) * layout.drawW;
   let liveMouthY = layout.drawY + (rig.mouthPos?.y ?? anatomy.mouthY) * layout.drawH;
   let liveHeadTop: Vec2 = {
     x: layout.drawX + anatomy.headCenterX * layout.drawW,
-    y: layout.drawY + Math.max(0.03, anatomy.headCenterY - 0.13) * layout.drawH,
+    y: layout.drawY + headTopRestV * layout.drawH,
   };
   let liveHeadRot = 0;
   const solvedPinPositions = new Map<string, Vec2>();
@@ -593,9 +875,19 @@ export async function renderMeshWarpFrame(
     const rootOff = effectiveOffsets[rootPin.id] ?? { dx: 0, dy: 0 };
     const headOff = effectiveOffsets[headPin.id] ?? { dx: 0, dy: 0 };
     const handLOff = effectiveOffsets[handLPin.id] ?? { dx: 0, dy: 0 };
-    const handROff = effectiveOffsets[handRPin.id] ?? { dx: 0, dy: 0 };
+    const rawHandROff = effectiveOffsets[handRPin.id] ?? { dx: 0, dy: 0 };
     const footLOff = effectiveOffsets[footLPin.id] ?? { dx: 0, dy: 0 };
     const footROff = effectiveOffsets[footRPin.id] ?? { dx: 0, dy: 0 };
+
+    const skel = pack.skinnedMesh;
+    // Free-hand protection: if right arm holds a rigid prop (Baron's cane) and user isn't directly
+    // dragging handR, keep the prop arm grounded during dual-hand wave presets so the cane never swings overhead!
+    const isDirectHandRDrag = options?.liveDragOverride?.pinId === handRPin.id;
+    const isPresetOverheadWave = !isDirectHandRDrag && handLOff.dy < -0.12 && rawHandROff.dy < -0.12;
+    const handROff =
+      skel?.rightHasRigidProp && !skel?.leftHasRigidProp && isPresetOverheadWave
+        ? { dx: rawHandROff.dx * 0.14, dy: rawHandROff.dy * 0.12 }
+        : rawHandROff;
 
     const headRelDx = headOff.dx - rootOff.dx;
     const headRelDy = headOff.dy - rootOff.dy;
@@ -604,6 +896,12 @@ export async function renderMeshWarpFrame(
     const torsoLeanRad = Math.max(-0.34, Math.min(0.34, headRelDx * 1.15));
     const headTiltRad = Math.max(-0.42, Math.min(0.42, headRelDx * 1.45));
     liveHeadRot = headTiltRad + torsoLeanRad * 0.42;
+
+    const effectiveTurnX = Math.max(-1, Math.min(1, headRelDx * 3.5 + sinYaw * 0.88));
+    const foreshortenW = Math.max(0.82, 0.84 + 0.16 * Math.abs(cosYaw));
+    const actorDrawW = layout.drawW * foreshortenW;
+    const actorDrawX = layout.drawX + (layout.drawW - actorDrawW) * 0.5 + sinYaw * layout.drawW * 0.015;
+    const timeSec = safeIdx / Math.max(8, options?.fps ?? 12);
 
     const artPose: ArticulatedCartoonPose = {
       hipShiftX: rootOff.dx,
@@ -614,7 +912,7 @@ export async function renderMeshWarpFrame(
       chestCounterRad: -torsoLeanRad * 0.25,
       headTiltRad,
       headLagY: headRelDy * 0.3,
-      headTurnX: Math.max(-1, Math.min(1, headRelDx * 3.5)),
+      headTurnX: effectiveTurnX,
       leftArmAngle: 0,
       rightArmAngle: 0,
       leftArmLag: 0,
@@ -629,9 +927,11 @@ export async function renderMeshWarpFrame(
       viseme: 'closed',
       blink: blinkVal,
       facing: 1,
+      viewYawRad: yawRad,
+      gestureMode: isPresetOverheadWave ? 'wave' : 'none',
+      timeSec,
     };
 
-    const skel = pack.skinnedMesh;
     const hLRest =
       skel && skel.bones.length >= 17
         ? skel.bones[14].end
@@ -651,46 +951,69 @@ export async function renderMeshWarpFrame(
       skel?.footRight?.ball ??
       (skel && skel.bones.length >= 11 ? skel.bones[10].end : pack.parts.leg_r.end);
 
-    // V3 Real Foot-Lock Crouch: dragging root downward while feet stay unmoved pins both feet
-    // strictly to the floor so knees & ankles bend naturally into a real grounded crouch!
     const footLDy = Math.abs(footLOff.dy) < 0.004 && rootOff.dy > 0.008 ? 0 : footLOff.dy;
     const footRDy = Math.abs(footROff.dy) < 0.004 && rootOff.dy > 0.008 ? 0 : footROff.dy;
+
+    const klausLight =
+      Math.abs(yawDeg) > 0.5
+        ? {
+            lx: Math.max(-0.95, Math.min(0.95, -0.35 + sinYaw * 0.75)),
+            ly: -0.58,
+            rimR: backdrop === 'sunset' ? 1.0 : 0.99,
+            rimG: backdrop === 'sunset' ? 0.84 : 0.95,
+            rimB: backdrop === 'sunset' ? 0.69 : 0.86,
+            rimStrength: backdrop === 'night' ? 0.45 : 0.24,
+            shadowR: backdrop === 'night' ? 0.08 : 0.16,
+            shadowG: backdrop === 'night' ? 0.12 : 0.14,
+            shadowB: backdrop === 'night' ? 0.24 : 0.18,
+            shadowStrength: backdrop === 'night' ? 0.34 : 0.18,
+          }
+        : undefined;
 
     const anchors = renderMultiLayerRiggedCharacter(
       ctx,
       pack,
       artPose,
-      { x: layout.drawX, y: layout.drawY, w: layout.drawW, h: layout.drawH },
+      { x: actorDrawX, y: layout.drawY, w: actorDrawW, h: layout.drawH },
       {
         boilTick: Math.floor(safeIdx / 2),
-        nightLampPos: backdrop === 'night' ? { x: canvasW * 0.5, y: canvasH * 0.25 } : null,
+        timeSec,
+        yawDeg,
+        nightLampPos:
+          backdrop === 'night'
+            ? { x: canvasW * (0.5 + sinYaw * 0.22), y: canvasH * 0.25 }
+            : null,
+        klausLight,
+        ambientTint:
+          backdrop === 'night' ? { r: 24, g: 36, b: 68, strength: 0.18 } : undefined,
+        suppressCheekBlush: true,
+        customMouths,
         emotion,
         ikOverrides: {
           handLeft: {
-            x: layout.drawX + (hLRest.x + handLOff.dx) * layout.drawW,
+            x: actorDrawX + (hLRest.x + handLOff.dx) * actorDrawW,
             y: layout.drawY + (hLRest.y + handLOff.dy) * layout.drawH,
           },
           handRight: {
-            x: layout.drawX + (hRRest.x + handROff.dx) * layout.drawW,
+            x: actorDrawX + (hRRest.x + handROff.dx) * actorDrawW,
             y: layout.drawY + (hRRest.y + handROff.dy) * layout.drawH,
           },
           footLeft: {
-            x: layout.drawX + (fLRest.x + footLOff.dx) * layout.drawW,
+            x: actorDrawX + (fLRest.x + footLOff.dx) * actorDrawW,
             y: layout.drawY + (fLRest.y + footLDy) * layout.drawH,
           },
           footRight: {
-            x: layout.drawX + (fRRest.x + footROff.dx) * layout.drawW,
+            x: actorDrawX + (fRRest.x + footROff.dx) * actorDrawW,
             y: layout.drawY + (fRRest.y + footRDy) * layout.drawH,
           },
           headOffset: {
-            x: headRelDx * layout.drawW * 0.22,
+            x: (headRelDx * 0.22 + sinYaw * 0.028) * actorDrawW,
             y: headRelDy * layout.drawH * 0.22,
           },
         },
       }
     );
 
-    // Record exact solved IK end-effectors so visible pin handles & click hit-tests agree to 0.000 px!
     solvedPinPositions.set(rootPin.id, anchors.pelvisScreen);
     solvedPinPositions.set(headPin.id, {
       x: anchors.headTopScreen.x,
@@ -702,27 +1025,56 @@ export async function renderMeshWarpFrame(
     solvedPinPositions.set(footRPin.id, anchors.footRightScreen);
     liveHeadTop = anchors.headTopScreen;
 
-    // Anchor mouth directly onto the moving head + honor any custom user mouthPos adjustment!
-    const customMouthDx = rig.mouthPos ? (rig.mouthPos.x - anatomy.mouthX) * layout.drawW : 0;
+    const customMouthDx = rig.mouthPos ? (rig.mouthPos.x - anatomy.mouthX) * actorDrawW : 0;
     const customMouthDy = rig.mouthPos ? (rig.mouthPos.y - anatomy.mouthY) * layout.drawH : 0;
     const ch = Math.cos(liveHeadRot);
     const sh = Math.sin(liveHeadRot);
     liveMouthX = anchors.mouthScreen.x + customMouthDx * ch - customMouthDy * sh;
     liveMouthY = anchors.mouthScreen.y + customMouthDx * sh + customMouthDy * ch;
   } else if (pack.silhouetteMesh) {
-    // V3 ZERO-MERGING GEODESIC ARAP PIN SOLVER (no cross-air Shepard RBF webbing, locally rigid volume!)
+    // Cached Global Cholesky Geodesic ARAP Pin Solver + Barycentric Face Anchors (`0.000 px` slip!)
     const silMesh = pack.silhouetteMesh;
     const boilPhase = Math.floor(safeIdx / 2) % 3;
     const boilAmp = rig.lineBoil * 0.004;
     const arap = solveGeodesicArapMesh(silMesh, rig.pins, effectiveOffsets, layout, {
-      iterations: 3,
+      iterations: 2,
       boilAmp,
       boilPhase,
     });
     const pos = arap.positions;
 
+    // Optional 2.5D cylindrical relief parallax when yawDeg != 0 on single-angle creature/blob rigs
+    if (Math.abs(yawDeg) > 0.5) {
+      const midScreenX = layout.drawX + anatomy.centerX * layout.drawW;
+      const foreshorten = Math.max(0.82, 0.84 + 0.16 * Math.abs(cosYaw));
+      const uv = silMesh.restUV;
+      for (let vi = 0; vi < silMesh.vertexCount; vi++) {
+        const u = uv[vi * 2];
+        const v = uv[vi * 2 + 1];
+        const rNorm = Math.min(1, Math.hypot((u - anatomy.centerX) * 2.1, (v - 0.5) * 1.4));
+        const domeZ = Math.sqrt(Math.max(0, 1 - rNorm * rNorm));
+        const dxCenter = pos[vi * 2] - midScreenX;
+        pos[vi * 2] = midScreenX + dxCenter * foreshorten + sinYaw * domeZ * layout.drawW * 0.055;
+      }
+    }
+
     renderConformingMeshAuto(ctx, pack.filledCanvas, silMesh, pos, {
-      nightHalo: backdrop === 'night',
+      nightHalo: false,
+      klausLight:
+        Math.abs(yawDeg) > 0.5 || backdrop === 'night'
+          ? {
+              lx: Math.max(-0.95, Math.min(0.95, -0.32 + sinYaw * 0.78)),
+              ly: -0.58,
+              rimR: 0.99,
+              rimG: 0.94,
+              rimB: 0.84,
+              rimStrength: backdrop === 'night' ? 0.45 : 0.22,
+              shadowR: backdrop === 'night' ? 0.08 : 0.16,
+              shadowG: backdrop === 'night' ? 0.12 : 0.14,
+              shadowB: backdrop === 'night' ? 0.24 : 0.18,
+              shadowStrength: backdrop === 'night' ? 0.32 : 0.16,
+            }
+          : undefined,
     });
 
     if (options?.showMeshGrid) {
@@ -744,38 +1096,46 @@ export async function renderMeshWarpFrame(
       ctx.restore();
     }
 
+    // Barycentric head/eye/mouth tracking directly on deformed ARAP triangles (`0.000 px` drift!)
+    const evalHeadUV = (u: number, v: number): Vec2 => {
+      const anc = bindBarycentricMeshAnchor(silMesh, u, v);
+      return evalBarycentricMeshAnchor(anc, pos, layout.drawW, layout.drawH);
+    };
+
+    const eyeLRef = pack.eyes.found
+      ? pack.eyes.left
+      : { x: Math.max(0.05, anatomy.headCenterX - 0.06), y: anatomy.headCenterY };
+    const eyeRRef = pack.eyes.found
+      ? pack.eyes.right
+      : { x: Math.min(0.95, anatomy.headCenterX + 0.06), y: anatomy.headCenterY };
+    const defEyeL = evalHeadUV(eyeLRef.x, eyeLRef.y);
+    const defEyeR = evalHeadUV(eyeRRef.x, eyeRRef.y);
+    liveHeadRot = Math.atan2(defEyeR.y - defEyeL.y, Math.max(1e-3, defEyeR.x - defEyeL.x));
+
     drawCharacterFacialActing(ctx, pack, {
       blink: blinkVal,
       emotion,
-      headMap: (u, v) => {
-        const dp = deformPoint(u, v, rig.pins, effectiveOffsets);
-        return { x: layout.drawX + dp.x * layout.drawW, y: layout.drawY + dp.y * layout.drawH };
-      },
+      headMap: evalHeadUV,
       actorW: layout.drawW,
-      headRot: 0,
+      headRot: liveHeadRot,
       mouthOpen: rms,
+      suppressCheekBlush: true,
     });
 
-    const deformedHeadTop = deformPoint(
-      anatomy.headCenterX,
-      Math.max(0.03, anatomy.headCenterY - 0.13),
-      rig.pins,
-      effectiveOffsets
-    );
-    liveHeadTop = {
-      x: layout.drawX + deformedHeadTop.x * layout.drawW,
-      y: layout.drawY + deformedHeadTop.y * layout.drawH,
-    };
+    liveHeadTop = evalHeadUV(anatomy.headCenterX, headTopRestV);
 
-    if (rig.mouthPos) {
-      const deformedMouth = deformPoint(rig.mouthPos.x, rig.mouthPos.y, rig.pins, effectiveOffsets);
-      liveMouthX = layout.drawX + deformedMouth.x * layout.drawW;
-      liveMouthY = layout.drawY + deformedMouth.y * layout.drawH;
+    const mouthTargetU = rig.mouthPos?.x ?? anatomy.mouthX;
+    const mouthTargetV = rig.mouthPos?.y ?? anatomy.mouthY;
+    const defMouth = evalHeadUV(mouthTargetU, mouthTargetV);
+    liveMouthX = defMouth.x;
+    liveMouthY = defMouth.y;
+
+    for (const pin of rig.pins) {
+      solvedPinPositions.set(pin.id, evalHeadUV(pin.x, pin.y));
     }
   } else {
-    // Enhanced Closed-Contour Gouache Elastic Cage (with crisp Night Rim Halo on dark stages!)
-    const texSource: CanvasImageSource =
-      backdrop === 'night' ? pack.nightFilledCanvas : pack.filledCanvas;
+    // Fallback Closed-Contour Gouache Elastic Grid with exact cell-triangle barycentrics
+    const texSource: CanvasImageSource = pack.filledCanvas;
     const texW = pack.filledCanvas.width;
     const texH = pack.filledCanvas.height;
 
@@ -791,6 +1151,13 @@ export async function renderMeshWarpFrame(
       rig.lineBoil,
       safeIdx
     );
+
+    if (Math.abs(yawDeg) > 0.5) {
+      const foreshorten = Math.max(0.82, 0.84 + 0.16 * Math.abs(cosYaw));
+      for (let i = 0; i < verts.length; i++) {
+        verts[i].x = anatomy.centerX + (verts[i].x - anatomy.centerX) * foreshorten + sinYaw * 0.02;
+      }
+    }
 
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
@@ -823,7 +1190,6 @@ export async function renderMeshWarpFrame(
       }
     }
 
-    // Optional debug / craftsmanship wireframe overlay
     if (options?.showMeshGrid) {
       ctx.save();
       ctx.strokeStyle = 'rgba(37, 99, 235, 0.24)';
@@ -845,38 +1211,32 @@ export async function renderMeshWarpFrame(
       ctx.restore();
     }
 
-    // Full 6-Emotion Facial Acting + Detected-Eye Blink on Elastic Cage (cats, ghosts, clouds too!)
+    const evalGridUV = (u: number, v: number): Vec2 =>
+      evalGridBarycentricScreen(u, v, verts, cols, rows, layout);
+
+    const gEyeL = evalGridUV(Math.max(0.05, anatomy.headCenterX - 0.06), anatomy.headCenterY);
+    const gEyeR = evalGridUV(Math.min(0.95, anatomy.headCenterX + 0.06), anatomy.headCenterY);
+    liveHeadRot = Math.atan2(gEyeR.y - gEyeL.y, Math.max(1e-3, gEyeR.x - gEyeL.x));
+
     drawCharacterFacialActing(ctx, pack, {
       blink: blinkVal,
       emotion,
-      headMap: (u, v) => {
-        const dp = deformPoint(u, v, rig.pins, effectiveOffsets);
-        return { x: layout.drawX + dp.x * layout.drawW, y: layout.drawY + dp.y * layout.drawH };
-      },
+      headMap: evalGridUV,
       actorW: layout.drawW,
-      headRot: 0,
+      headRot: liveHeadRot,
       mouthOpen: rms,
+      suppressCheekBlush: true,
     });
 
-    const deformedHeadTop = deformPoint(
-      anatomy.headCenterX,
-      Math.max(0.03, anatomy.headCenterY - 0.13),
-      rig.pins,
-      effectiveOffsets
-    );
-    liveHeadTop = {
-      x: layout.drawX + deformedHeadTop.x * layout.drawW,
-      y: layout.drawY + deformedHeadTop.y * layout.drawH,
-    };
-
+    liveHeadTop = evalGridUV(anatomy.headCenterX, headTopRestV);
     if (rig.mouthPos) {
-      const deformedMouth = deformPoint(rig.mouthPos.x, rig.mouthPos.y, rig.pins, effectiveOffsets);
-      liveMouthX = layout.drawX + deformedMouth.x * layout.drawW;
-      liveMouthY = layout.drawY + deformedMouth.y * layout.drawH;
+      const gMouth = evalGridUV(rig.mouthPos.x, rig.mouthPos.y);
+      liveMouthX = gMouth.x;
+      liveMouthY = gMouth.y;
     }
   }
 
-  // Expressive anime surprise sparks above head when emotion === 'surprised'!
+  // Expressive anime surprise sparks above head when emotion === 'surprised'
   if (emotion === 'surprised') {
     ctx.save();
     ctx.strokeStyle = '#E54D2E';
@@ -893,34 +1253,50 @@ export async function renderMeshWarpFrame(
     ctx.restore();
   }
 
-  // Genuine Preston Blair 6-Viseme Auto Lip-Sync Mouth (rate-synced to Chipmunk/Giant voice FX!)
+  // Genuine Preston Blair 6-Viseme Auto Lip-Sync Mouth (honors customMouths + masks drawn mouth!)
   if (rig.mouthPos) {
     const mSize = Math.max(16, (rig.mouthPos.scale || 1) * layout.drawW * 0.095);
     const hasAudio = Boolean(audio && !audio.muted && audio.rmsPerFrame.length > 0);
+    const mouthRenderOpts = {
+      maskUnderlayColor: pack.faceFillColor,
+      hasDrawnMouth: pack.hasDrawnMouth,
+      customMouths,
+    };
     if (hasAudio && audio) {
       const formantViseme =
         audio.visemesPerFrame && audio.visemesPerFrame.length > 0
           ? audio.visemesPerFrame[audioIdx % audio.visemesPerFrame.length]
           : null;
       if (formantViseme) {
-        if (formantViseme !== 'closed') {
-          const mouthScale = Math.max(0.65, Math.min(1.65, (rig.mouthPos.scale || 1) * (layout.drawW / 245)));
-          drawCartoonMouth(ctx, liveMouthX, liveMouthY, mouthScale, formantViseme, Math.max(0.4, rms * 1.2), liveHeadRot);
+        const mouthScale = Math.max(0.65, Math.min(1.65, (rig.mouthPos.scale || 1) * (layout.drawW / 245)));
+        if (formantViseme !== 'closed' || customMouths?.closed) {
+          drawCartoonMouth(
+            ctx,
+            liveMouthX,
+            liveMouthY,
+            mouthScale,
+            formantViseme,
+            formantViseme === 'closed' ? 0 : Math.max(0.4, rms * 1.2),
+            liveHeadRot,
+            mouthRenderOpts
+          );
         } else {
-          drawCartoonMouthViseme(ctx, liveMouthX, liveMouthY, mSize, 'closed');
+          drawCartoonMouthViseme(ctx, liveMouthX, liveMouthY, mSize, 'closed', mouthRenderOpts);
         }
       } else {
         const viseme = rmsToMouthViseme(rms, prevRms);
-        drawCartoonMouthViseme(ctx, liveMouthX, liveMouthY, mSize, viseme);
+        drawCartoonMouthViseme(ctx, liveMouthX, liveMouthY, mSize, viseme, mouthRenderOpts);
       }
+    } else if (customMouths?.closed) {
+      const mouthScale = Math.max(0.65, Math.min(1.65, (rig.mouthPos.scale || 1) * (layout.drawW / 245)));
+      drawCartoonMouth(ctx, liveMouthX, liveMouthY, mouthScale, 'closed', 0, liveHeadRot, mouthRenderOpts);
     }
 
-    // Visual target indicator whenever the user is placing/adjusting the Mouth Position!
     if (options?.showMouthMarker) {
       ctx.save();
       if (!audio || audio.muted) {
         ctx.globalAlpha = 0.72;
-        drawCartoonMouthViseme(ctx, liveMouthX, liveMouthY, mSize, 'half');
+        drawCartoonMouthViseme(ctx, liveMouthX, liveMouthY, mSize, 'half', mouthRenderOpts);
         ctx.globalAlpha = 1;
       }
       ctx.strokeStyle = '#D99B26';
@@ -934,7 +1310,6 @@ export async function renderMeshWarpFrame(
     }
   }
 
-  // Export exact rendered pin screen coordinates for 100% accurate pointer hit-testing in MeshWarpStage!
   if (options?.outPinPositions) {
     options.outPinPositions.clear();
     for (const pin of rig.pins) {
@@ -951,7 +1326,6 @@ export async function renderMeshWarpFrame(
     }
   }
 
-  // Interactive Control Pin Handles (locked directly onto solved 2-Bone IK end-effectors!)
   if (options?.showPins) {
     const getPinVisualPos = (pin: MeshPin): { x: number; y: number; rawX: number; rawY: number } => {
       const off = effectiveOffsets[pin.id] ?? { dx: 0, dy: 0 };
@@ -986,7 +1360,6 @@ export async function renderMeshWarpFrame(
       const isSelected = pin.id === options.selectedPinId;
 
       ctx.save();
-      // If user drags a limb target beyond anatomical reach, draw a subtle elastic reach tether!
       if (isSelected && Math.hypot(pp.rawX - px, pp.rawY - py) > 16) {
         ctx.strokeStyle = 'rgba(229, 77, 46, 0.55)';
         ctx.lineWidth = 1.6;
@@ -1033,7 +1406,7 @@ export async function renderMeshWarpFrame(
 
 /**
  * 1-Click Studio-Quality Motion Presets (Disney 12 Principles + Richard Williams Curves).
- * Features anticipation, volume preservation, passing-pose foot arcs & overlapping follow-through!
+ * Features anticipation, volume preservation, passing-pose foot arcs, outer-elbow wave corridor & overlapping follow-through!
  */
 export function generateMeshPresetFrames(
   pins: MeshPin[],
@@ -1044,7 +1417,7 @@ export function generateMeshPresetFrames(
   const out: MeshFrameOffsets[] = [];
 
   for (let f = 0; f < N; f++) {
-    const u = f / N; // 0..1 normalized cycle
+    const u = f / N;
     const phase = u * Math.PI * 2;
     const offsets: MeshFrameOffsets = {};
 
@@ -1053,7 +1426,6 @@ export function generateMeshPresetFrames(
       let dy = 0;
 
       if (preset === 'breathe') {
-        // Asymmetric organic breathing (40% inhale ease-out, 10% hold, 50% exhale) + overlapping lag!
         const b = organicBreathCurve(u) - 0.5;
         const bLag = organicBreathCurve((u - 0.14 + 1) % 1) - 0.5;
         const bHead = organicBreathCurve((u - 0.18 + 1) % 1) - 0.5;
@@ -1073,7 +1445,6 @@ export function generateMeshPresetFrames(
           dy = -0.02 * bLag;
         }
       } else if (preset === 'bounce') {
-        // Authentic 5-phase Disney Jump: Anticipation -> Stretch Launch -> Gravity Hang -> Squash Impact -> Damped Settle!
         let lift = 0;
         let squash = 0;
         let stretch = 0;
@@ -1081,31 +1452,29 @@ export function generateMeshPresetFrames(
         let headLag = 0;
 
         if (u < 0.2) {
-          // Anticipation crouch (weight drops, hands pull down/back)
           const k = easeOutCubic(u / 0.2);
           squash = k * 0.9;
           lift = k * 0.048;
           armDy = k * 0.045;
         } else if (u < 0.72) {
-          // True gravity parabolic hang: 4*t*(1-t)
           const k = (u - 0.2) / 0.52;
           const arc = 4 * k * (1 - k);
-          lift = -arc * 0.165;
-          stretch = Math.abs(k - 0.5) * 1.4;
-          armDy = -arc * 0.07 - 0.025;
-          headLag = k < 0.5 ? 0.018 : -0.016;
+          // Calibrated jump apex so hats/horns retain >= 2 px top margin with 17% stage headroom
+          lift = -arc * 0.148;
+          stretch = Math.abs(k - 0.5) * 1.25;
+          armDy = -arc * 0.065 - 0.022;
+          headLag = k < 0.5 ? 0.016 : -0.012;
         } else {
-          // Impact squash + elastic overshoot settle!
           const k = (u - 0.72) / 0.28;
           const damp = Math.exp(-k * 4.2) * Math.sin(k * Math.PI * 2.0);
           squash = Math.max(0, damp);
-          lift = damp * 0.055;
-          headLag = Math.sin(Math.min(1, k * 1.35) * Math.PI) * 0.026;
-          armDy = damp * 0.04;
+          lift = damp * 0.052;
+          headLag = Math.sin(Math.min(1, k * 1.35) * Math.PI) * 0.024;
+          armDy = damp * 0.038;
         }
 
         if (p.role === 'head') {
-          dy = lift - stretch * 0.022 + headLag;
+          dy = lift - stretch * 0.018 + headLag;
         } else if (p.role === 'root') {
           dy = lift;
         } else if (p.role === 'hand-l') {
@@ -1124,12 +1493,10 @@ export function generateMeshPresetFrames(
           dy = lift;
         }
       } else if (preset === 'walk') {
-        // Genuine Richard Williams Contact -> Down -> Passing -> Up Walk Cycle!
         const leftLeg = evalWilliamsLeg(u);
         const rightLeg = evalWilliamsLeg((u + 0.5) % 1);
         const { hipY } = evalWilliamsHipBounce(u);
         const { hipY: delayedHipY } = evalWilliamsHipBounce((u - 0.16 + 1) % 1);
-        // Arms lag 0.12 cycles behind legs (overlapping action!)
         const armPhase = Math.cos(((u - 0.12 + 1) % 1) * Math.PI * 2);
 
         const bob = -hipY * 0.034;
@@ -1143,76 +1510,74 @@ export function generateMeshPresetFrames(
           dy = headBob;
           dx = lateralShift * 0.65 + Math.cos(phase - 0.4) * 0.012;
         } else if (p.role === 'foot-l') {
-          dx = leftLeg.stride * 0.082;
-          dy = -leftLeg.lift * 0.052; // Strictly 0 during planted stance, curved arc at Passing Pose!
+          dx = leftLeg.stride * 0.072;
+          dy = -leftLeg.lift * 0.052;
         } else if (p.role === 'foot-r') {
-          dx = rightLeg.stride * 0.082;
+          dx = rightLeg.stride * 0.072;
           dy = -rightLeg.lift * 0.052;
         } else if (p.role === 'hand-l') {
-          dx = -armPhase * 0.072;
+          dx = -armPhase * 0.068;
           dy = bob - Math.abs(armPhase) * 0.022;
         } else if (p.role === 'hand-r') {
-          dx = armPhase * 0.072;
+          dx = armPhase * 0.068;
           dy = bob - Math.abs(armPhase) * 0.022;
         } else if (p.role === 'tail') {
           dx = -Math.sin(phase - 0.6) * 0.055;
           dy = headBob;
         }
       } else if (preset === 'wave') {
-        // Lively cartoon overhead wave + hip weight shift + joyful counter head tilt!
-        const shift = Math.sin(phase) * 0.024;
+        // Outer-lateral wave corridor (dx <= -0.15 on hand-l, dx >= +0.14 on hand-r) so arm never crosses over face!
+        const shift = Math.sin(phase) * 0.022;
         const waveX = Math.sin(phase * 2);
-        const waveY = Math.cos(phase * 2 - 0.55); // Elliptical figure-8 arc!
+        const waveY = Math.cos(phase * 2 - 0.55);
         if (p.role === 'root') {
-          dx = -0.02 + shift * 0.5;
-          dy = -Math.abs(Math.sin(phase)) * 0.014;
+          dx = -0.018 + shift * 0.5;
+          dy = -Math.abs(Math.sin(phase)) * 0.012;
         } else if (p.role === 'hand-l') {
-          // Expressive high free-hand wave (great for Baron whose right hand holds his cane!)
-          dx = -0.065 + waveX * 0.085;
-          dy = -0.245 + waveY * 0.042;
+          dx = -0.195 + waveX * 0.042;
+          dy = -0.22 + waveY * 0.035;
         } else if (p.role === 'hand-r') {
-          dx = 0.04 + waveX * 0.055;
+          dx = 0.185 + waveX * 0.042;
           dy = -0.195 + waveY * 0.032;
         } else if (p.role === 'head') {
-          dx = 0.024 * Math.sin(phase - 0.35);
-          dy = -0.016 * Math.cos(phase - 0.35);
+          dx = 0.02 * Math.sin(phase - 0.35);
+          dy = -0.014 * Math.cos(phase - 0.35);
         }
       } else if (preset === 'dance') {
-        // Rhythmic weight-transfer groove with knee dip + 0.12-cycle staggered shoulder/head follow-through!
         const sway = Math.sin(phase);
         const armLag = Math.sin(phase - 0.72);
         const headLag = Math.sin(phase - 1.0);
         const kneeDip = Math.pow(Math.abs(Math.sin(phase)), 1.35);
 
         if (p.role === 'root') {
-          dx = sway * 0.052;
-          dy = kneeDip * 0.034 - 0.012;
+          dx = sway * 0.048;
+          dy = kneeDip * 0.032 - 0.01;
         } else if (p.role === 'head') {
-          dx = -headLag * 0.042;
-          dy = kneeDip * 0.038 - 0.014;
+          // Coherent neck/head counter-sway prevents extreme opposite collar shear
+          dx = sway * 0.022 - headLag * 0.024;
+          dy = kneeDip * 0.034 - 0.012;
         } else if (p.role === 'hand-l') {
-          dx = armLag * 0.058;
-          dy = -0.075 + Math.sin(phase * 2 - 0.6) * 0.062;
+          dx = -0.045 + armLag * 0.052;
+          dy = -0.072 + Math.sin(phase * 2 - 0.6) * 0.058;
         } else if (p.role === 'hand-r') {
-          dx = armLag * 0.058;
-          dy = -0.075 - Math.sin(phase * 2 - 0.6) * 0.062;
+          dx = 0.045 + armLag * 0.052;
+          dy = -0.072 - Math.sin(phase * 2 - 0.6) * 0.058;
         } else if (p.role === 'foot-l') {
           dy = -Math.pow(Math.max(0, sway), 1.6) * 0.042;
         } else if (p.role === 'foot-r') {
           dy = -Math.pow(Math.max(0, -sway), 1.6) * 0.042;
         }
       } else if (preset === 'stretch') {
-        // Volume-preserving damped harmonic cartoon twang (overshoot & settle!)
         const elastic = Math.sin(u * Math.PI * 3.0) * Math.exp(-u * 2.1);
-        if (p.role === 'head') dy = -0.115 * elastic;
+        if (p.role === 'head') dy = -0.11 * elastic;
         else if (p.role === 'hand-l') {
-          dx = 0.055 * elastic; // Inward pull when stretching up (volume preservation!)
-          dy = -0.045 * elastic;
+          dx = 0.052 * elastic;
+          dy = -0.044 * elastic;
         } else if (p.role === 'hand-r') {
-          dx = -0.055 * elastic;
-          dy = -0.045 * elastic;
+          dx = -0.052 * elastic;
+          dy = -0.044 * elastic;
         } else if (p.role === 'root') {
-          dy = -0.042 * elastic;
+          dy = -0.04 * elastic;
         }
       }
 

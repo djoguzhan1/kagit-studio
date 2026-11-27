@@ -45,6 +45,16 @@ interface QueuedPhoto {
   file: File;
   name: string;
   previewUrl: string;
+  corners: QuadCorners;
+}
+
+function cloneCorners(c: QuadCorners): QuadCorners {
+  return [
+    { x: c[0].x, y: c[0].y },
+    { x: c[1].x, y: c[1].y },
+    { x: c[2].x, y: c[2].y },
+    { x: c[3].x, y: c[3].y },
+  ];
 }
 
 export default function PaperCameraStudio() {
@@ -227,6 +237,7 @@ export default function PaperCameraStudio() {
         width: src.width,
         height: src.height,
         rgba,
+        corners: DEFAULT_CORNERS,
         outWidth: project.width,
         outHeight: project.height,
         transparentBg,
@@ -592,6 +603,9 @@ export default function PaperCameraStudio() {
       const detected = await runAutoDetectCorners({ width: w, height: h, rgba });
       if (!mountedRef.current) return;
       setCorners(detected);
+      setQueue((prev) =>
+        prev.map((q, idx) => (idx === selectedIdx ? { ...q, corners: cloneCorners(detected) } : q))
+      );
       notify(t('paperAutoAlignedToast'));
     } catch {
       // Ignore worker cancellation on tab switch
@@ -612,12 +626,14 @@ export default function PaperCameraStudio() {
     };
   }, []);
 
+  const currentPhotoId = currentPhoto?.id ?? null;
   useEffect(() => {
     if (!currentPhoto) {
       loadedSourceImgRef.current = null;
       latestScanResultRef.current = null;
       return;
     }
+    setCorners(cloneCorners(currentPhoto.corners));
     const img = new Image();
     img.onload = () => {
       loadedSourceImgRef.current = img;
@@ -625,7 +641,8 @@ export default function PaperCameraStudio() {
       void refreshScanPreview();
     };
     img.src = currentPhoto.previewUrl;
-  }, [currentPhoto, redrawCornerOverlay, refreshScanPreview]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPhotoId]);
 
   useEffect(() => {
     redrawCornerOverlay();
@@ -635,18 +652,46 @@ export default function PaperCameraStudio() {
     return () => clearTimeout(timer);
   }, [redrawCornerOverlay, refreshScanPreview]);
 
-  const handleFilesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []).slice(0, 50);
-    if (files.length === 0) return;
-    const next: QueuedPhoto[] = files.map((file, i) => ({
-      id: `${Date.now()}_${i}`,
-      file,
-      name: file.name,
-      previewUrl: URL.createObjectURL(file),
-    }));
-    setQueue((prev) => [...prev, ...next]);
-    setTab('scan');
     if (fileInputRef.current) fileInputRef.current.value = '';
+    if (files.length === 0) return;
+
+    const accepted: QueuedPhoto[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (file.size > 35 * 1024 * 1024) {
+        notify(t('paperImageTooLargeErr'), 'error');
+        continue;
+      }
+      const previewUrl = URL.createObjectURL(file);
+      const valid = await new Promise<boolean>((resolve) => {
+        const probe = new Image();
+        probe.onload = () =>
+          resolve(
+            probe.naturalWidth > 0 &&
+              probe.naturalHeight > 0 &&
+              probe.naturalWidth * probe.naturalHeight <= 64_000_000
+          );
+        probe.onerror = () => resolve(false);
+        probe.src = previewUrl;
+      });
+      if (!valid) {
+        URL.revokeObjectURL(previewUrl);
+        notify(t('paperImageTooLargeErr'), 'error');
+        continue;
+      }
+      accepted.push({
+        id: `${Date.now()}_${i}`,
+        file,
+        name: file.name,
+        previewUrl,
+        corners: cloneCorners(DEFAULT_CORNERS),
+      });
+    }
+    if (accepted.length === 0) return;
+    setQueue((prev) => [...prev, ...accepted]);
+    setTab('scan');
   };
 
   const handleCornerPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -676,18 +721,35 @@ export default function PaperCameraStudio() {
     setCorners((prev) => {
       const copy = [...prev] as QuadCorners;
       copy[draggingCorner] = { x: nx, y: ny };
+      setQueue((qPrev) =>
+        qPrev.map((q, idx) => (idx === selectedIdx ? { ...q, corners: cloneCorners(copy) } : q))
+      );
       return copy;
     });
+  };
+
+  const handleApplyCornersToAll = () => {
+    const activeCopy = cloneCorners(corners);
+    setQueue((prev) => prev.map((q) => ({ ...q, corners: cloneCorners(activeCopy) })));
+    soundEngine.click(1.08);
+    notify(t('paperAutoAlignedToast'));
   };
 
   const handleLoadSampleA4 = useCallback(async () => {
     try {
       const sampleFile = await generateSampleA4PaperFile();
+      const sampleCorners: QuadCorners = [
+        { x: 0.078, y: 0.07 },
+        { x: 0.922, y: 0.07 },
+        { x: 0.922, y: 0.922 },
+        { x: 0.078, y: 0.922 },
+      ];
       const item: QueuedPhoto = {
         id: `sample_${Date.now()}`,
         file: sampleFile,
         name: sampleFile.name,
         previewUrl: URL.createObjectURL(sampleFile),
+        corners: cloneCorners(sampleCorners),
       };
       setQueue((prev) => {
         prev.forEach((p) => URL.revokeObjectURL(p.previewUrl));
@@ -696,13 +758,7 @@ export default function PaperCameraStudio() {
       setSelectedIdx(0);
       setTab('scan');
       setGridPresetId('2x2');
-      // Pre-lock onto our A4 sheet margins inside the desk photo
-      setCorners([
-        { x: 0.078, y: 0.07 },
-        { x: 0.922, y: 0.07 },
-        { x: 0.922, y: 0.922 },
-        { x: 0.078, y: 0.922 },
-      ]);
+      setCorners(sampleCorners);
       notify(t('paperSampleLoadedToast'));
     } catch {
       notify(t('paperErrSampleA4'), 'error');
@@ -754,7 +810,7 @@ export default function PaperCameraStudio() {
           width: sw,
           height: sh,
           rgba,
-          corners,
+          corners: queue[i].corners ?? corners,
           outWidth: warpW,
           outHeight: warpH,
           transparentBg,
@@ -1166,9 +1222,26 @@ export default function PaperCameraStudio() {
                               <Scan className="w-3 h-3" />
                               {t('paperAutoFind')}
                             </KeycapButton>
+                            {queue.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={handleApplyCornersToAll}
+                                className="font-mono text-[11px] text-ink-brass hover:underline"
+                              >
+                                {t('paperApplyCornersAllBtn')}
+                              </button>
+                            )}
                             <button
                               type="button"
-                              onClick={() => setCorners(DEFAULT_CORNERS)}
+                              onClick={() => {
+                                const def = cloneCorners(DEFAULT_CORNERS);
+                                setCorners(def);
+                                setQueue((prev) =>
+                                  prev.map((q, idx) =>
+                                    idx === selectedIdx ? { ...q, corners: cloneCorners(def) } : q
+                                  )
+                                );
+                              }}
                               className="font-mono text-[11px] text-ink-vermilion hover:underline"
                             >
                               {t('paperReset')}

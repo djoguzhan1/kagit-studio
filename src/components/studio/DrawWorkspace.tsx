@@ -78,17 +78,30 @@ export default function DrawWorkspace() {
   }, [toggleZenMode]);
 
   const persistAfterHistory = (layerId: string | null) => {
-    if (!layerId || !engineRef.current) return;
+    const eng = engineRef.current;
+    if (!layerId || !eng) return;
     const st = useStudioStore.getState();
     const proj = st.projects.find((p) => p.id === st.activeProjectId);
     const frame = proj?.frames[st.activeFrameIndex];
     const layer = frame?.layers.find((l) => l.id === layerId);
-    if (!frame || !layer) return;
-    void engineRef.current
-      .persistLayerAndThumb(layerId, layer.blobKey, frame.thumbKey)
-      .then((res) => {
-        if (res) updateLayerBlobAndThumb(frame.id, layerId, res.layerBlobKey, res.thumbKey);
-      });
+    if (!proj || !frame || !layer || eng.getLoadedFrameId() !== frame.id) return;
+
+    // Capture canvas pixels synchronously so rapid Undo + Frame Switch never races!
+    const snap = eng.snapshotLayerAndThumbSync(layerId);
+    if (!snap) return;
+    const capturedProjId = proj.id;
+    const capturedSceneId = proj.activeSceneId;
+    const capturedFrameId = frame.id;
+    void eng.persistSnapshot(snap, layer.blobKey, frame.thumbKey).then((res) => {
+      updateLayerBlobAndThumb(
+        capturedFrameId,
+        layerId,
+        res.layerBlobKey,
+        res.thumbKey,
+        capturedProjId,
+        capturedSceneId
+      );
+    });
   };
 
   const handleUndo = () => persistAfterHistory(engineRef.current?.undo() ?? null);
@@ -142,7 +155,6 @@ export default function DrawWorkspace() {
       </div>
       {!zenMode && <XSheetTimeline />}
 
-      {/* 8-Slice Radial Quick Wheel (Q, Right-Click on Stage, or Toolbar Button on Touch/Desktop) */}
       <RadialQuickWheel
         open={wheelState.open}
         x={wheelState.x}
@@ -151,7 +163,6 @@ export default function DrawWorkspace() {
         onUndo={handleUndo}
       />
 
-      {/* Enhanced Zen Floating Mini-Transport Bar (Every button >= 44x44px & >= 11px font!) */}
       {zenMode && (
         <div className="toast-pop-in fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-2 py-1 rounded-full bg-desk-panel/95 backdrop-blur-md border border-ink-brass/55 shadow-2xl flex items-center gap-1">
           <button

@@ -265,7 +265,66 @@ export function evaluateConformingSkinnedMesh(
   const liveHipL = evalBonePt(0, bones[7].start.x, bones[7].start.y);
   const liveHipR = evalBonePt(0, bones[9].start.x, bones[9].start.y);
 
-  // ---- 4. NATURAL 4-BONE PENDULUM IK ARMS (upper_arm -> forearm -> wrist/hand!) ----
+  // ---- 4. NATURAL 4-BONE PENDULUM & OVERHEAD WAVE IK ARMS (upper_arm -> forearm -> wrist/hand!) ----
+  let effLeftArmAngle = pose.leftArmAngle;
+  let effRightArmAngle = pose.rightArmAngle;
+  let effLeftArmLag = pose.leftArmLag;
+  let effRightArmLag = pose.rightArmLag;
+  let leftOverheadWave = false;
+  let rightOverheadWave = false;
+
+  const gesture = pose.gestureMode ?? 'none';
+  if (gesture === 'handsUp' || gesture === 'surprise') {
+    if (!mesh.leftHasRigidProp) leftOverheadWave = true;
+    if (!mesh.rightHasRigidProp) rightOverheadWave = true;
+  } else if (gesture === 'wave') {
+    if (mesh.rightHasRigidProp && !mesh.leftHasRigidProp) {
+      // Auto-route wave gesture to FREE left arm (`arm_l`) when right hand holds a cane/prop!
+      leftOverheadWave = true;
+      if (Math.abs(pose.rightArmAngle) > Math.abs(pose.leftArmAngle)) {
+        effLeftArmAngle = pose.rightArmAngle;
+        effLeftArmLag = pose.rightArmLag;
+      }
+      effRightArmAngle = Math.min(0.28, pose.rightArmAngle * 0.25);
+    } else if (mesh.leftHasRigidProp && !mesh.rightHasRigidProp) {
+      rightOverheadWave = true;
+      if (Math.abs(pose.leftArmAngle) > Math.abs(pose.rightArmAngle)) {
+        effRightArmAngle = pose.leftArmAngle;
+        effRightArmLag = pose.leftArmLag;
+      }
+      effLeftArmAngle = Math.min(0.28, pose.leftArmAngle * 0.25);
+    } else if (pose.leftArmAngle >= 0.85 && pose.leftArmAngle > pose.rightArmAngle) {
+      leftOverheadWave = true;
+    } else {
+      rightOverheadWave = true;
+    }
+  } else {
+    // Implicit high-swing wave/cheer signal (`rawSwing >= 0.85`), excluding opposite-arm sprint pumps!
+    const isOppositeArmSprint =
+      Math.max(Math.abs(pose.leftLegStride), Math.abs(pose.rightLegStride)) > 0.45 &&
+      pose.leftArmAngle * pose.rightArmAngle < -0.2;
+    if (!isOppositeArmSprint) {
+      if (mesh.rightHasRigidProp && !mesh.leftHasRigidProp && pose.rightArmAngle >= 0.85) {
+        leftOverheadWave = true;
+        if (pose.leftArmAngle < 0.85) {
+          effLeftArmAngle = pose.rightArmAngle;
+          effLeftArmLag = pose.rightArmLag;
+        }
+        effRightArmAngle = Math.min(0.32, pose.rightArmAngle * 0.3);
+      } else if (mesh.leftHasRigidProp && !mesh.rightHasRigidProp && pose.leftArmAngle >= 0.85) {
+        rightOverheadWave = true;
+        if (pose.rightArmAngle < 0.85) {
+          effRightArmAngle = pose.leftArmAngle;
+          effRightArmLag = pose.leftArmLag;
+        }
+        effLeftArmAngle = Math.min(0.32, pose.leftArmAngle * 0.3);
+      } else {
+        if (pose.leftArmAngle >= 0.85 && !mesh.leftHasRigidProp) leftOverheadWave = true;
+        if (pose.rightArmAngle >= 0.85 && !mesh.rightHasRigidProp) rightOverheadWave = true;
+      }
+    }
+  }
+
   const solveSkinnedArm = (
     upperIdx: 3 | 5,
     lowerIdx: 4 | 6,
@@ -276,6 +335,7 @@ export function evaluateConformingSkinnedMesh(
     wristLagExplicit: number | undefined,
     isLeft: boolean,
     hasProp: boolean,
+    overheadMode: boolean,
     explicitTarget?: Vec2 | null
   ) => {
     const bUp = bones[upperIdx];
@@ -298,7 +358,6 @@ export function evaluateConformingSkinnedMesh(
     const restChordLen = Math.max(10, Math.hypot(chordX, chordY));
     const baseChordAng = Math.atan2(chordY, chordX);
 
-    // Preserve natural elbow bend direction (forward flexion in profile walk!)
     const restCross = (elPx.x - shPx.x) * chordY - (elPx.y - shPx.y) * chordX;
     let bendDir: 1 | -1;
     if (Math.abs(restCross) > restChordLen * 1.15) {
@@ -310,8 +369,9 @@ export function evaluateConformingSkinnedMesh(
     let targetX: number;
     let targetY: number;
     const isExplicit = Boolean(explicitTarget);
+    const isOverhead = !isExplicit && overheadMode && !hasProp;
+
     if (explicitTarget) {
-      // Explicit pin target is at hand tip -> offset back gently to wrist
       const exX = facingLeft ? 2 * pelvisX - explicitTarget.x : explicitTarget.x;
       const exY = explicitTarget.y;
       if (handLen > 1) {
@@ -325,6 +385,25 @@ export function evaluateConformingSkinnedMesh(
         targetX = exX;
         targetY = exY;
       }
+      // Elevated explicit target: force outward elbow pole so arm never folds across face!
+      if (targetY < liveSh.y + 0.04 * H) {
+        bendDir = isLeft ? -1 : 1;
+      }
+    } else if (isOverhead) {
+      // Overhead Wave / Hands-Up outer-shoulder corridor (`shoulderX ± 0.18*W, shoulderY - 0.20*H`)
+      const outSign = isLeft ? -1 : 1;
+      const waveSway = Math.max(-0.65, Math.min(0.65, (swingAngle - 0.95) * 0.95 + lag * 1.5));
+      const reachCap = (upperLen + lowerLen) * 0.95;
+      let rawDx = outSign * (0.12 + waveSway * 0.055) * W;
+      let rawDy = -(0.24 + Math.max(0, swingAngle - 0.85) * 0.06) * H;
+      const d = Math.hypot(rawDx, rawDy) || 1;
+      if (d > reachCap) {
+        rawDx *= reachCap / d;
+        rawDy *= reachCap / d;
+      }
+      targetX = liveSh.x + rawDx;
+      targetY = liveSh.y + rawDy;
+      bendDir = isLeft ? -1 : 1;
     } else {
       const dirSign = isLeft ? 1 : -1;
       const propScale = hasProp ? 0.42 : 0.78;
@@ -334,8 +413,6 @@ export function evaluateConformingSkinnedMesh(
       const safeDelta = Math.max(inwardLimit, Math.min(0.66, clampedSwing + clampedLag * 0.42));
       const targetAng = baseChordAng + chestAng * 0.32 + dirSign * safeDelta;
 
-      // REAL PENDULUM ELBOW FLEXION:
-      // Forward swing (>0) naturally flexes elbow (~22-32°), backswing (<0) gently relaxes straighter!
       const forwardBendFactor = Math.max(0, clampedSwing) * (hasProp ? 0.04 : 0.14);
       const maxReach = (upperLen + lowerLen) * 0.97;
       const minReach = Math.max(Math.abs(upperLen - lowerLen) + 5, restChordLen * 0.76);
@@ -351,9 +428,9 @@ export function evaluateConformingSkinnedMesh(
     let dUp = wrapAngleDelta(ik.upperAngle - restUpperAng);
     let dLo = wrapAngleDelta(ik.lowerAngle - restLowerAng);
 
-    // Relaxed natural joint limits (CoR skinning + joint rings keep 85° elbow bends 0-inversion!)
-    const maxUp = isExplicit ? (hasProp ? 0.48 : 0.92) : hasProp ? 0.36 : 0.64;
-    const maxRelBend = isExplicit ? (hasProp ? 0.38 : 1.15) : hasProp ? 0.30 : 0.92;
+    const isElevated = isOverhead || (isExplicit && !hasProp && targetY < liveSh.y + 0.04 * H);
+    const maxUp = isElevated ? 2.45 : isExplicit ? (hasProp ? 0.48 : 0.92) : hasProp ? 0.36 : 0.64;
+    const maxRelBend = isElevated ? 1.85 : isExplicit ? (hasProp ? 0.38 : 1.15) : hasProp ? 0.30 : 0.92;
     const clampedUp = Math.max(-maxUp, Math.min(maxUp, dUp));
     if (clampedUp !== dUp) {
       dUp = clampedUp;
@@ -381,8 +458,6 @@ export function evaluateConformingSkinnedMesh(
     setBoneAffineTransform(upperIdx, shPx.x, shPx.y, ik.root.x, ik.root.y, dUp, 1, 1);
     setBoneAffineTransform(lowerIdx, elPx.x, elPx.y, ik.mid.x, ik.mid.y, dLo, 1, 1);
 
-    // Relaxed Wrist / Hand Follow-Through Bone (14 / 16)!
-    // Rigid props stay stabilized at dLo (0.00° cane bend!), free hands get soft overlapping wrist lag!
     const rawWristLag = wristLagExplicit ?? lag * 0.55;
     const wristOffset = hasProp ? 0 : Math.max(-0.28, Math.min(0.28, rawWristLag));
     const dHand = dLo + wristOffset;
@@ -404,11 +479,12 @@ export function evaluateConformingSkinnedMesh(
     4,
     14,
     liveShL,
-    pose.leftArmAngle,
-    pose.leftArmLag,
+    effLeftArmAngle,
+    effLeftArmLag,
     pose.leftWristLag,
     true,
     mesh.leftHasRigidProp,
+    leftOverheadWave,
     ikOverrides?.handLeft
   );
   const armRRes = solveSkinnedArm(
@@ -416,11 +492,12 @@ export function evaluateConformingSkinnedMesh(
     6,
     16,
     liveShR,
-    pose.rightArmAngle,
-    pose.rightArmLag,
+    effRightArmAngle,
+    effRightArmLag,
     pose.rightWristLag,
     false,
     mesh.rightHasRigidProp,
+    rightOverheadWave,
     ikOverrides?.handRight
   );
 
@@ -515,16 +592,35 @@ export function evaluateConformingSkinnedMesh(
       footDeltaAng = liftNorm > 0.08 ? liftNorm * 0.24 : 0; // Relaxed toe drop when foot lifted in air!
       toeDeltaAng = footDeltaAng * 1.15;
       ankleTargetX = exX;
+      if (Math.abs(pose.viewYawRad ?? 0) < 0.6 && pose.viewYawRad !== undefined) {
+        const hipHalfSpan = Math.max(W * 0.02, Math.abs(bones[9].start.x - bones[7].start.x) * W * 0.5);
+        if (upperIdx === 7) ankleTargetX = Math.min(ankleTargetX, pelvisX - hipHalfSpan * 0.20);
+        else ankleTargetX = Math.max(ankleTargetX, pelvisX + hipHalfSpan * 0.20);
+      }
       ankleTargetY = exY - (soleRestY - anklePx.y) * Math.cos(footDeltaAng);
     } else {
       const restAnkleOffX = anklePx.x - pelvisRestPx.x;
       const walkBlend = Math.min(1, Math.abs(clampedStride) * 1.15 + clampedLift * 0.85);
       const liveRestOffX = restAnkleOffX * (1 - 0.14 * walkBlend);
-      // Natural stride length & generous passing-pose lift (allows real 55°–65° knee flexion!)
-      const strideSpan = Math.min(W * 0.17, totalLegLen * 0.48);
+      // View-yaw-aware horizontal stride foreshortening (`0°` front = 0.16x, `±90°` side = 1.0x)
+      const viewYaw = pose.viewYawRad ?? 0;
+      const foreshortenX = Math.max(0.16, Math.min(1.0, Math.abs(Math.sin(viewYaw)) * 0.84 + 0.16));
+      const strideSpan = Math.min(W * 0.17, totalLegLen * 0.48) * foreshortenX;
       const maxLiftPx = totalLegLen * 0.26;
 
-      const baseFootShiftX = pelvisX + liveRestOffX + clampedStride * strideSpan - anklePx.x;
+      let footCenterX = pelvisX + liveRestOffX + clampedStride * strideSpan;
+      // Front / 3-4 view anti-"X" leg knot corridor: legs never scissor across the pelvic midline!
+      if (Math.abs(viewYaw) < 0.6) {
+        const hipHalfSpan = Math.max(W * 0.025, Math.abs(bones[9].start.x - bones[7].start.x) * W * 0.5);
+        const isLeftLeg = upperIdx === 7;
+        if (isLeftLeg) {
+          footCenterX = Math.min(footCenterX, pelvisX - hipHalfSpan * 0.25);
+        } else {
+          footCenterX = Math.max(footCenterX, pelvisX + hipHalfSpan * 0.25);
+        }
+      }
+
+      const baseFootShiftX = footCenterX - anklePx.x;
       const soleBaseY = bounds.y + soleRestY - Math.max(0, pose.hipLiftY) * H * 0.88 - clampedLift * maxLiftPx;
 
       const maxHeelStrikeRad = 0.29; // +16.6° toes up on heel-strike!
@@ -777,8 +873,50 @@ export function evaluateConformingSkinnedMesh(
         }
 
         if (hasSpineBone) {
-          outX = lbsX;
-          outY = lbsY;
+          // Preserve 100% pure affine LBS during squash/walk, and smoothly blend shoulder-pivot CoR
+          // ONLY under high overhead arm lifts (|dUp| > 0.72 rad) to prevent shoulder pinch/spikes!
+          let shArmSide = 0;
+          for (let s = 0; s < 4; s++) {
+            const w = bW[o4 + s];
+            if (w <= 0.005) break;
+            const b = bIdx[o4 + s];
+            if (b === 3 || b === 4) { shArmSide = -1; break; }
+            if (b === 5 || b === 6) { shArmSide = 1; break; }
+          }
+          const armAbsRot = shArmSide < 0 ? Math.abs(armLRes.dUp) : shArmSide > 0 ? Math.abs(armRRes.dUp) : 0;
+          if (shArmSide !== 0 && armAbsRot > 0.72) {
+            const tHigh = Math.min(1, (armAbsRot - 0.72) / 0.65);
+            const dqsMix = tHigh * tHigh * (3 - 2 * tHigh) * 0.62;
+            const piv = shArmSide < 0 ? bones[3].start : bones[5].start;
+            const pivX = piv.x * W;
+            const pivY = piv.y * H;
+            let cDefX = 0;
+            let cDefY = 0;
+            const refC = _cosR[b0];
+            const refS = _sinR[b0];
+            let sC = 0;
+            let sS = 0;
+            for (let s = 0; s < 4; s++) {
+              const w = bW[o4 + s];
+              if (w <= 0.0005) break;
+              const b = bIdx[o4 + s];
+              cDefX += w * (_m00[b] * pivX + _m01[b] * pivY + _tx[b]);
+              cDefY += w * (_m10[b] * pivX + _m11[b] * pivY + _ty[b]);
+              const sign = _cosR[b] * refC + _sinR[b] * refS < 0 ? -1 : 1;
+              sC += w * sign * _cosR[b];
+              sS += w * sign * _sinR[b];
+            }
+            const rL = Math.hypot(sC, sS) || 1;
+            const qc = sC / rL;
+            const qs = sS / rL;
+            const corOutX = cDefX + qc * (px - pivX) - qs * (py - pivY);
+            const corOutY = cDefY + qs * (px - pivX) + qc * (py - pivY);
+            outX = lbsX * (1 - dqsMix) + corOutX * dqsMix;
+            outY = lbsY * (1 - dqsMix) + corOutY * dqsMix;
+          } else {
+            outX = lbsX;
+            outY = lbsY;
+          }
         } else {
           // Legacy 80/20 2D-DQ fallback when corUV is absent
           const refC = _qrC[b0];

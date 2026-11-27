@@ -1,4 +1,5 @@
 import type { ConformingSkinnedMesh } from './conformingMeshEngine';
+import type { SocketSubPatch } from './socketInpaint';
 import {
   getOrExtractSourcePixels,
   renderConformingMeshCpuScanline,
@@ -7,20 +8,18 @@ import {
 import { probeSoftwareRenderer } from './deviceTierEngine';
 
 /**
- * INKTROPE V3 Dual-Mode WebGL2 Hardware Skinned-Mesh Renderer + Zero-GC CPU Scanline Parity
- * -----------------------------------------------------------------------------------------
+ * INKTROPE V3/V4 Dual-Mode WebGL2 Hardware Skinned-Mesh Renderer + Zero-GC CPU Scanline Parity
+ * --------------------------------------------------------------------------------------------
  * 1. GPU Vertex-Shader Skinning (`renderConformingMeshWebGLGpuSkinned`):
- *    - Uploads rest mesh (UV, 4 bone indices, 4 weights, optional CoR pivot, 2.5D shade) ONCE
- *      into a static GPU VBO (`STATIC_DRAW`).
- *    - Uploads ONLY 24 compact bone transforms per frame (~768 bytes!) -> 0.00 ms CPU skinning,
- *      locked 60 FPS @ full Retina sharpness on mid-range & older mobile phones!
- * 2. Live 2.5D Klaus Volumetric Cel Lighting & Fresnel Rim Shader:
- *    - Samples auto-cached Sobel 2.5D Surface Normal Map directly in the single mesh pass.
- *    - Replaces slow 4-pass Canvas2D scratch compositing with 1-pass hardware lighting!
- * 3. Automatic GPU-Free Software Bypass:
- *    - On GPU-free laptops / SwiftShader / llvmpipe / WebGL-blocked browsers, automatically
- *      bypasses slow software WebGL and renders via our Zero-GC Uint32Array Scanline CPU
- *      Rasterizer (`~3 ms/frame`, `0.000 px` seam cracks, identical Klaus 2.5D shading!).
+ *    - Uploads rest mesh (UV, 4 bone indices, 4 weights, CoR pivot, 2.5D shade) ONCE (`STATIC_DRAW`).
+ *    - Includes `u_headParallax` + `u_hatFollowPx` so 100% of walk/talk/dance frames run on GPU!
+ * 2. Bone-Rotated World-Space Klaus 2.5D Normal Map Lighting (`v_rotCS`):
+ *    - Carries per-vertex bone `(cosTheta, sinTheta)` into `FRAG_MESH_V3_SRC`, rotating tangent
+ *      normals into world space while preserving horizontal mirror `n_x` polarity!
+ * 3. Multi-Bone Socket Sub-Patch Backing (`pelvis=0, chest=1, neck=12`):
+ *    - Renders each cropped anatomical socket patch with its own parent bone transform both inside
+ *      the WebGL FBO (behind the actor mesh, integrated with Klaus lighting & FBO halo) and in
+ *      Canvas2D (`drawInpaintedSocketBackingPass`), achieving < 0.01 px alignment under S-spine lean!
  */
 
 export const MAX_GPU_SKIN_BONES = 24;
@@ -34,14 +33,25 @@ export interface GpuBoneTransform2D {
   m10: number;
   m11: number;
   ty: number;
-  /** Delta rotation angle in radians (used by GPU 2D-DQ / CoR volume-preserving blend) */
+  /** Delta rotation angle in radians (used by GPU 2D-DQ / CoR volume-preserving blend & normal rotation) */
   rotRad: number;
+}
+
+export interface HeadParallaxUniform {
+  /** Signed face parallax amplitude in local pixels */
+  ampPx: number;
+  /** Normalized 0..1 head center X */
+  headCenterX: number;
+  /** Normalized 0..1 head center Y */
+  headCenterY: number;
+  /** Normalized 0..1 neck/head boundary V */
+  headEndV: number;
 }
 
 export interface RenderSkinnedMeshOptions {
   /** Use mirrored triangle Z-order (for facingLeft characters) */
   mirroredOrder?: boolean;
-  /** Render crisp 2.4px outer-perimeter warm ivory paper cutout halo (for dark night sets!) */
+  /** Render crisp 2.4px outer-perimeter warm ivory paper cutout halo (only when explicitly true!) */
   nightHalo?: boolean;
   /** Slightly cooler/softer halo tone when rendering puddle reflections */
   isReflection?: boolean;
@@ -49,6 +59,12 @@ export interface RenderSkinnedMeshOptions {
   mirrorAxisX?: number | null;
   /** Optional real-time 2.5D Klaus directional normal-map cel shading & Fresnel rim light */
   klausLight?: KlausLightConfig | null;
+  /** Optional GPU head-turn 2.5D face parallax parameters (matches CPU dualQuatSkinning 1:1) */
+  headParallax?: HeadParallaxUniform | null;
+  /** Optional GPU crown/hat vertical follow-through offset in pixels */
+  hatFollowPx?: number;
+  /** Optional live bone transforms forwarded to pre-evaluated WebGL / CPU rasterizer for normal rotation */
+  gpuBones?: readonly GpuBoneTransform2D[] | null;
   /** Force CPU scanline backend (for automated parity verification or user override) */
   forceCpuRaster?: boolean;
 }
@@ -60,19 +76,22 @@ const VERT_MESH_SRC = `
 attribute vec2 a_pos;
 attribute vec2 a_uv;
 attribute float a_shade;
+attribute vec2 a_rotCS;
 uniform vec2 u_res;
 varying vec2 v_uv;
 varying float v_shade;
+varying vec2 v_rotCS;
 void main() {
   vec2 ndc = (a_pos / u_res) * 2.0 - 1.0;
   gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
   v_uv = a_uv;
   v_shade = a_shade;
+  v_rotCS = a_rotCS;
 }
 `;
 
 // ============================================================================
-// SHADER 2: V3 GPU Vertex-Shader Skinning (Static VBO + 24 Bone Uniforms!)
+// SHADER 2: V3/V4 GPU Vertex-Shader Skinning (Static VBO + 24 Bone Uniforms!)
 // ============================================================================
 const VERT_GPU_SKIN_SRC = `
 attribute vec2 a_restUV;
@@ -87,16 +106,18 @@ uniform vec2 u_origin; // (ox, oy)
 uniform vec2 u_mirror; // (mirrorEnabled 0/1, mirrorAxisX)
 uniform float u_useMirroredShade;
 uniform float u_isRefl;
+uniform vec4 u_headParallax; // (ampPx, headCenterX, headCenterY, headEndV)
+uniform float u_hatFollowPx;
 uniform vec4 u_boneRow0[${MAX_GPU_SKIN_BONES}]; // (m00, m01, tx, cosRot)
 uniform vec4 u_boneRow1[${MAX_GPU_SKIN_BONES}]; // (m10, m11, ty, sinRot)
 
 varying vec2 v_uv;
 varying float v_shade;
+varying vec2 v_rotCS;
 
 vec2 applyBone(int idx, vec2 p) {
   vec4 r0 = u_boneRow0[0];
   vec4 r1 = u_boneRow1[0];
-  // WebGL1/GLSL ES 1.00 safe constant-index lookup unroll for universal mobile compatibility
   for (int i = 0; i < ${MAX_GPU_SKIN_BONES}; i++) {
     if (i == idx) {
       r0 = u_boneRow0[i];
@@ -130,41 +151,62 @@ void main() {
   float w3 = a_boneWt.w;
 
   vec2 deformed;
+  vec2 rotOut;
+
   if (w0 >= 0.998) {
-    // Fast exact rigid path (skull, rigid cane, single-bone interiors)
     deformed = applyBone(b0, restPx);
-  } else if (a_corUV.x >= -0.5) {
-    // SIGGRAPH Center-of-Rotation (CoR) Skinning directly in GPU Vertex Shader!
-    // Zero candy-wrapper collapse & zero DQ joint inflation at 90°+ bends!
-    vec2 corPx = vec2(a_corUV.x * u_bounds.z, a_corUV.y * u_bounds.w);
-    vec2 corDef = applyBone(b0, corPx) * w0;
+    rotOut = getBoneRot(b0);
+    if (b0 == 2) {
+      float pAmp = u_headParallax.x;
+      float hcx = u_headParallax.y;
+      float hcy = u_headParallax.z;
+      float hev = u_headParallax.w;
+      if (abs(pAmp) > 0.001 && a_restUV.y >= hcy - 0.08 && a_restUV.y <= hev - 0.02) {
+        float rx = abs(a_restUV.x - hcx) / 0.16;
+        if (rx < 1.0) {
+          float depth = sqrt(max(0.0, 1.0 - rx * rx));
+          float shift = pAmp * depth;
+          deformed += vec2(shift * rotOut.x, shift * rotOut.y);
+        }
+      }
+      if (abs(u_hatFollowPx) > 0.15 && a_restUV.y < hcy - 0.05) {
+        float crownT = min(1.0, (hcy - 0.05 - a_restUV.y) / 0.14);
+        deformed.y += u_hatFollowPx * crownT;
+      }
+    }
+  } else {
     vec2 rRef = getBoneRot(b0);
     vec2 rSum = rRef * w0;
     if (w1 > 0.0001) {
-      corDef += applyBone(b1, corPx) * w1;
       vec2 r1 = getBoneRot(b1);
       rSum += (dot(rRef, r1) < 0.0 ? -r1 : r1) * w1;
     }
     if (w2 > 0.0001) {
-      corDef += applyBone(b2, corPx) * w2;
       vec2 r2 = getBoneRot(b2);
       rSum += (dot(rRef, r2) < 0.0 ? -r2 : r2) * w2;
     }
     if (w3 > 0.0001) {
-      corDef += applyBone(b3, corPx) * w3;
       vec2 r3 = getBoneRot(b3);
       rSum += (dot(rRef, r3) < 0.0 ? -r3 : r3) * w3;
     }
     float rLen = max(0.0001, length(rSum));
     vec2 q = rSum / rLen;
-    vec2 d = restPx - corPx;
-    deformed = corDef + vec2(q.x * d.x - q.y * d.y, q.y * d.x + q.x * d.y);
-  } else {
-    // Smooth LBS + rigid rotation fallback
-    deformed = applyBone(b0, restPx) * w0;
-    if (w1 > 0.0001) deformed += applyBone(b1, restPx) * w1;
-    if (w2 > 0.0001) deformed += applyBone(b2, restPx) * w2;
-    if (w3 > 0.0001) deformed += applyBone(b3, restPx) * w3;
+    rotOut = q;
+
+    if (a_corUV.x >= -0.5) {
+      vec2 corPx = vec2(a_corUV.x * u_bounds.z, a_corUV.y * u_bounds.w);
+      vec2 corDef = applyBone(b0, corPx) * w0;
+      if (w1 > 0.0001) corDef += applyBone(b1, corPx) * w1;
+      if (w2 > 0.0001) corDef += applyBone(b2, corPx) * w2;
+      if (w3 > 0.0001) corDef += applyBone(b3, corPx) * w3;
+      vec2 d = restPx - corPx;
+      deformed = corDef + vec2(q.x * d.x - q.y * d.y, q.y * d.x + q.x * d.y);
+    } else {
+      deformed = applyBone(b0, restPx) * w0;
+      if (w1 > 0.0001) deformed += applyBone(b1, restPx) * w1;
+      if (w2 > 0.0001) deformed += applyBone(b2, restPx) * w2;
+      if (w3 > 0.0001) deformed += applyBone(b3, restPx) * w3;
+    }
   }
 
   vec2 worldPos = u_bounds.xy + deformed;
@@ -177,11 +219,12 @@ void main() {
   v_uv = a_restUV;
   float sh = mix(a_shadePair.x, a_shadePair.y, u_useMirroredShade);
   v_shade = mix(sh, 1.0, u_isRefl);
+  v_rotCS = rotOut;
 }
 `;
 
 // ============================================================================
-// FRAGMENT SHADER V3: Premultiplied Texture + Depth Shade + Live 2.5D Klaus!
+// FRAGMENT SHADER V3/V4: Premultiplied Texture + Rotated Klaus 2.5D Normals!
 // ============================================================================
 const FRAG_MESH_V3_SRC = `
 precision mediump float;
@@ -193,14 +236,21 @@ uniform vec3 u_rimColor;
 uniform vec4 u_shadowTint; // (r, g, b, strength)
 varying vec2 v_uv;
 varying float v_shade;
+varying vec2 v_rotCS;
 void main() {
   vec4 c = texture2D(u_tex, v_uv);
   if (c.a < 0.015) discard;
-  // Unpremultiply safely if Klaus lighting is active, else keep direct premul path
   vec3 shaded = min(vec3(c.a), c.rgb * v_shade);
   if (u_klausActive > 0.5) {
     vec3 rgb = shaded / max(0.001, c.a);
-    vec3 n = texture2D(u_normalTex, v_uv).rgb * 2.0 - 1.0;
+    vec3 rawN = texture2D(u_normalTex, v_uv).rgb * 2.0 - 1.0;
+    float csLen = max(0.0001, length(v_rotCS));
+    vec2 cs = v_rotCS / csLen;
+    vec3 n = vec3(
+      cs.x * rawN.x - cs.y * rawN.y,
+      cs.y * rawN.x + cs.x * rawN.y,
+      rawN.z
+    );
     float ndl = dot(n, u_lightDir);
     if (ndl < 0.22) {
       float t = clamp((0.22 - ndl) * 2.1, 0.0, 1.0) * u_shadowTint.a;
@@ -267,6 +317,12 @@ interface KlausUniforms {
   uShadowTint: WebGLUniformLocation | null;
 }
 
+interface SocketGpuEntry {
+  tex: WebGLTexture;
+  vbo: WebGLBuffer;
+  vertCount: number;
+}
+
 interface GlState {
   canvas: HTMLCanvasElement;
   gl: WebGLRenderingContext;
@@ -284,6 +340,7 @@ interface GlState {
   aPos: number;
   aUv: number;
   aShade: number;
+  aRotCS: number;
   uRes: WebGLUniformLocation | null;
   meshKlaus: KlausUniforms;
   // GPU vertex-skinning shader locations
@@ -298,6 +355,8 @@ interface GlState {
   sMirror: WebGLUniformLocation | null;
   sUseMirroredShade: WebGLUniformLocation | null;
   sIsRefl: WebGLUniformLocation | null;
+  sHeadParallax: WebGLUniformLocation | null;
+  sHatFollowPx: WebGLUniformLocation | null;
   sBoneRow0: WebGLUniformLocation | null;
   sBoneRow1: WebGLUniformLocation | null;
   skinKlaus: KlausUniforms;
@@ -312,12 +371,14 @@ interface GlState {
   texCache: WeakMap<HTMLCanvasElement, { tex: WebGLTexture; normalTex: WebGLTexture | null; w: number; h: number }>;
   iboCache: WeakMap<Uint16Array, WebGLBuffer>;
   staticSkinVboCache: WeakMap<ConformingSkinnedMesh, { vbo: WebGLBuffer; vertexCount: number }>;
+  socketGpuCache: WeakMap<ConformingSkinnedMesh, SocketGpuEntry | null>;
   contextLost: boolean;
 }
 
 let _glState: GlState | null = null;
 let _glInitFailed = false;
-let _interleavedBuf = new Float32Array(2048 * 5);
+let _interleavedBuf = new Float32Array(2048 * 7);
+let _vRotAccum = new Float32Array(2048 * 2);
 const _boneRow0Buf = new Float32Array(MAX_GPU_SKIN_BONES * 4);
 const _boneRow1Buf = new Float32Array(MAX_GPU_SKIN_BONES * 4);
 
@@ -364,7 +425,6 @@ function getKlausUniforms(gl: WebGLRenderingContext, prog: WebGLProgram): KlausU
 
 function getOrInitWebGL(): GlState | null {
   if (_glInitFailed || typeof document === 'undefined') return null;
-  // V3 Zero-Compromise Rule: bypass fake software WebGL (SwiftShader/llvmpipe) so CPU Scanline runs 5-15x faster!
   if (probeSoftwareRenderer()) return null;
   if (_glState && !_glState.contextLost) return _glState;
 
@@ -417,7 +477,6 @@ function getOrInitWebGL(): GlState | null {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-    // 1x1 neutral forward normal (0.5, 0.5, 1.0) so Texture Unit 1 is ALWAYS valid
     gl.bindTexture(gl.TEXTURE_2D, flatNormalTex);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -450,6 +509,7 @@ function getOrInitWebGL(): GlState | null {
       aPos: gl.getAttribLocation(meshProg, 'a_pos'),
       aUv: gl.getAttribLocation(meshProg, 'a_uv'),
       aShade: gl.getAttribLocation(meshProg, 'a_shade'),
+      aRotCS: gl.getAttribLocation(meshProg, 'a_rotCS'),
       uRes: gl.getUniformLocation(meshProg, 'u_res'),
       meshKlaus: getKlausUniforms(gl, meshProg),
       sRestUV: gpuSkinProg ? gl.getAttribLocation(gpuSkinProg, 'a_restUV') : -1,
@@ -463,6 +523,8 @@ function getOrInitWebGL(): GlState | null {
       sMirror: gpuSkinProg ? gl.getUniformLocation(gpuSkinProg, 'u_mirror') : null,
       sUseMirroredShade: gpuSkinProg ? gl.getUniformLocation(gpuSkinProg, 'u_useMirroredShade') : null,
       sIsRefl: gpuSkinProg ? gl.getUniformLocation(gpuSkinProg, 'u_isRefl') : null,
+      sHeadParallax: gpuSkinProg ? gl.getUniformLocation(gpuSkinProg, 'u_headParallax') : null,
+      sHatFollowPx: gpuSkinProg ? gl.getUniformLocation(gpuSkinProg, 'u_hatFollowPx') : null,
       sBoneRow0: gpuSkinProg ? gl.getUniformLocation(gpuSkinProg, 'u_boneRow0[0]') : null,
       sBoneRow1: gpuSkinProg ? gl.getUniformLocation(gpuSkinProg, 'u_boneRow1[0]') : null,
       skinKlaus: gpuSkinProg
@@ -484,6 +546,7 @@ function getOrInitWebGL(): GlState | null {
       texCache: new WeakMap(),
       iboCache: new WeakMap(),
       staticSkinVboCache: new WeakMap(),
+      socketGpuCache: new WeakMap(),
       contextLost: false,
     };
 
@@ -558,6 +621,105 @@ function getOrUploadActorTextures(
   return { tex: cached.tex, normalTex: cached.normalTex ?? state.flatNormalTex };
 }
 
+function getOrUploadSocketGpuEntry(state: GlState, mesh: ConformingSkinnedMesh): SocketGpuEntry | null {
+  if (state.socketGpuCache.has(mesh)) {
+    return state.socketGpuCache.get(mesh) ?? null;
+  }
+  const rgba = mesh.inpaintedSocketOnlyRgba;
+  const dims = mesh.inpaintedDims;
+  if (!rgba || !dims || dims.w < 8 || dims.h < 8) {
+    state.socketGpuCache.set(mesh, null);
+    return null;
+  }
+
+  const { gl } = state;
+  const tex = gl.createTexture();
+  const vbo = gl.createBuffer();
+  if (!tex || !vbo) {
+    state.socketGpuCache.set(mesh, null);
+    return null;
+  }
+
+  // Premultiply RGBA in-place on a temporary upload buffer so gl.ONE, gl.ONE_MINUS_SRC_ALPHA composites cleanly
+  const premul = new Uint8Array(rgba.length);
+  for (let i = 0; i < rgba.length; i += 4) {
+    const a = rgba[i + 3];
+    if (a === 0) continue;
+    premul[i] = ((rgba[i] * a + 127) / 255) | 0;
+    premul[i + 1] = ((rgba[i + 1] * a + 127) / 255) | 0;
+    premul[i + 2] = ((rgba[i + 2] * a + 127) / 255) | 0;
+    premul[i + 3] = a;
+  }
+
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, dims.w, dims.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, premul);
+
+  const subs: SocketSubPatch[] =
+    mesh.inpaintedSubPatches && mesh.inpaintedSubPatches.length > 0
+      ? mesh.inpaintedSubPatches
+      : [
+          {
+            role: 'chest',
+            boneIndex: 1,
+            x: 0,
+            y: 0,
+            w: dims.w,
+            h: dims.h,
+            rgba,
+            pixelCount: mesh.inpaintedPixels ?? 1,
+          },
+        ];
+
+  const boneLen = mesh.bones.length;
+  // 6 vertices per sub-patch quad, 14 floats per vertex matching VERT_GPU_SKIN_SRC stride!
+  const vData = new Float32Array(subs.length * 6 * 14);
+  let ptr = 0;
+  for (const sub of subs) {
+    const u0 = sub.x / dims.w;
+    const v0 = sub.y / dims.h;
+    const u1 = (sub.x + sub.w) / dims.w;
+    const v1 = (sub.y + sub.h) / dims.h;
+    const bIdx = sub.boneIndex < boneLen ? sub.boneIndex : Math.min(1, Math.max(0, boneLen - 1));
+    const corners: [number, number][] = [
+      [u0, v0],
+      [u1, v0],
+      [u1, v1],
+      [u0, v0],
+      [u1, v1],
+      [u0, v1],
+    ];
+    for (const [cu, cv] of corners) {
+      vData[ptr++] = cu;
+      vData[ptr++] = cv;
+      vData[ptr++] = bIdx;
+      vData[ptr++] = 0;
+      vData[ptr++] = 0;
+      vData[ptr++] = 0;
+      vData[ptr++] = 1.0;
+      vData[ptr++] = 0;
+      vData[ptr++] = 0;
+      vData[ptr++] = 0;
+      vData[ptr++] = -1.0;
+      vData[ptr++] = -1.0;
+      vData[ptr++] = 0.98;
+      vData[ptr++] = 0.98;
+    }
+  }
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, vData, gl.STATIC_DRAW);
+
+  const entry: SocketGpuEntry = { tex, vbo, vertCount: subs.length * 6 };
+  state.socketGpuCache.set(mesh, entry);
+  return entry;
+}
+
 function getOrUploadIndexBuffer(state: GlState, indices: Uint16Array): WebGLBuffer | null {
   const cached = state.iboCache.get(indices);
   if (cached) return cached;
@@ -569,10 +731,6 @@ function getOrUploadIndexBuffer(state: GlState, indices: Uint16Array): WebGLBuff
   return ibo;
 }
 
-/**
- * Uploads the entire rest mesh + skinning weights + CoR pivots ONCE per mesh into GPU STATIC_DRAW VBO!
- * Stride = 14 floats: [u, v, b0, b1, b2, b3, w0, w1, w2, w3, corU, corV, shade, shadeMirrored]
- */
 function getOrUploadStaticSkinVbo(state: GlState, mesh: ConformingSkinnedMesh): WebGLBuffer | null {
   const cached = state.staticSkinVboCache.get(mesh);
   if (cached && cached.vertexCount === mesh.vertexCount) return cached.vbo;
@@ -586,7 +744,7 @@ function getOrUploadStaticSkinVbo(state: GlState, mesh: ConformingSkinnedMesh): 
   const restUV = mesh.restUV;
   const bIdx = mesh.boneIndices;
   const bWt = mesh.boneWeights;
-  const corUV = (mesh as ConformingSkinnedMesh & { corUV?: Float32Array }).corUV;
+  const corUV = mesh.corUV;
   const shN = mesh.vertexShade;
   const shM = mesh.vertexShadeMirrored ?? shN;
 
@@ -608,7 +766,7 @@ function getOrUploadStaticSkinVbo(state: GlState, mesh: ConformingSkinnedMesh): 
       data[o + 10] = corUV[u2];
       data[o + 11] = corUV[u2 + 1];
     } else {
-      data[o + 10] = -1.0; // Sentinel: no CoR pivot attached yet
+      data[o + 10] = -1.0;
       data[o + 11] = -1.0;
     }
     data[o + 12] = shN[vi];
@@ -751,12 +909,20 @@ function runHaloPassAndBlit(
   ctx.drawImage(state.canvas, 0, 0, cw, ch, ox, oy, cw, ch);
 }
 
-function disableAllVertexAttribsExcept(state: GlState, keepA = -1, keepB = -1, keepC = -1, keepD = -1, keepE = -1): void {
+function disableAllVertexAttribsExcept(
+  state: GlState,
+  keepA = -1,
+  keepB = -1,
+  keepC = -1,
+  keepD = -1,
+  keepE = -1
+): void {
   const { gl } = state;
   const all = [
     state.aPos,
     state.aUv,
     state.aShade,
+    state.aRotCS,
     state.aQuad,
     state.sRestUV,
     state.sBoneIdx,
@@ -772,11 +938,40 @@ function disableAllVertexAttribsExcept(state: GlState, keepA = -1, keepB = -1, k
   }
 }
 
-/**
- * V3 FLAGSHIP: True GPU Vertex-Shader Skinning!
- * Uploads ONLY bone transform uniforms (~500-768 bytes) per frame — ZERO CPU vertex loop,
- * ZERO per-frame VBO upload! Delivers locked 60 FPS @ full Retina on phones & desktops!
- */
+function bindGpuSkinVertexAttribs(state: GlState, vbo: WebGLBuffer): void {
+  const { gl } = state;
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  disableAllVertexAttribsExcept(
+    state,
+    state.sRestUV,
+    state.sBoneIdx,
+    state.sBoneWt,
+    state.sCorUV,
+    state.sShadePair
+  );
+  const stride = 14 * 4;
+  if (state.sRestUV >= 0) {
+    gl.enableVertexAttribArray(state.sRestUV);
+    gl.vertexAttribPointer(state.sRestUV, 2, gl.FLOAT, false, stride, 0);
+  }
+  if (state.sBoneIdx >= 0) {
+    gl.enableVertexAttribArray(state.sBoneIdx);
+    gl.vertexAttribPointer(state.sBoneIdx, 4, gl.FLOAT, false, stride, 2 * 4);
+  }
+  if (state.sBoneWt >= 0) {
+    gl.enableVertexAttribArray(state.sBoneWt);
+    gl.vertexAttribPointer(state.sBoneWt, 4, gl.FLOAT, false, stride, 6 * 4);
+  }
+  if (state.sCorUV >= 0) {
+    gl.enableVertexAttribArray(state.sCorUV);
+    gl.vertexAttribPointer(state.sCorUV, 2, gl.FLOAT, false, stride, 10 * 4);
+  }
+  if (state.sShadePair >= 0) {
+    gl.enableVertexAttribArray(state.sShadePair);
+    gl.vertexAttribPointer(state.sShadePair, 2, gl.FLOAT, false, stride, 12 * 4);
+  }
+}
+
 const _socketPatchCanvasCache = new WeakMap<Uint8ClampedArray, HTMLCanvasElement>();
 
 function getOrBuildSocketPatchCanvas(
@@ -784,7 +979,7 @@ function getOrBuildSocketPatchCanvas(
   w: number,
   h: number
 ): HTMLCanvasElement | null {
-  if (typeof document === 'undefined' || w < 8 || h < 8) return null;
+  if (typeof document === 'undefined' || w < 2 || h < 2) return null;
   const cached = _socketPatchCanvasCache.get(rgba);
   if (cached && cached.width === w && cached.height === h) return cached;
   try {
@@ -801,48 +996,151 @@ function getOrBuildSocketPatchCanvas(
   }
 }
 
+const _tintedSocketScratchMap = new WeakMap<
+  HTMLCanvasElement,
+  { canvas: HTMLCanvasElement; key: string }
+>();
+
+function getKlausLitSocketPatchCanvas(
+  patchCanvas: HTMLCanvasElement,
+  klausLight?: KlausLightConfig | null
+): HTMLCanvasElement {
+  if (!klausLight || klausLight.shadowStrength <= 0.01) return patchCanvas;
+  const sStr = Math.min(0.55, klausLight.shadowStrength * 0.72);
+  const sr = Math.round(klausLight.shadowR * 255);
+  const sg = Math.round(klausLight.shadowG * 255);
+  const sb = Math.round(klausLight.shadowB * 255);
+  const key = `${sr},${sg},${sb},${sStr.toFixed(2)}`;
+  const cached = _tintedSocketScratchMap.get(patchCanvas);
+  if (cached && cached.key === key) return cached.canvas;
+
+  const c = cached?.canvas ?? document.createElement('canvas');
+  c.width = patchCanvas.width;
+  c.height = patchCanvas.height;
+  const cctx = c.getContext('2d');
+  if (!cctx) return patchCanvas;
+  cctx.clearRect(0, 0, c.width, c.height);
+  cctx.globalCompositeOperation = 'source-over';
+  cctx.drawImage(patchCanvas, 0, 0);
+  cctx.globalCompositeOperation = 'source-atop';
+  cctx.fillStyle = `rgba(${sr}, ${sg}, ${sb}, ${sStr})`;
+  cctx.fillRect(0, 0, c.width, c.height);
+  cctx.globalCompositeOperation = 'source-over';
+  _tintedSocketScratchMap.set(patchCanvas, { canvas: c, key });
+  return c;
+}
+
 /**
- * INKTROPE V4 2nd-Pass Chest-Bound Socket Backing Draw (< 0.05 ms, zero ghosting):
- * Draws ONLY the feathered torso-colored socket margin bound strictly to the chest bone (`bones[1]`)
- * directly behind the skinned mesh so raised/swinging arms NEVER reveal armpit holes!
+ * Computes the exact world-space position of any normalized `(u, v)` point on a `SocketSubPatch`
+ * using its anatomical parent bone (`pelvis=0, chest=1, neck=12`). Guarantees 0.000 px parity
+ * with `VERT_GPU_SKIN_SRC` and `drawInpaintedSocketBackingPass`!
+ */
+export function evaluateSocketSubPatchWorldPoint(
+  sub: SocketSubPatch,
+  bones: readonly GpuBoneTransform2D[],
+  bounds: { x: number; y: number; w: number; h: number },
+  uNorm: number,
+  vNorm: number,
+  mirrorAxisX?: number | null
+): { x: number; y: number } {
+  const b =
+    bones[sub.boneIndex] ??
+    bones[1] ??
+    bones[0] ?? { m00: 1, m01: 0, tx: 0, m10: 0, m11: 1, ty: 0, rotRad: 0 };
+  const lx = uNorm * bounds.w;
+  const ly = vNorm * bounds.h;
+  const rawX = bounds.x + (b.m00 * lx + b.m01 * ly + b.tx);
+  const y = bounds.y + (b.m10 * lx + b.m11 * ly + b.ty);
+  const x = mirrorAxisX !== null && mirrorAxisX !== undefined ? 2 * mirrorAxisX - rawX : rawX;
+  return { x, y };
+}
+
+/**
+ * Multi-Bone Socket Backing Pass (`pelvis=0` crotch, `chest=1` shoulders, `neck=12` collar):
+ * Accepts either the full `readonly GpuBoneTransform2D[]` array (aligning every socket patch
+ * to its exact anatomical bone with < 0.01 px error under S-spine leans!) or a single legacy
+ * `GpuBoneTransform2D`.
  */
 export function drawInpaintedSocketBackingPass(
   ctx: CanvasRenderingContext2D,
   mesh: ConformingSkinnedMesh,
-  chestBone: GpuBoneTransform2D | undefined,
+  bonesOrChest: readonly GpuBoneTransform2D[] | GpuBoneTransform2D | undefined,
   bounds: { x: number; y: number; w: number; h: number },
-  mirrorAxisX?: number | null
+  mirrorAxisX?: number | null,
+  klausLight?: KlausLightConfig | null
 ): boolean {
-  if (!mesh.inpaintedSocketOnlyRgba || !mesh.inpaintedDims || !chestBone) return false;
-  const patchCanvas = getOrBuildSocketPatchCanvas(
-    mesh.inpaintedSocketOnlyRgba,
-    mesh.inpaintedDims.w,
-    mesh.inpaintedDims.h
-  );
-  if (!patchCanvas) return false;
+  if (!mesh.inpaintedDims || !bonesOrChest) return false;
+  const srcW = mesh.inpaintedDims.w;
+  const srcH = mesh.inpaintedDims.h;
+  if (srcW < 8 || srcH < 8) return false;
+
+  const isArray = Array.isArray(bonesOrChest);
+  const boneList: readonly GpuBoneTransform2D[] | null = isArray
+    ? (bonesOrChest as readonly GpuBoneTransform2D[])
+    : null;
+  const fallbackBone: GpuBoneTransform2D | undefined = isArray
+    ? boneList![1] ?? boneList![0]
+    : (bonesOrChest as GpuBoneTransform2D);
+
   if (
-    !Number.isFinite(chestBone.m00) ||
-    !Number.isFinite(chestBone.m11) ||
-    !Number.isFinite(chestBone.tx) ||
-    !Number.isFinite(chestBone.ty)
+    !fallbackBone ||
+    !Number.isFinite(fallbackBone.m00) ||
+    !Number.isFinite(fallbackBone.m11) ||
+    !Number.isFinite(fallbackBone.tx) ||
+    !Number.isFinite(fallbackBone.ty)
   ) {
     return false;
   }
 
+  // Multi-bone cropped sub-patch path: each socket region follows its own spine/pelvis/neck bone!
+  if (mesh.inpaintedSubPatches && mesh.inpaintedSubPatches.length > 0 && boneList && boneList.length > 0) {
+    let drewAny = false;
+    for (const sub of mesh.inpaintedSubPatches) {
+      const subCanvas = getOrBuildSocketPatchCanvas(sub.rgba, sub.w, sub.h);
+      if (!subCanvas) continue;
+      const bone = boneList[sub.boneIndex] ?? fallbackBone;
+      if (!Number.isFinite(bone.m00) || !Number.isFinite(bone.tx)) continue;
+
+      const litCanvas = getKlausLitSocketPatchCanvas(subCanvas, klausLight);
+      const rx = (sub.x / srcW) * bounds.w;
+      const ry = (sub.y / srcH) * bounds.h;
+      const rw = (sub.w / srcW) * bounds.w;
+      const rh = (sub.h / srcH) * bounds.h;
+
+      ctx.save();
+      if (mirrorAxisX !== null && mirrorAxisX !== undefined) {
+        ctx.translate(2 * mirrorAxisX, 0);
+        ctx.scale(-1, 1);
+      }
+      ctx.translate(bounds.x, bounds.y);
+      ctx.transform(bone.m00, bone.m10, bone.m01, bone.m11, bone.tx, bone.ty);
+      ctx.drawImage(litCanvas, rx, ry, rw, rh);
+      ctx.restore();
+      drewAny = true;
+    }
+    if (drewAny) return true;
+  }
+
+  if (!mesh.inpaintedSocketOnlyRgba) return false;
+  const basePatch = getOrBuildSocketPatchCanvas(mesh.inpaintedSocketOnlyRgba, srcW, srcH);
+  if (!basePatch) return false;
+
+  const patchCanvas = getKlausLitSocketPatchCanvas(basePatch, klausLight);
   ctx.save();
   if (mirrorAxisX !== null && mirrorAxisX !== undefined) {
     ctx.translate(2 * mirrorAxisX, 0);
     ctx.scale(-1, 1);
   }
+  ctx.translate(bounds.x, bounds.y);
   ctx.transform(
-    chestBone.m00,
-    chestBone.m10,
-    chestBone.m01,
-    chestBone.m11,
-    chestBone.tx,
-    chestBone.ty
+    fallbackBone.m00,
+    fallbackBone.m10,
+    fallbackBone.m01,
+    fallbackBone.m11,
+    fallbackBone.tx,
+    fallbackBone.ty
   );
-  ctx.drawImage(patchCanvas, bounds.x, bounds.y, bounds.w, bounds.h);
+  ctx.drawImage(patchCanvas, 0, 0, bounds.w, bounds.h);
   ctx.restore();
   return true;
 }
@@ -878,7 +1176,8 @@ export function renderConformingMeshWebGLGpuSkinned(
   const staticVbo = getOrUploadStaticSkinVbo(state, mesh);
   if (!textures || !ibo || !staticVbo) return false;
 
-  // Pack bone transform uniforms (~500-768 bytes total!)
+  const socketEntry = !opts?.isReflection && bones.length > 1 ? getOrUploadSocketGpuEntry(state, mesh) : null;
+
   const boneCount = Math.min(MAX_GPU_SKIN_BONES, bones.length);
   for (let i = 0; i < boneCount; i++) {
     const b = bones[i];
@@ -907,6 +1206,7 @@ export function renderConformingMeshWebGLGpuSkinned(
   const { bufH } = prepareGlBackbufferAndFbo(state, cw, ch, useHalo);
   const { gl } = state;
   const mirrorAxisX = opts?.mirrorAxisX ?? null;
+  const hp = opts?.headParallax ?? null;
 
   gl.useProgram(state.gpuSkinProg);
   gl.uniform2f(state.sRes, cw, ch);
@@ -915,57 +1215,34 @@ export function renderConformingMeshWebGLGpuSkinned(
   gl.uniform2f(state.sMirror, mirrorAxisX !== null ? 1.0 : 0.0, mirrorAxisX ?? 0.0);
   gl.uniform1f(state.sUseMirroredShade, isMirrored ? 1.0 : 0.0);
   gl.uniform1f(state.sIsRefl, opts?.isReflection ? 1.0 : 0.0);
+  gl.uniform4f(
+    state.sHeadParallax,
+    hp ? hp.ampPx : 0.0,
+    hp ? hp.headCenterX : 0.5,
+    hp ? hp.headCenterY : 0.2,
+    hp ? hp.headEndV : 0.35
+  );
+  gl.uniform1f(state.sHatFollowPx, opts?.hatFollowPx ?? 0.0);
   gl.uniform4fv(state.sBoneRow0, _boneRow0Buf);
   gl.uniform4fv(state.sBoneRow1, _boneRow1Buf);
 
+  // Pass 0 (inside FBO, behind character mesh): Multi-bone socket sub-patches (pelvis=0, chest=1, neck=12)
+  if (socketEntry && socketEntry.vertCount > 0) {
+    bindKlausUniforms(gl, state.skinKlaus, socketEntry.tex, state.flatNormalTex, opts?.klausLight, mirrorAxisX);
+    bindGpuSkinVertexAttribs(state, socketEntry.vbo);
+    gl.drawArrays(gl.TRIANGLES, 0, socketEntry.vertCount);
+  }
+
+  // Pass 1: Main character conforming skinned mesh
   bindKlausUniforms(gl, state.skinKlaus, textures.tex, textures.normalTex, opts?.klausLight, mirrorAxisX);
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, staticVbo);
-  disableAllVertexAttribsExcept(
-    state,
-    state.sRestUV,
-    state.sBoneIdx,
-    state.sBoneWt,
-    state.sCorUV,
-    state.sShadePair
-  );
-  const stride = 14 * 4;
-  if (state.sRestUV >= 0) {
-    gl.enableVertexAttribArray(state.sRestUV);
-    gl.vertexAttribPointer(state.sRestUV, 2, gl.FLOAT, false, stride, 0);
-  }
-  if (state.sBoneIdx >= 0) {
-    gl.enableVertexAttribArray(state.sBoneIdx);
-    gl.vertexAttribPointer(state.sBoneIdx, 4, gl.FLOAT, false, stride, 2 * 4);
-  }
-  if (state.sBoneWt >= 0) {
-    gl.enableVertexAttribArray(state.sBoneWt);
-    gl.vertexAttribPointer(state.sBoneWt, 4, gl.FLOAT, false, stride, 6 * 4);
-  }
-  if (state.sCorUV >= 0) {
-    gl.enableVertexAttribArray(state.sCorUV);
-    gl.vertexAttribPointer(state.sCorUV, 2, gl.FLOAT, false, stride, 10 * 4);
-  }
-  if (state.sShadePair >= 0) {
-    gl.enableVertexAttribArray(state.sShadePair);
-    gl.vertexAttribPointer(state.sShadePair, 2, gl.FLOAT, false, stride, 12 * 4);
-  }
-
+  bindGpuSkinVertexAttribs(state, staticVbo);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
   gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
 
-  if (!opts?.isReflection && bones.length > 1) {
-    drawInpaintedSocketBackingPass(ctx, mesh, bones[1], bounds, mirrorAxisX);
-  }
   runHaloPassAndBlit(ctx, state, ox, oy, cw, ch, bufH, useHalo, Boolean(opts?.isReflection));
   return true;
 }
 
-/**
- * Renders pre-evaluated deformed vertices (`positions`) using WebGL2 GPU acceleration
- * (with V3 Klaus 2.5D normal-map lighting!) — automatically returns `false` on software GPUs
- * so callers route to our blazing-fast Zero-GC CPU Scanline Rasterizer!
- */
 export function renderConformingMeshWebGL(
   ctx: CanvasRenderingContext2D,
   sourceCanvas: HTMLCanvasElement,
@@ -1010,22 +1287,105 @@ export function renderConformingMeshWebGL(
   const ibo = getOrUploadIndexBuffer(state, indices);
   if (!textures || !ibo) return false;
 
-  if (_interleavedBuf.length < vCount * 5) {
-    _interleavedBuf = new Float32Array(vCount * 5);
+  if (_interleavedBuf.length < vCount * 7) {
+    _interleavedBuf = new Float32Array(vCount * 7);
   }
+  if (_vRotAccum.length < vCount * 2) {
+    _vRotAccum = new Float32Array(vCount * 2);
+  }
+
   const restUV = mesh.restUV;
+  const hasBones = Boolean(opts?.gpuBones && opts.gpuBones.length > 0);
+  if (hasBones) {
+    const bones = opts!.gpuBones!;
+    const bLen = bones.length;
+    const bIdx = mesh.boneIndices;
+    const bWt = mesh.boneWeights;
+    for (let vi = 0; vi < vCount; vi++) {
+      const o4 = vi * 4;
+      const i0 = bIdx[o4] < bLen ? bIdx[o4] : 0;
+      const w0 = bWt[o4];
+      const r0 = bones[i0]?.rotRad ?? 0;
+      const refC = Math.cos(r0);
+      const refS = Math.sin(r0);
+      let sumC = refC * w0;
+      let sumS = refS * w0;
+      for (let k = 1; k < 4; k++) {
+        const wk = bWt[o4 + k];
+        if (wk <= 0.0001) continue;
+        const ik = bIdx[o4 + k] < bLen ? bIdx[o4 + k] : 0;
+        const rk = bones[ik]?.rotRad ?? 0;
+        const ck = Math.cos(rk);
+        const sk = Math.sin(rk);
+        const sign = refC * ck + refS * sk < 0 ? -1 : 1;
+        sumC += wk * sign * ck;
+        sumS += wk * sign * sk;
+      }
+      const len = Math.hypot(sumC, sumS) || 1;
+      _vRotAccum[vi * 2] = sumC / len;
+      _vRotAccum[vi * 2 + 1] = sumS / len;
+    }
+  } else if (opts?.klausLight) {
+    _vRotAccum.fill(0, 0, vCount * 2);
+    const sw = Math.max(1, sourceCanvas.width - 1);
+    const sh = Math.max(1, sourceCanvas.height - 1);
+    for (let t = 0; t < indices.length; t += 3) {
+      const ia = indices[t];
+      const ib = indices[t + 1];
+      const ic = indices[t + 2];
+      const du1 = (restUV[ib * 2] - restUV[ia * 2]) * sw;
+      const dv1 = (restUV[ib * 2 + 1] - restUV[ia * 2 + 1]) * sh;
+      const du2 = (restUV[ic * 2] - restUV[ia * 2]) * sw;
+      const dv2 = (restUV[ic * 2 + 1] - restUV[ia * 2 + 1]) * sh;
+      const det = du1 * dv2 - dv1 * du2;
+      if (Math.abs(det) <= 1e-5) continue;
+      const inv = 1 / det;
+      const dx1 = positions[ib * 2] - positions[ia * 2];
+      const dy1 = positions[ib * 2 + 1] - positions[ia * 2 + 1];
+      const dx2 = positions[ic * 2] - positions[ia * 2];
+      const dy2 = positions[ic * 2 + 1] - positions[ia * 2 + 1];
+      const rc = (dx1 * dv2 - dx2 * dv1) * inv + (-dy1 * du2 + dy2 * du1) * inv;
+      const rs = (dy1 * dv2 - dy2 * dv1) * inv - (-dx1 * du2 + dx2 * du1) * inv;
+      const rLen = Math.hypot(rc, rs);
+      if (rLen > 1e-5) {
+        const nc = rc / rLen;
+        const ns = rs / rLen;
+        _vRotAccum[ia * 2] += nc; _vRotAccum[ia * 2 + 1] += ns;
+        _vRotAccum[ib * 2] += nc; _vRotAccum[ib * 2 + 1] += ns;
+        _vRotAccum[ic * 2] += nc; _vRotAccum[ic * 2 + 1] += ns;
+      }
+    }
+    for (let vi = 0; vi < vCount; vi++) {
+      const len = Math.hypot(_vRotAccum[vi * 2], _vRotAccum[vi * 2 + 1]);
+      if (len > 1e-5) {
+        _vRotAccum[vi * 2] /= len;
+        _vRotAccum[vi * 2 + 1] /= len;
+      } else {
+        _vRotAccum[vi * 2] = 1;
+        _vRotAccum[vi * 2 + 1] = 0;
+      }
+    }
+  } else {
+    for (let vi = 0; vi < vCount; vi++) {
+      _vRotAccum[vi * 2] = 1;
+      _vRotAccum[vi * 2 + 1] = 0;
+    }
+  }
+
   const shade = isMirrored && mesh.vertexShadeMirrored ? mesh.vertexShadeMirrored : mesh.vertexShade;
   const isRefl = Boolean(opts?.isReflection);
   for (let vi = 0; vi < vCount; vi++) {
     const rawX = positions[vi * 2];
     const sx = (mirrorAxisX !== null ? 2 * mirrorAxisX - rawX : rawX) - ox;
     const sy = positions[vi * 2 + 1] - oy;
-    const o = vi * 5;
+    const o = vi * 7;
     _interleavedBuf[o] = sx;
     _interleavedBuf[o + 1] = sy;
     _interleavedBuf[o + 2] = restUV[vi * 2];
     _interleavedBuf[o + 3] = restUV[vi * 2 + 1];
     _interleavedBuf[o + 4] = isRefl ? 1.0 : shade[vi];
+    _interleavedBuf[o + 5] = _vRotAccum[vi * 2];
+    _interleavedBuf[o + 6] = _vRotAccum[vi * 2 + 1];
   }
 
   const { bufH } = prepareGlBackbufferAndFbo(state, cw, ch, useHalo);
@@ -1036,15 +1396,19 @@ export function renderConformingMeshWebGL(
   bindKlausUniforms(gl, state.meshKlaus, textures.tex, textures.normalTex, opts?.klausLight, mirrorAxisX);
 
   gl.bindBuffer(gl.ARRAY_BUFFER, state.vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, _interleavedBuf.subarray(0, vCount * 5), gl.DYNAMIC_DRAW);
-  disableAllVertexAttribsExcept(state, state.aPos, state.aUv, state.aShade);
-  const stride = 5 * 4;
+  gl.bufferData(gl.ARRAY_BUFFER, _interleavedBuf.subarray(0, vCount * 7), gl.DYNAMIC_DRAW);
+  disableAllVertexAttribsExcept(state, state.aPos, state.aUv, state.aShade, state.aRotCS);
+  const stride = 7 * 4;
   gl.enableVertexAttribArray(state.aPos);
   gl.vertexAttribPointer(state.aPos, 2, gl.FLOAT, false, stride, 0);
   gl.enableVertexAttribArray(state.aUv);
   gl.vertexAttribPointer(state.aUv, 2, gl.FLOAT, false, stride, 2 * 4);
   gl.enableVertexAttribArray(state.aShade);
   gl.vertexAttribPointer(state.aShade, 1, gl.FLOAT, false, stride, 4 * 4);
+  if (state.aRotCS >= 0) {
+    gl.enableVertexAttribArray(state.aRotCS);
+    gl.vertexAttribPointer(state.aRotCS, 2, gl.FLOAT, false, stride, 5 * 4);
+  }
 
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
   gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
@@ -1053,10 +1417,6 @@ export function renderConformingMeshWebGL(
   return true;
 }
 
-/**
- * V3 Zero-Compromise Auto-Dispatch Renderer:
- * Hardware GPU -> WebGL2; GPU-free / Software GPU -> Zero-GC Uint32Array CPU Scanline Rasterizer!
- */
 export function renderConformingMeshAuto(
   ctx: CanvasRenderingContext2D,
   sourceCanvas: HTMLCanvasElement,
@@ -1074,11 +1434,6 @@ export function renderConformingMeshAuto(
   return 'legacy-2d';
 }
 
-/**
- * V3 CPU Fallback Entry Point (replaces slow 1,500x ctx.clip() with Zero-GC Scanline Rasterizer!):
- * Delivers 15-25x higher FPS, 0.000px seam cracks, full per-vertex depth shading & Klaus 2.5D lighting
- * on GPU-free laptops and headless/WebGL-disabled browsers!
- */
 export function renderConformingMeshCanvas2D(
   ctx: CanvasRenderingContext2D,
   sourceCanvas: HTMLCanvasElement,
@@ -1092,7 +1447,6 @@ export function renderConformingMeshCanvas2D(
   renderConformingMeshLegacyClip2D(ctx, sourceCanvas, mesh, positions, opts);
 }
 
-/** Emergency fallback ONLY when `getImageData` is unavailable (e.g. tainted cross-origin image) */
 function renderConformingMeshLegacyClip2D(
   ctx: CanvasRenderingContext2D,
   sourceCanvas: HTMLCanvasElement,

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Camera,
   CheckCircle2,
   Crosshair,
@@ -21,11 +22,14 @@ import type {
   VoiceLipSyncTrack,
 } from '../../types/film';
 import {
-  analyzeAudioBlobToLipSyncTrack,
+  analyzePCMToLipSyncTrack,
   calibratePoseBaseline,
   classifyLiveAnalyserViseme,
-  extractMocapTrackFromVideoFile,
+  decodeAudioBlobToMonoPCM,
+  evaluateLivePuppetPadSample,
+  extractMocapFromVideoFile,
   extractPoseSampleFromFrameRGBA,
+  isAudioBufferSilent,
   smoothMocapSample,
   VISEME_LABELS,
   type PoseCalibrationBaseline,
@@ -36,15 +40,69 @@ import { useT, useTFmt } from '../../i18n/translations';
 import { safeSetPointerCapture } from '../../utils/pointerCapture';
 
 type DeckTab = 'webcam' | 'video' | 'live-pad';
+type CameraStatus = 'idle' | 'requesting' | 'active' | 'error';
 
 function compactVisemeLabel(v: VisemeId, quietLabel: string): string {
   if (v === 'closed') return quietLabel;
   return VISEME_LABELS[v].split('/')[0]?.trim() || v;
 }
 
+/** Wraps getUserMedia with a strict 6,000 ms timeout and cleans up late streams */
+function requestUserMediaWithTimeout(
+  constraints: MediaStreamConstraints,
+  timeoutMs = 6000
+): Promise<MediaStream> {
+  return new Promise<MediaStream>((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const err = new Error('Camera request timed out');
+      err.name = 'TimeoutError';
+      reject(err);
+    }, timeoutMs);
+
+    navigator.mediaDevices
+      .getUserMedia(constraints)
+      .then((stream) => {
+        window.clearTimeout(timer);
+        if (settled) {
+          stream.getTracks().forEach((tr) => tr.stop());
+          return;
+        }
+        settled = true;
+        resolve(stream);
+      })
+      .catch((err) => {
+        window.clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        reject(err);
+      });
+  });
+}
+
+/** Computes normalized luminance variance (0..1) to detect black/virtual/covered camera feeds */
+function computeFrameLuminanceVariance(rgba: Uint8ClampedArray): number {
+  const n = Math.floor(rgba.length / 4);
+  if (n <= 1) return 0;
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < rgba.length; i += 4) {
+    const lum = (0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2]) / 255;
+    sum += lum;
+    sumSq += lum * lum;
+  }
+  const mean = sum / n;
+  return Math.max(0, sumSq / n - mean * mean);
+}
+
 interface PerformanceMocapDeckProps {
   activeShot: FilmShot;
   shotIndex: number;
+  preferLeftHandWave?: boolean;
+  activeShotDialogue?: string;
+  activeVoiceTrack?: VoiceLipSyncTrack | null;
   onLivePoseChange: (override: LivePerformanceOverride | null) => void;
   onCommitMocap: (track: MotionCaptureTrack, voiceTrack?: VoiceLipSyncTrack | null) => void;
   onClearMocap: () => void;
@@ -55,6 +113,9 @@ interface PerformanceMocapDeckProps {
 export default function PerformanceMocapDeck({
   activeShot,
   shotIndex,
+  preferLeftHandWave = false,
+  activeShotDialogue,
+  activeVoiceTrack,
   onLivePoseChange,
   onCommitMocap,
   onClearMocap,
@@ -64,12 +125,15 @@ export default function PerformanceMocapDeck({
   const t = useT();
   const tf = useTFmt();
   const [tab, setTab] = useState<DeckTab>('live-pad');
-  const [camActive, setCamActive] = useState(false);
+  const [camStatus, setCamStatus] = useState<CameraStatus>('idle');
   const [camError, setCamError] = useState<string | null>(null);
+  const [camEmptyStream, setCamEmptyStream] = useState(false);
   const [withMic, setWithMic] = useState(true);
   const [recording, setRecording] = useState(false);
   const [recElapsed, setRecElapsed] = useState(0);
   const [videoProgress, setVideoProgress] = useState<number | null>(null);
+
+  const camActive = camStatus === 'active';
 
   // Live telemetry readout
   const [telemetry, setTelemetry] = useState<{
@@ -94,17 +158,24 @@ export default function PerformanceMocapDeck({
   padPosRef.current = padPos;
   padGesturesRef.current = padGestures;
 
+  const preferLeftRef = useRef(preferLeftHandWave);
+  preferLeftRef.current = preferLeftHandWave;
+  const dialogueRef = useRef(activeShotDialogue ?? activeShot.dialogue);
+  dialogueRef.current = activeShotDialogue ?? activeShot.dialogue;
+  const voiceTrackRef = useRef(activeVoiceTrack ?? activeShot.voiceTrack);
+  voiceTrackRef.current = activeVoiceTrack ?? activeShot.voiceTrack;
+
   // Media & CV refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoFileRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const emptyCheckTimerRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const mediaRecRef = useRef<MediaRecorder | null>(null);
   const micChunksRef = useRef<Blob[]>([]);
 
   const baselineRef = useRef<PoseCalibrationBaseline | null>(null);
-  const prevRgbaRef = useRef<Uint8ClampedArray | null>(null);
   const smoothRef = useRef<MotionCaptureSample | null>(null);
   const recSamplesRef = useRef<MotionCaptureSample[]>([]);
   const recStartWallRef = useRef(0);
@@ -113,6 +184,10 @@ export default function PerformanceMocapDeck({
   const stopCameraResources = useCallback(() => {
     recordingRef.current = false;
     setRecording(false);
+    if (emptyCheckTimerRef.current !== null) {
+      window.clearTimeout(emptyCheckTimerRef.current);
+      emptyCheckTimerRef.current = null;
+    }
     if (mediaRecRef.current && mediaRecRef.current.state !== 'inactive') {
       try {
         mediaRecRef.current.stop();
@@ -134,9 +209,9 @@ export default function PerformanceMocapDeck({
       videoRef.current.srcObject = null;
     }
     baselineRef.current = null;
-    prevRgbaRef.current = null;
     smoothRef.current = null;
-    setCamActive(false);
+    setCamEmptyStream(false);
+    setCamStatus((prev) => (prev === 'error' ? 'error' : 'idle'));
   }, []);
 
   // Clean up on unmount
@@ -150,73 +225,168 @@ export default function PerformanceMocapDeck({
   // Stop webcam cleanly when switching away from webcam tab
   useEffect(() => {
     if (tab !== 'webcam') {
-      if (camActive) stopCameraResources();
+      if (camStatus === 'active' || camStatus === 'requesting') {
+        stopCameraResources();
+        setCamStatus('idle');
+      }
       if (tab === 'video') onLivePoseChange(null);
     }
-  }, [tab, camActive, stopCameraResources, onLivePoseChange]);
+  }, [tab, camStatus, stopCameraResources, onLivePoseChange]);
 
-  // Start live webcam + optional microphone analyser
-  const handleStartCamera = async () => {
+  const switchToLivePad = () => {
+    stopCameraResources();
     setCamError(null);
+    setCamEmptyStream(false);
+    setCamStatus('idle');
+    setTab('live-pad');
+    soundEngine.click(1.06);
+  };
+
+  // Start live webcam + optional microphone analyser with 6s timeout & auto audio-less fallback!
+  const handleStartCamera = async () => {
+    if (camStatus === 'requesting') return;
+    setCamError(null);
+    setCamEmptyStream(false);
+
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       const msg = t('capErrNoCam');
       setCamError(msg);
+      setCamStatus('error');
       notify(msg, 'info');
       return;
     }
+
+    setCamStatus('requesting');
+    const videoConstraints: MediaTrackConstraints = {
+      width: { ideal: 320 },
+      height: { ideal: 240 },
+      facingMode: 'user',
+    };
+
+    let stream: MediaStream | null = null;
+    let fellBackNoMic = false;
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: 'user' },
-        audio: withMic,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
-      }
-
-      if (withMic && stream.getAudioTracks().length > 0) {
-        const AC =
-          window.AudioContext ||
-          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-        if (AC) {
-          const ctx = new AC();
-          const src = ctx.createMediaStreamSource(stream);
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 512;
-          analyser.smoothingTimeConstant = 0.55;
-          src.connect(analyser);
-          audioCtxRef.current = ctx;
-          analyserRef.current = analyser;
+      stream = await requestUserMediaWithTimeout(
+        { video: videoConstraints, audio: withMic },
+        6000
+      );
+    } catch (firstErr) {
+      const errName = firstErr instanceof Error ? firstErr.name : '';
+      // If mic caused failure, automatically retry camera-only!
+      if (withMic && errName !== 'TimeoutError') {
+        try {
+          stream = await requestUserMediaWithTimeout(
+            { video: videoConstraints, audio: false },
+            6000
+          );
+          fellBackNoMic = true;
+          setWithMic(false);
+        } catch (retryErr) {
+          const finalName = retryErr instanceof Error ? retryErr.name : errName;
+          const msg =
+            finalName === 'NotFoundError' ||
+            finalName === 'DevicesNotFoundError' ||
+            finalName === 'OverconstrainedError'
+              ? t('capErrNoCam')
+              : t('capErrCamDenied');
+          setCamError(msg);
+          setCamStatus('error');
+          notify(msg, 'info');
+          return;
         }
+      } else {
+        const msg =
+          errName === 'NotFoundError' ||
+          errName === 'DevicesNotFoundError' ||
+          errName === 'OverconstrainedError'
+            ? t('capErrNoCam')
+            : t('capErrCamDenied');
+        setCamError(msg);
+        setCamStatus('error');
+        notify(msg, 'info');
+        return;
       }
-
-      baselineRef.current = null;
-      prevRgbaRef.current = null;
-      smoothRef.current = null;
-      setCamActive(true);
-      soundEngine.toggle(true);
-      notify(t('capCamActiveToast'));
-    } catch {
-      const msg = t('capErrCamDenied');
-      setCamError(msg);
-      notify(msg, 'info');
     }
+
+    if (!stream) {
+      setCamError(t('capErrCamDenied'));
+      setCamStatus('error');
+      return;
+    }
+
+    streamRef.current = stream;
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play().catch(() => {});
+    }
+
+    if (!fellBackNoMic && withMic && stream.getAudioTracks().length > 0) {
+      const AC =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AC) {
+        const ctx = new AC();
+        const src = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        analyser.smoothingTimeConstant = 0.55;
+        src.connect(analyser);
+        audioCtxRef.current = ctx;
+        analyserRef.current = analyser;
+      }
+    }
+
+    baselineRef.current = null;
+    smoothRef.current = null;
+    setCamStatus('active');
+    soundEngine.toggle(true);
+    notify(fellBackNoMic ? t('mocapCamMicFallback') : t('capCamActiveToast'), 'info');
+
+    // 1.0s post-start blank/virtual-black stream diagnostic guard!
+    if (emptyCheckTimerRef.current !== null) {
+      window.clearTimeout(emptyCheckTimerRef.current);
+    }
+    emptyCheckTimerRef.current = window.setTimeout(() => {
+      const vid = videoRef.current;
+      if (!vid || !streamRef.current) return;
+      if (vid.videoWidth === 0 || vid.videoHeight === 0) {
+        setCamEmptyStream(true);
+        notify(t('mocapCamEmptyStream'), 'info');
+        return;
+      }
+      try {
+        const probe = document.createElement('canvas');
+        probe.width = 64;
+        probe.height = 48;
+        const pctx = probe.getContext('2d', { willReadFrequently: true });
+        if (pctx) {
+          pctx.drawImage(vid, 0, 0, 64, 48);
+          const variance = computeFrameLuminanceVariance(pctx.getImageData(0, 0, 64, 48).data);
+          if (variance < 1e-4) {
+            setCamEmptyStream(true);
+            notify(t('mocapCamEmptyStream'), 'info');
+          }
+        }
+      } catch {
+        // ignore cross-origin/tainted canvas edge case
+      }
+    }, 1000);
   };
 
-  // Recalibrate neutral head/shoulder posture on live webcam
+  // Recalibrate neutral head/shoulder LAB + KLT posture on live webcam
   const handleCalibrate = () => {
     baselineRef.current = null;
     soundEngine.click(1.18);
     notify(t('capCalibratedToast'));
   };
 
-  // Webcam real-time 24–30 FPS CV tracking loop
+  // Webcam real-time 160x120 Adaptive LAB + Pyramidal KLT tracking loop
   useEffect(() => {
     if (tab !== 'webcam' || !camActive) return;
 
-    const W = 96;
-    const H = 72;
+    const W = 160;
+    const H = 120;
     const scratch = document.createElement('canvas');
     scratch.width = W;
     scratch.height = H;
@@ -231,7 +401,7 @@ export default function PerformanceMocapDeck({
       if (now - lastTick >= 36) {
         lastTick = now;
         const vid = videoRef.current;
-        if (vid && vid.readyState >= 2) {
+        if (vid && vid.readyState >= 2 && vid.videoWidth > 0) {
           sctx.drawImage(vid, 0, 0, W, H);
           const rgba = sctx.getImageData(0, 0, W, H).data;
           if (!baselineRef.current) {
@@ -245,11 +415,11 @@ export default function PerformanceMocapDeck({
             H,
             tSec,
             baselineRef.current,
-            prevRgbaRef.current,
+            null,
             true
           );
 
-          // Optional live mic formant viseme synced with webcam!
+          // Live microphone formant viseme overrides visual mouth MAR when mic is active
           if (analyserRef.current && audioCtxRef.current) {
             analyserRef.current.getByteFrequencyData(freqBuf);
             analyserRef.current.getByteTimeDomainData(timeBuf);
@@ -258,9 +428,8 @@ export default function PerformanceMocapDeck({
             raw.viseme = lip.viseme;
           }
 
-          const smooth = smoothMocapSample(smoothRef.current, raw, 0.34);
+          const smooth = smoothMocapSample(smoothRef.current, raw, 0.36);
           smoothRef.current = smooth;
-          prevRgbaRef.current = new Uint8ClampedArray(rgba);
 
           onLivePoseChange({
             headYawRad: smooth.headYawRad,
@@ -285,7 +454,7 @@ export default function PerformanceMocapDeck({
           if (recordingRef.current) {
             recSamplesRef.current.push(smooth);
             setRecElapsed(tSec);
-            if (tSec >= 6.4) {
+            if (tSec >= 15.0) {
               void finishRecording('webcam');
             }
           }
@@ -303,72 +472,40 @@ export default function PerformanceMocapDeck({
     if (tab !== 'live-pad') return;
     let raf = 0;
     let lastTick = 0;
+    const mountWall = performance.now();
 
     const loop = (now: number) => {
       if (now - lastTick >= 38) {
         lastTick = now;
         const p = padPosRef.current;
         const g = padGesturesRef.current;
-        const sec = now / 1000;
+        const recSec = recordingRef.current ? (now - recStartWallRef.current) / 1000 : 0;
+        const sec = recordingRef.current ? recSec : (now - mountWall) / 1000;
 
-        const headYawRad = Math.max(-0.61, Math.min(0.61, p.x * 0.61));
-        const headTiltRad = Math.max(-0.34, Math.min(0.34, p.x * 0.16 + (g.surprise ? -0.14 : 0)));
-        const bodyLeanRad = Math.max(-0.26, Math.min(0.26, p.x * 0.22));
-        const verticalLiftNorm = p.y < -0.12 ? Math.min(0.32, (-p.y - 0.12) * 0.38) : g.surprise ? 0.08 : 0;
-        const squashY =
-          p.y > 0.12
-            ? Math.max(0.84, 1 - (p.y - 0.12) * 0.2)
-            : verticalLiftNorm > 0.04
-              ? Math.min(1.16, 1 + verticalLiftNorm * 0.48)
-              : 1;
-
-        let leftArmSwing = p.x * -0.25;
-        let rightArmSwing = p.x * 0.25;
-        if (g.handsUp) {
-          leftArmSwing = 0.98 + Math.sin(sec * 8) * 0.08;
-          rightArmSwing = 0.98 + Math.cos(sec * 8) * 0.08;
-        } else if (g.wave) {
-          rightArmSwing = 0.96 + Math.sin(sec * 13) * 0.24;
-          leftArmSwing = -0.12;
-        } else if (g.surprise) {
-          leftArmSwing = 0.82;
-          rightArmSwing = 0.82;
-        }
-
-        const speakCycle: VisemeId[] = ['AA', 'EE', 'OH', 'FV', 'OO', 'AA'];
-        const viseme: VisemeId = g.speak
-          ? speakCycle[Math.floor(sec * 8) % speakCycle.length]
-          : g.surprise
-            ? 'OH'
-            : 'closed';
-        const mouthOpen = viseme === 'closed' ? 0 : g.speak ? 0.78 : 0.62;
-
-        const sample: MotionCaptureSample = {
-          t: recordingRef.current ? Number(((now - recStartWallRef.current) / 1000).toFixed(3)) : 0,
-          headYawRad: Number(headYawRad.toFixed(4)),
-          headTiltRad: Number(headTiltRad.toFixed(4)),
-          bodyLeanRad: Number(bodyLeanRad.toFixed(4)),
-          leftArmSwing: Number(leftArmSwing.toFixed(3)),
-          rightArmSwing: Number(rightArmSwing.toFixed(3)),
-          verticalLiftNorm: Number(verticalLiftNorm.toFixed(3)),
-          squashY: Number(squashY.toFixed(3)),
-          mouthOpen,
-          viseme,
-        };
+        const sample = evaluateLivePuppetPadSample({
+          padX: p.x,
+          padY: p.y,
+          sec,
+          recTimeSec: recSec,
+          gestures: g,
+          preferLeftHandWave: preferLeftRef.current,
+          activeShotDialogue: dialogueRef.current,
+          activeVoiceTrack: voiceTrackRef.current,
+        });
 
         onLivePoseChange(sample);
         setTelemetry({
-          yawDeg: Math.round((headYawRad * 180) / Math.PI),
-          leftArm: leftArmSwing,
-          rightArm: rightArmSwing,
-          lift: verticalLiftNorm,
-          viseme,
+          yawDeg: Math.round((sample.headYawRad * 180) / Math.PI),
+          leftArm: sample.leftArmSwing,
+          rightArm: sample.rightArmSwing,
+          lift: sample.verticalLiftNorm,
+          viseme: sample.viseme ?? 'closed',
         });
 
         if (recordingRef.current) {
           recSamplesRef.current.push(sample);
           setRecElapsed(sample.t);
-          if (sample.t >= 6.4) {
+          if (sample.t >= 15.0) {
             void finishRecording('live-pad');
           }
         }
@@ -389,7 +526,6 @@ export default function PerformanceMocapDeck({
     recStartWallRef.current = performance.now();
     setRecElapsed(0);
 
-    // If webcam + mic is active, simultaneously record real audio for Lip-Sync + Export!
     if (tab === 'webcam' && withMic && streamRef.current && streamRef.current.getAudioTracks().length > 0) {
       try {
         const audioOnly = new MediaStream(streamRef.current.getAudioTracks());
@@ -421,6 +557,8 @@ export default function PerformanceMocapDeck({
     const dur = Math.max(1.2, samples.length > 0 ? samples[samples.length - 1].t : 1.5);
 
     let voiceTrack: VoiceLipSyncTrack | null = null;
+    let micWasSilent = false;
+
     if (mediaRecRef.current && mediaRecRef.current.state !== 'inactive') {
       const mr = mediaRecRef.current;
       const stopped = new Promise<void>((res) => {
@@ -432,15 +570,22 @@ export default function PerformanceMocapDeck({
       if (micChunksRef.current.length > 0) {
         try {
           const audioBlob = new Blob(micChunksRef.current, { type: mr.mimeType || 'audio/webm' });
-          const blobKey = await saveBlob(audioBlob);
-          voiceTrack = await analyzeAudioBlobToLipSyncTrack(
-            audioBlob,
-            blobKey,
-            `Plan #${shotIndex + 1} Kamera Sesi`,
-            'mic'
-          );
+          const decoded = await decodeAudioBlobToMonoPCM(audioBlob);
+          if (isAudioBufferSilent(decoded.pcm)) {
+            // Silent mic guard: NEVER overwrite existing voiceTrack!
+            micWasSilent = true;
+            voiceTrack = null;
+          } else {
+            const blobKey = await saveBlob(audioBlob);
+            voiceTrack = analyzePCMToLipSyncTrack(decoded.pcm, decoded.sampleRate, {
+              audioBlobKey: blobKey,
+              label: `${t('filmShotWord')} #${shotIndex + 1}`,
+              source: 'mic',
+              fps: 24,
+            });
+          }
         } catch {
-          // Audio analysis optional if browser didn't record usable audio
+          voiceTrack = null;
         }
       }
     }
@@ -452,7 +597,7 @@ export default function PerformanceMocapDeck({
 
     const track: MotionCaptureTrack = {
       source,
-      durationSec: Number(Math.min(6.5, dur).toFixed(2)),
+      durationSec: Number(Math.min(15.0, dur).toFixed(2)),
       fps: 24,
       samples,
       createdAt: new Date().toISOString(),
@@ -462,23 +607,43 @@ export default function PerformanceMocapDeck({
     onLivePoseChange(null);
     onCommitMocap(track, voiceTrack);
     soundEngine.clapperSnap();
-    notify(
-      voiceTrack
-        ? tf('capSavedWebcamToast', { frames: samples.length, shot: shotIndex + 1 })
-        : tf('capSavedPadToast', { frames: samples.length, sec: track.durationSec, shot: shotIndex + 1 })
-    );
+    if (micWasSilent) {
+      notify(t('micSilentWarning'), 'info');
+    } else {
+      notify(
+        voiceTrack
+          ? tf('capSavedWebcamToast', { frames: samples.length, shot: shotIndex + 1 })
+          : tf('capSavedPadToast', { frames: samples.length, sec: track.durationSec, shot: shotIndex + 1 })
+      );
+    }
   };
 
-  // Reference Video Pose Transfer Upload
+  // Reference Video Pose + Voice Transfer Upload (Up to 15s @ 24 FPS!)
   const handleUploadVideo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setVideoProgress(5);
     try {
-      const track = await extractMocapTrackFromVideoFile(file, (pct) => setVideoProgress(pct));
-      onCommitMocap(track, null);
+      const { track, extractedVoice } = await extractMocapFromVideoFile(file, (pct) =>
+        setVideoProgress(pct)
+      );
+      let syncedVoiceTrack: VoiceLipSyncTrack | null = null;
+      if (extractedVoice) {
+        const blobKey = await saveBlob(extractedVoice.wavBlob);
+        syncedVoiceTrack = {
+          ...extractedVoice.lipSyncTrack,
+          audioBlobKey: blobKey,
+        };
+      }
+      onCommitMocap(track, syncedVoiceTrack);
       soundEngine.clapperSnap();
-      notify(tf('capRefImportedToast', { label: track.label, frames: track.samples.length, shot: shotIndex + 1 }));
+      notify(
+        tf('capRefImportedToast', {
+          label: track.label,
+          frames: track.samples.length,
+          shot: shotIndex + 1,
+        })
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : t('capErrRefVideo'), 'error');
     } finally {
@@ -497,6 +662,23 @@ export default function PerformanceMocapDeck({
     });
   };
 
+  const togglePadGesture = (key: 'handsUp' | 'wave' | 'surprise' | 'speak') => {
+    soundEngine.click(1.08);
+    setPadGestures((prev) => {
+      if (key === 'speak') {
+        return { ...prev, speak: !prev.speak };
+      }
+      // Mutually exclusive arm gestures so 'handsUp', 'wave', and 'surprise' never shadow one another!
+      const nextActive = !prev[key];
+      return {
+        ...prev,
+        handsUp: key === 'handsUp' ? nextActive : false,
+        wave: key === 'wave' ? nextActive : false,
+        surprise: key === 'surprise' ? nextActive : false,
+      };
+    });
+  };
+
   return (
     <div className="w-full max-w-[780px] mt-2 rounded-2xl console-well border border-ink-brass/50 bg-desk-surface/95 p-2.5 shadow-xl space-y-2 shrink-0">
       {/* Header + 3 Source Mode Tabs */}
@@ -505,7 +687,7 @@ export default function PerformanceMocapDeck({
           <span
             className="hardware-led"
             data-on={recording ? 'vermilion' : camActive || tab === 'live-pad' ? 'emerald' : 'amber'}
-            data-pulse={recording || camActive}
+            data-pulse={recording || camActive || camStatus === 'requesting'}
           />
           <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass">
             {t('mocapHeader')} ({t('filmShotWord')} #{shotIndex + 1})
@@ -547,6 +729,7 @@ export default function PerformanceMocapDeck({
             type="button"
             onClick={() => {
               stopCameraResources();
+              setCamStatus('idle');
               onLivePoseChange(null);
               onClose();
             }}
@@ -617,10 +800,8 @@ export default function PerformanceMocapDeck({
                 <button
                   key={g.key}
                   type="button"
-                  onClick={() => {
-                    soundEngine.click(1.08);
-                    setPadGestures((prev) => ({ ...prev, [g.key]: !prev[g.key] }));
-                  }}
+                  aria-pressed={padGestures[g.key]}
+                  onClick={() => togglePadGesture(g.key)}
                   className={`py-1.5 px-1.5 rounded-lg font-mono text-[11px] font-bold border transition-colors ${
                     padGestures[g.key]
                       ? 'bg-ink-brass/25 border-ink-brass text-desk-text'
@@ -714,7 +895,11 @@ export default function PerformanceMocapDeck({
               <div className="text-center px-2 space-y-1">
                 <Camera className="w-5 h-5 text-desk-muted mx-auto" />
                 <div className="font-mono text-[11px] text-desk-muted">
-                  {camError ? t('capCamOff') : t('capLivePreview')}
+                  {camStatus === 'requesting'
+                    ? t('mocapCamRequesting')
+                    : camStatus === 'error'
+                      ? t('capCamOff')
+                      : t('capLivePreview')}
                 </div>
               </div>
             )}
@@ -728,9 +913,32 @@ export default function PerformanceMocapDeck({
           </div>
 
           <div className="space-y-1.5">
-            {camError ? (
-              <div className="p-2 rounded-lg bg-ink-vermilion/10 border border-ink-vermilion/40 text-[11px] text-desk-text leading-snug">
-                {camError}
+            {camStatus === 'error' && camError ? (
+              <div className="p-2 rounded-lg bg-ink-vermilion/10 border border-ink-vermilion/40 text-[11px] text-desk-text leading-snug flex flex-wrap items-center justify-between gap-2">
+                <span className="flex-1 min-w-[180px]">{camError}</span>
+                <button
+                  type="button"
+                  onClick={switchToLivePad}
+                  className="px-2.5 py-1 rounded-lg bg-ink-brass text-neutral-950 font-mono text-[11px] font-bold inline-flex items-center gap-1 shrink-0"
+                >
+                  <Gamepad2 className="w-3 h-3" />
+                  {t('mocapUseLivePadBtn')}
+                </button>
+              </div>
+            ) : camEmptyStream ? (
+              <div className="p-2 rounded-lg bg-ink-brass/15 border border-ink-brass/50 text-[11px] text-desk-text leading-snug flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 flex-1 min-w-[180px]">
+                  <AlertTriangle className="w-3.5 h-3.5 text-ink-brass shrink-0" />
+                  {t('mocapCamEmptyStream')}
+                </span>
+                <button
+                  type="button"
+                  onClick={switchToLivePad}
+                  className="px-2.5 py-1 rounded-lg bg-ink-brass text-neutral-950 font-mono text-[11px] font-bold inline-flex items-center gap-1 shrink-0"
+                >
+                  <Gamepad2 className="w-3 h-3" />
+                  {t('mocapUseLivePadBtn')}
+                </button>
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 font-mono text-[11px]">
@@ -759,7 +967,7 @@ export default function PerformanceMocapDeck({
               <button
                 type="button"
                 onClick={() => setWithMic((v) => !v)}
-                disabled={camActive}
+                disabled={camActive || camStatus === 'requesting'}
                 className={`px-2 py-1 rounded-lg border font-mono text-[11px] inline-flex items-center gap-1 ${
                   withMic
                     ? 'bg-desk-panel border-ink-emerald text-ink-emerald font-bold'
@@ -786,11 +994,12 @@ export default function PerformanceMocapDeck({
             {!camActive ? (
               <button
                 type="button"
+                disabled={camStatus === 'requesting'}
                 onClick={() => void handleStartCamera()}
-                className="w-full py-2 px-3 rounded-xl bg-ink-emerald text-neutral-950 font-mono text-[11px] font-bold inline-flex items-center justify-center gap-1.5 hover:brightness-110 transition-all"
+                className="w-full py-2 px-3 rounded-xl bg-ink-emerald text-neutral-950 font-mono text-[11px] font-bold inline-flex items-center justify-center gap-1.5 hover:brightness-110 transition-all disabled:opacity-60"
               >
                 <Camera className="w-3.5 h-3.5" />
-                {t('mocapStartCam')}
+                {camStatus === 'requesting' ? t('mocapCamRequesting') : t('mocapStartCam')}
               </button>
             ) : !recording ? (
               <button
@@ -816,6 +1025,7 @@ export default function PerformanceMocapDeck({
                 type="button"
                 onClick={() => {
                   stopCameraResources();
+                  setCamStatus('idle');
                   onLivePoseChange(null);
                 }}
                 className="w-full py-1 px-2 rounded-lg bg-desk-surface border border-desk-border text-[11px] font-mono text-desk-muted hover:text-desk-text"
@@ -827,16 +1037,17 @@ export default function PerformanceMocapDeck({
         </div>
       )}
 
-      {/* TAB 3: REFERENCE VIDEO POSE TRANSFER (.MP4 / .WEBM / .MOV) */}
+      {/* TAB 3: REFERENCE VIDEO POSE + VOICE TRANSFER (.MP4 / .WEBM / .MOV, UP TO 15s @ 24 FPS) */}
       {tab === 'video' && (
         <div className="flex flex-wrap items-center justify-between gap-3 py-1">
-          <div className="space-y-0.5 flex-1 min-w-[240px]">
-            <div className="text-[11px] font-bold text-desk-text">
-              {t('mocapTabVideo')}
+          <div className="space-y-1 flex-1 min-w-[240px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-bold text-desk-text">{t('mocapTabVideo')}</span>
+              <span className="px-2 py-0.5 rounded-full bg-ink-brass/15 border border-ink-brass/40 font-mono text-[11px] font-bold text-ink-brass">
+                {t('mocapVideoSpecsBadge')}
+              </span>
             </div>
-            <p className="text-[11px] text-desk-muted leading-snug">
-              {t('mocapVideoHint')}
-            </p>
+            <p className="text-[11px] text-desk-muted leading-snug">{t('mocapVideoHint')}</p>
             {videoProgress !== null && (
               <div className="pt-1.5 space-y-1">
                 <div className="h-1.5 w-full rounded-full bg-desk-surface overflow-hidden">
@@ -877,7 +1088,8 @@ export default function PerformanceMocapDeck({
         <div className="flex items-center justify-between pt-1.5 border-t border-desk-border font-mono text-[11px]">
           <span className="text-ink-emerald flex items-center gap-1.5">
             <CheckCircle2 className="w-3.5 h-3.5" />
-            {t('mocapRecordedBadge')}: <strong>{activeShot.mocapTrack.label}</strong> ({activeShot.mocapTrack.samples.length} · {activeShot.mocapTrack.durationSec}s)
+            {t('mocapRecordedBadge')}: <strong>{activeShot.mocapTrack.label}</strong> (
+            {activeShot.mocapTrack.samples.length} · {activeShot.mocapTrack.durationSec}s)
           </span>
           <button
             type="button"

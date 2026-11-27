@@ -213,6 +213,217 @@ export function alignViewToReferenceRGBA(
  * Splits ONE A4 paper sheet containing 2–4 character poses (side-by-side or 2×2 grid)
  * into clean, transparent, 0.0px height-aligned individual angle slots.
  */
+export interface TurnaroundPoseClassification {
+  angle: CharacterViewAngle;
+  symmetry: number;
+  aspectRatio: number;
+  protrusionAsym: number;
+  faceDetail: number;
+  scores: Record<CharacterViewAngle, number>;
+}
+
+/**
+ * Classifies a cropped character pose into `front` | `threeQuarter` | `side` | `back`
+ * by measuring left-right silhouette mirror symmetry, aspect width, unilateral snout/toe
+ * protrusion, and interior upper-head facial ink detail.
+ */
+export function classifyTurnaroundPoseAngleRGBA(
+  rgba: Uint8ClampedArray,
+  w: number,
+  h: number
+): TurnaroundPoseClassification {
+  const defaultScores: Record<CharacterViewAngle, number> = {
+    front: 0.5,
+    threeQuarter: 0.4,
+    side: 0.3,
+    back: 0.3,
+  };
+  if (w < 8 || h < 8) {
+    return {
+      angle: 'front',
+      symmetry: 1,
+      aspectRatio: 0.5,
+      protrusionAsym: 0,
+      faceDetail: 0,
+      scores: defaultScores,
+    };
+  }
+
+  let minX = w;
+  let maxX = -1;
+  let minY = h;
+  let maxY = -1;
+  let sumX = 0;
+  let opaqueCnt = 0;
+  const rowMin = new Int32Array(h).fill(w);
+  const rowMax = new Int32Array(h).fill(-1);
+
+  for (let y = 0; y < h; y++) {
+    const ro = y * w;
+    for (let x = 0; x < w; x++) {
+      if (rgba[(ro + x) * 4 + 3] > 40) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (x < rowMin[y]) rowMin[y] = x;
+        if (x > rowMax[y]) rowMax[y] = x;
+        sumX += x;
+        opaqueCnt++;
+      }
+    }
+  }
+
+  if (opaqueCnt < 16 || maxY <= minY + 4 || maxX <= minX + 2) {
+    return {
+      angle: 'front',
+      symmetry: 1,
+      aspectRatio: 0.5,
+      protrusionAsym: 0,
+      faceDetail: 0,
+      scores: defaultScores,
+    };
+  }
+
+  const bw = Math.max(1, maxX - minX + 1);
+  const bh = Math.max(1, maxY - minY + 1);
+  const aspectRatio = bw / bh;
+  const cx = sumX / opaqueCnt;
+
+  // 1) Row-by-row mirror IoU around center of mass `cx`
+  let symInter = 0;
+  let symUnion = 0;
+  for (let y = minY; y <= maxY; y++) {
+    const ro = y * w;
+    for (let x = minX; x <= maxX; x++) {
+      const a1 = rgba[(ro + x) * 4 + 3] > 40;
+      const mx = Math.round(2 * cx - x);
+      const a2 = mx >= 0 && mx < w ? rgba[(ro + mx) * 4 + 3] > 40 : false;
+      if (a1 || a2) {
+        symUnion++;
+        if (a1 && a2) symInter++;
+      }
+    }
+  }
+  const symmetry = symUnion > 0 ? symInter / symUnion : 1;
+
+  // 2) Unilateral nose/snout & foot/toe overhang relative to mid-torso spine
+  let torsoMidSum = 0;
+  let torsoMidCnt = 0;
+  const tY0 = Math.round(minY + bh * 0.35);
+  const tY1 = Math.round(minY + bh * 0.62);
+  for (let y = tY0; y <= tY1; y++) {
+    if (rowMax[y] >= rowMin[y]) {
+      torsoMidSum += (rowMin[y] + rowMax[y]) * 0.5;
+      torsoMidCnt++;
+    }
+  }
+  const spineX = torsoMidCnt > 0 ? torsoMidSum / torsoMidCnt : cx;
+
+  let asymAccum = 0;
+  let asymRows = 0;
+  const checkBands: Array<[number, number]> = [
+    [Math.round(minY + bh * 0.08), Math.round(minY + bh * 0.28)],
+    [Math.round(minY + bh * 0.82), maxY],
+  ];
+  for (const [by0, by1] of checkBands) {
+    for (let y = Math.max(minY, by0); y <= Math.min(maxY, by1); y++) {
+      if (rowMax[y] < rowMin[y]) continue;
+      const extL = Math.max(0, spineX - rowMin[y]);
+      const extR = Math.max(0, rowMax[y] - spineX);
+      const span = Math.max(1, extL + extR);
+      asymAccum += Math.abs(extR - extL) / span;
+      asymRows++;
+    }
+  }
+  const protrusionAsym = asymRows > 0 ? asymAccum / asymRows : 0;
+
+  // 3) Interior upper-head facial ink/eye contrast (high in Front / 3-4, near-zero on solid/plain Back)
+  const fx0 = Math.max(0, Math.round(cx - bw * 0.18));
+  const fx1 = Math.min(w - 1, Math.round(cx + bw * 0.18));
+  const fy0 = Math.max(0, Math.round(minY + bh * 0.06));
+  const fy1 = Math.min(h - 1, Math.round(minY + bh * 0.23));
+  let faceCount = 0;
+  let lumSum = 0;
+  let lumSqSum = 0;
+  let edgeTransitions = 0;
+  for (let y = fy0; y <= fy1; y++) {
+    const ro = y * w;
+    let prevDark: boolean | null = null;
+    for (let x = fx0; x <= fx1; x++) {
+      const o = (ro + x) * 4;
+      if (rgba[o + 3] <= 80) continue;
+      const lum = (0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2]) / 255;
+      lumSum += lum;
+      lumSqSum += lum * lum;
+      faceCount++;
+      const isDark = lum < 0.42;
+      if (prevDark !== null && isDark !== prevDark) edgeTransitions++;
+      prevDark = isDark;
+    }
+  }
+  const lumVar =
+    faceCount > 4 ? Math.max(0, lumSqSum / faceCount - (lumSum / faceCount) * (lumSum / faceCount)) : 0;
+  const edgeDensity = faceCount > 4 ? edgeTransitions / faceCount : 0;
+  const faceDetail = Math.min(1, Math.sqrt(lumVar) * 1.8 + edgeDensity * 1.4);
+
+  const narrowProfileBoost =
+    aspectRatio < 0.38 && protrusionAsym > 0.12
+      ? Math.min(0.32, (0.38 - aspectRatio) * 1.1 + protrusionAsym * 0.65)
+      : 0;
+  const scores: Record<CharacterViewAngle, number> = {
+    front:
+      symmetry * 0.46 +
+      Math.min(1, faceDetail * 1.8) * 0.38 +
+      (1 - Math.min(1, protrusionAsym * 1.6)) * 0.16 -
+      narrowProfileBoost * 0.75,
+    back:
+      symmetry * 0.50 +
+      (1 - Math.min(1, faceDetail * 1.9)) * 0.36 +
+      (1 - Math.min(1, protrusionAsym * 1.5)) * 0.14 -
+      narrowProfileBoost * 0.85,
+    side:
+      (1 - symmetry) * 0.38 +
+      Math.min(1, protrusionAsym * 2.2) * 0.38 +
+      Math.max(0, 1 - aspectRatio / 0.62) * 0.24 +
+      narrowProfileBoost,
+    threeQuarter:
+      Math.max(0, 1 - Math.abs(symmetry - 0.70) * 2.4) * 0.42 +
+      Math.min(1, faceDetail * 1.6) * 0.30 +
+      Math.max(0, 1 - Math.abs(protrusionAsym - 0.26) * 2.4) * 0.28,
+  };
+
+  let bestAngle: CharacterViewAngle = 'front';
+  let bestScore = -Infinity;
+  for (const ang of ['front', 'threeQuarter', 'side', 'back'] as CharacterViewAngle[]) {
+    if (scores[ang] > bestScore) {
+      bestScore = scores[ang];
+      bestAngle = ang;
+    }
+  }
+
+  return {
+    angle: bestAngle,
+    symmetry,
+    aspectRatio,
+    protrusionAsym,
+    faceDetail,
+    scores,
+  };
+}
+
+function permuteAngles(arr: CharacterViewAngle[]): CharacterViewAngle[][] {
+  if (arr.length <= 1) return [arr];
+  const out: CharacterViewAngle[][] = [];
+  for (let i = 0; i < arr.length; i++) {
+    const rest = [...arr.slice(0, i), ...arr.slice(i + 1)];
+    for (const sub of permuteAngles(rest)) {
+      out.push([arr[i], ...sub]);
+    }
+  }
+  return out;
+}
+
 export function splitMultiPoseSheetRGBA(
   sheetRgba: Uint8ClampedArray,
   w: number,
@@ -398,8 +609,42 @@ export function splitMultiPoseSheetRGBA(
     });
   }
 
-  // Normalize Slot 0 ('front') into clean square targetSize canvas with 8% margin,
-  // then align EVERY other slot strictly to Slot 0's 5-line anchors (0.0 px match)!
+  // Auto-classify each sliced pose's view angle via silhouette symmetry, nose/foot protrusion & face ink detail
+  // whenever the sheet poses exhibit genuine visual view variation (preserving sheet reading order on identical silhouettes).
+  if (rawSlots.length >= 2) {
+    const cls = rawSlots.map((s) => classifyTurnaroundPoseAngleRGBA(s.rgba, s.w, s.h));
+    const syms = cls.map((c) => c.symmetry);
+    const faces = cls.map((c) => c.faceDetail);
+    const ars = cls.map((c) => c.aspectRatio);
+    const prots = cls.map((c) => c.protrusionAsym);
+    const hasVisualDifferentiation =
+      Math.max(...syms) - Math.min(...syms) > 0.12 ||
+      Math.max(...faces) - Math.min(...faces) > 0.08 ||
+      Math.max(...ars) - Math.min(...ars) > 0.10 ||
+      Math.max(...prots) - Math.min(...prots) > 0.10;
+
+    if (hasVisualDifferentiation) {
+      const perms = permuteAngles(angleMapping);
+      let bestPerm = angleMapping;
+      let bestTotal = -Infinity;
+      for (const perm of perms) {
+        let total = 0;
+        for (let i = 0; i < perm.length; i++) {
+          total += cls[i].scores[perm[i]] + (perm[i] === angleMapping[i] ? 0.06 : 0);
+        }
+        if (total > bestTotal) {
+          bestTotal = total;
+          bestPerm = perm;
+        }
+      }
+      for (let i = 0; i < rawSlots.length; i++) {
+        rawSlots[i].angle = bestPerm[i];
+      }
+    }
+  }
+
+  // Normalize the Front slot first into clean square targetSize canvas with 8% margin,
+  // then align EVERY other slot strictly to Front's 5-line anchors (0.0 px match)!
   const canonicalRefAnchors: ViewAnchors = {
     headTopV: 0.08,
     eyeLineV: 0.19,
@@ -410,43 +655,48 @@ export function splitMultiPoseSheetRGBA(
     heightFrac: 0.84,
   };
 
+  const frontIdx = Math.max(
+    0,
+    rawSlots.findIndex((s) => s.angle === 'front')
+  );
   const frontAligned = alignViewToReferenceRGBA(
-    rawSlots[0].rgba,
-    rawSlots[0].w,
-    rawSlots[0].h,
+    rawSlots[frontIdx].rgba,
+    rawSlots[frontIdx].w,
+    rawSlots[frontIdx].h,
     canonicalRefAnchors,
     targetSize,
     targetSize
   );
 
-  const poses: SlicedPoseRGBA[] = [
-    {
-      angle: rawSlots[0].angle,
-      rgba: frontAligned.rgba,
-      width: frontAligned.width,
-      height: frontAligned.height,
-      anchors: frontAligned.anchors,
-      bbox: rawSlots[0].bbox,
-    },
-  ];
-
-  for (let i = 1; i < rawSlots.length; i++) {
-    const aligned = alignViewToReferenceRGBA(
-      rawSlots[i].rgba,
-      rawSlots[i].w,
-      rawSlots[i].h,
-      frontAligned.anchors,
-      targetSize,
-      targetSize
-    );
-    poses.push({
-      angle: rawSlots[i].angle,
-      rgba: aligned.rgba,
-      width: aligned.width,
-      height: aligned.height,
-      anchors: aligned.anchors,
-      bbox: rawSlots[i].bbox,
-    });
+  const poses: SlicedPoseRGBA[] = [];
+  for (let i = 0; i < rawSlots.length; i++) {
+    if (i === frontIdx) {
+      poses.push({
+        angle: rawSlots[i].angle,
+        rgba: frontAligned.rgba,
+        width: frontAligned.width,
+        height: frontAligned.height,
+        anchors: frontAligned.anchors,
+        bbox: rawSlots[i].bbox,
+      });
+    } else {
+      const aligned = alignViewToReferenceRGBA(
+        rawSlots[i].rgba,
+        rawSlots[i].w,
+        rawSlots[i].h,
+        frontAligned.anchors,
+        targetSize,
+        targetSize
+      );
+      poses.push({
+        angle: rawSlots[i].angle,
+        rgba: aligned.rgba,
+        width: aligned.width,
+        height: aligned.height,
+        anchors: aligned.anchors,
+        bbox: rawSlots[i].bbox,
+      });
+    }
   }
 
   return {

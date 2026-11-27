@@ -85,9 +85,23 @@ export function flushActiveCanvasNow(): Promise<void> {
   return chained;
 }
 
+export function flushScheduledPersistNow(): Promise<void> {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  return saveAllProjects(useStudioStore.getState().projects).catch(() => {});
+}
+
 if (typeof window !== 'undefined') {
-  window.addEventListener('pagehide', () => {
-    void flushActiveCanvasNow();
+  const onPageLeave = () => {
+    void flushActiveCanvasNow().then(() => flushScheduledPersistNow());
+  };
+  window.addEventListener('pagehide', onPageLeave);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      onPageLeave();
+    }
   });
 }
 
@@ -484,7 +498,14 @@ interface StudioState {
       paperOriginalBlob?: Blob | null;
     }[]
   ) => Promise<void>;
+  lastDeletedFrame: {
+    projectId: string;
+    sceneId?: string;
+    index: number;
+    frame: CelFrame;
+  } | null;
   deleteFrame: (index: number) => void;
+  undoDeleteFrame: () => void;
   setFrameHold: (index: number, hold: number) => void;
   updateFrameNote: (index: number, note: string) => void;
   moveFrame: (fromIndex: number, toIndex: number) => void;
@@ -492,7 +513,9 @@ interface StudioState {
     frameId: string,
     layerId: string,
     layerBlobKey: string,
-    thumbKey: string
+    thumbKey: string,
+    targetProjectId?: string,
+    targetSceneId?: string
   ) => void;
   addLayerToCurrentFrame: (name: string, role: LayerRole) => void;
   updateLayerInCurrentFrame: (layerId: string, patch: Partial<CelLayer>) => void;
@@ -632,6 +655,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   playbackFrameIndex: null,
   loopPlayback: true,
   loopRange: null,
+  lastDeletedFrame: null,
   toast: null,
 
   bootstrap: async () => {
@@ -693,6 +717,30 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     if (createdShell && initialMode !== 'desk') {
       void get().ensureStarterProjectHydrated();
+    }
+
+    // Hydrate shared project snapshot (?s=<id> or #inktrope-snap=...) when opened via share link
+    if (
+      typeof window !== 'undefined' &&
+      (window.location.search.includes('s=') || window.location.hash.startsWith('#inktrope-snap='))
+    ) {
+      void import('../engine/exportEngine')
+        .then(({ resolveSharedSnapshotFromLocation }) => resolveSharedSnapshotFromLocation())
+        .then((shared) => {
+          if (shared?.kind === 'project') {
+            get().importProject(shared.project);
+            get().notify(translate(get().locale, 'shareProjectLoadedToast'), 'ok');
+            try {
+              const u = new URL(window.location.href);
+              u.searchParams.delete('s');
+              if (u.hash.startsWith('#inktrope-snap=')) u.hash = '';
+              window.history.replaceState({}, '', `${u.pathname}${u.search}${u.hash}`.toString());
+            } catch {
+              // ignore URL cleanup error
+            }
+          }
+        })
+        .catch(() => {});
     }
     if (initialMode === 'puppet') {
       const hasRig = (first?.meshRigs?.length ?? 0) > 0 || (first?.rigs?.length ?? 0) > 0;
@@ -2153,8 +2201,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     void flushActiveCanvasNow();
     const pid = get().activeProjectId;
     const p = get().projects.find((x) => x.id === pid);
-    if (!p || p.frames.length <= 1) return;
+    if (!p || p.frames.length <= 1 || index < 0 || index >= p.frames.length) return;
 
+    const deletedFrame = p.frames[index];
     const prevFrame = p.frames[get().activeFrameIndex];
     const prevRole = prevFrame?.layers.find((l) => l.id === get().activeLayerId)?.role ?? 'ink';
 
@@ -2179,7 +2228,63 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       activeFrameIndex: nextIdx,
       activeLayerId: matched.id,
       autoSwitchedLayer: null,
+      lastDeletedFrame: {
+        projectId: p.id,
+        sceneId: p.activeSceneId,
+        index,
+        frame: deletedFrame,
+      },
     });
+  },
+
+  undoDeleteFrame: () => {
+    const entry = get().lastDeletedFrame;
+    if (!entry) return;
+    const p = get().projects.find((x) => x.id === entry.projectId);
+    if (!p) {
+      set({ lastDeletedFrame: null });
+      return;
+    }
+    void flushActiveCanvasNow();
+    const prevFrame = p.frames[get().activeFrameIndex];
+    const prevRole = prevFrame?.layers.find((l) => l.id === get().activeLayerId)?.role ?? 'ink';
+
+    let restoredIndex = 0;
+    const nextProjects = get().projects.map((proj) => {
+      if (proj.id !== entry.projectId) return proj;
+      return patchActiveScene(proj, (sc) => {
+        if (entry.sceneId && sc.id !== entry.sceneId) return sc;
+        const insertAt = Math.max(0, Math.min(sc.frames.length, entry.index));
+        restoredIndex = insertAt;
+        const frames = [...sc.frames];
+        frames.splice(insertAt, 0, entry.frame);
+        return {
+          ...sc,
+          frames,
+          cameraKeyframes: shiftCameraKeyframesOnInsert(sc.cameraKeyframes, insertAt),
+        };
+      });
+    });
+
+    schedulePersist(nextProjects);
+    const updatedProj = nextProjects.find((x) => x.id === entry.projectId);
+    const restoredFrame = updatedProj?.frames[restoredIndex] ?? entry.frame;
+    const matched =
+      restoredFrame.layers.find((l) => l.role === prevRole) ??
+      restoredFrame.layers.find((l) => l.role === 'ink') ??
+      restoredFrame.layers[0];
+    set({
+      projects: nextProjects,
+      ...(get().activeProjectId === entry.projectId
+        ? {
+            activeFrameIndex: restoredIndex,
+            activeLayerId: matched?.id ?? null,
+            autoSwitchedLayer: null,
+          }
+        : {}),
+      lastDeletedFrame: null,
+    });
+    get().notify(translate(get().locale, 'xsheetFrameRestoredToast'), 'info');
   },
 
   setFrameHold: (index, hold) => {
@@ -2216,7 +2321,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     const pid = get().activeProjectId;
     const p = get().projects.find((x) => x.id === pid);
     if (!p || fromIndex === toIndex) return;
-    if (toIndex < 0 || toIndex >= p.frames.length) return;
+    if (fromIndex < 0 || fromIndex >= p.frames.length || toIndex < 0 || toIndex >= p.frames.length) {
+      return;
+    }
+
+    const prevFrame = p.frames[get().activeFrameIndex];
+    const prevRole = prevFrame?.layers.find((l) => l.id === get().activeLayerId)?.role ?? 'ink';
 
     const nextFrames = [...p.frames];
     const [moved] = nextFrames.splice(fromIndex, 1);
@@ -2232,29 +2342,54 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         : proj
     );
     schedulePersist(nextProjects);
-    set({ projects: nextProjects, activeFrameIndex: toIndex });
+    const targetFrame = nextFrames[toIndex];
+    const matched =
+      targetFrame.layers.find((l) => l.role === prevRole) ??
+      targetFrame.layers.find((l) => l.role === 'ink') ??
+      targetFrame.layers[0];
+    set({
+      projects: nextProjects,
+      activeFrameIndex: toIndex,
+      activeLayerId: matched?.id ?? null,
+      autoSwitchedLayer: null,
+    });
   },
 
-  updateLayerBlobAndThumb: (frameId, layerId, layerBlobKey, thumbKey) => {
-    const pid = get().activeProjectId;
-    const nextProjects = get().projects.map((proj) =>
-      proj.id === pid
-        ? patchActiveScene(proj, (sc) => ({
-            ...sc,
-            frames: sc.frames.map((f) =>
-              f.id !== frameId
-                ? f
-                : {
-                    ...f,
-                    thumbKey,
-                    layers: f.layers.map((l) =>
-                      l.id === layerId ? { ...l, blobKey: layerBlobKey } : l
-                    ),
-                  }
-            ),
-          }))
-        : proj
-    );
+  updateLayerBlobAndThumb: (
+    frameId,
+    layerId,
+    layerBlobKey,
+    thumbKey,
+    targetProjectId,
+    targetSceneId
+  ) => {
+    const pid = targetProjectId ?? get().activeProjectId;
+    const patchFrameList = (frames: CelFrame[]) =>
+      frames.map((f) =>
+        f.id !== frameId
+          ? f
+          : {
+              ...f,
+              thumbKey,
+              layers: f.layers.map((l) => (l.id === layerId ? { ...l, blobKey: layerBlobKey } : l)),
+            }
+      );
+
+    const nextProjects = get().projects.map((proj) => {
+      if (proj.id !== pid) return proj;
+      const norm = normalizeProject(proj);
+      const scenes = (norm.scenes ?? []).map((sc) => {
+        if (targetSceneId && sc.id !== targetSceneId) return sc;
+        return { ...sc, frames: patchFrameList(sc.frames) };
+      });
+      const active = scenes.find((s) => s.id === norm.activeSceneId) ?? scenes[0];
+      return {
+        ...norm,
+        scenes,
+        frames: active.frames,
+        updatedAt: new Date().toISOString(),
+      };
+    });
     schedulePersist(nextProjects);
     set({ projects: nextProjects });
   },
@@ -2289,71 +2424,190 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   updateLayerInCurrentFrame: (layerId, patch) => {
     const pid = get().activeProjectId;
     const fIdx = get().activeFrameIndex;
-    const nextProjects = get().projects.map((proj) =>
-      proj.id === pid
-        ? patchActiveScene(proj, (sc) => ({
-            ...sc,
-            frames: sc.frames.map((f, i) =>
-              i !== fIdx
-                ? f
-                : {
-                    ...f,
-                    layers: f.layers.map((l) => (l.id === layerId ? { ...l, ...patch } : l)),
-                  }
-            ),
-          }))
-        : proj
-    );
+    let changedVisuals = false;
+    let targetFrameId: string | null = null;
+    let targetSceneId: string | undefined;
+
+    const nextProjects = get().projects.map((proj) => {
+      if (proj.id !== pid) return proj;
+      targetSceneId = proj.activeSceneId;
+      return patchActiveScene(proj, (sc) => ({
+        ...sc,
+        frames: sc.frames.map((f, i) => {
+          if (i !== fIdx) return f;
+          targetFrameId = f.id;
+          if (
+            patch.visible !== undefined ||
+            patch.opacity !== undefined ||
+            patch.blendMode !== undefined
+          ) {
+            changedVisuals = true;
+          }
+          return {
+            ...f,
+            layers: f.layers.map((l) => (l.id === layerId ? { ...l, ...patch } : l)),
+          };
+        }),
+      }));
+    });
     schedulePersist(nextProjects);
     set({ projects: nextProjects });
+
+    if (changedVisuals && pid && targetFrameId && typeof document !== 'undefined') {
+      const fid = targetFrameId;
+      const sid = targetSceneId;
+      void (async () => {
+        const curProj = get().projects.find((p) => p.id === pid);
+        const curFrame = curProj?.frames.find((f) => f.id === fid);
+        if (!curProj || !curFrame) return;
+        const { renderFrameComposite } = await import('../engine/frameComposite');
+        const tw = 512;
+        const th = Math.max(180, Math.round((curProj.height / curProj.width) * tw));
+        const tc = await renderFrameComposite(curProj, curFrame, {
+          width: tw,
+          height: th,
+          hideRoughBlue: false,
+        });
+        const tb = await canvasToWebpOrJpegBlob(tc, 0.86).catch(() => null);
+        if (!tb) return;
+        const newThumbKey = await saveBlob(tb, curFrame.thumbKey ?? undefined);
+        const updated = get().projects.map((proj) => {
+          if (proj.id !== pid) return proj;
+          const norm = normalizeProject(proj);
+          const scenes = (norm.scenes ?? []).map((sc) =>
+            sid && sc.id !== sid
+              ? sc
+              : {
+                  ...sc,
+                  frames: sc.frames.map((f) => (f.id === fid ? { ...f, thumbKey: newThumbKey } : f)),
+                }
+          );
+          const active = scenes.find((s) => s.id === norm.activeSceneId) ?? scenes[0];
+          return { ...norm, scenes, frames: active.frames };
+        });
+        schedulePersist(updated);
+        set({ projects: updated });
+      })();
+    }
   },
 
   moveLayerInCurrentFrame: (layerId, direction) => {
     const pid = get().activeProjectId;
     const fIdx = get().activeFrameIndex;
-    const nextProjects = get().projects.map((proj) =>
-      proj.id === pid
-        ? patchActiveScene(proj, (sc) => ({
-            ...sc,
-            frames: sc.frames.map((f, i) => {
-              if (i !== fIdx) return f;
-              const idx = f.layers.findIndex((l) => l.id === layerId);
-              if (idx < 0) return f;
-              // Visual stack displays layers top-to-bottom (reversed), so moving visually 'up' increments index!
-              const targetIdx = direction === 'up' ? idx + 1 : idx - 1;
-              if (targetIdx < 0 || targetIdx >= f.layers.length) return f;
-              const nextLayers = [...f.layers];
-              const [moved] = nextLayers.splice(idx, 1);
-              nextLayers.splice(targetIdx, 0, moved);
-              return { ...f, layers: nextLayers };
-            }),
-          }))
-        : proj
-    );
+    let targetFrameId: string | null = null;
+    let targetSceneId: string | undefined;
+    const nextProjects = get().projects.map((proj) => {
+      if (proj.id !== pid) return proj;
+      targetSceneId = proj.activeSceneId;
+      return patchActiveScene(proj, (sc) => ({
+        ...sc,
+        frames: sc.frames.map((f, i) => {
+          if (i !== fIdx) return f;
+          const idx = f.layers.findIndex((l) => l.id === layerId);
+          if (idx < 0) return f;
+          const targetIdx = direction === 'up' ? idx + 1 : idx - 1;
+          if (targetIdx < 0 || targetIdx >= f.layers.length) return f;
+          targetFrameId = f.id;
+          const nextLayers = [...f.layers];
+          const [moved] = nextLayers.splice(idx, 1);
+          nextLayers.splice(targetIdx, 0, moved);
+          return { ...f, layers: nextLayers };
+        }),
+      }));
+    });
     schedulePersist(nextProjects);
     set({ projects: nextProjects });
+
+    if (pid && targetFrameId && typeof document !== 'undefined') {
+      const fid = targetFrameId;
+      const sid = targetSceneId;
+      void (async () => {
+        const curProj = get().projects.find((p) => p.id === pid);
+        const curFrame = curProj?.frames.find((f) => f.id === fid);
+        if (!curProj || !curFrame) return;
+        const { renderFrameComposite } = await import('../engine/frameComposite');
+        const tw = 512;
+        const th = Math.max(180, Math.round((curProj.height / curProj.width) * tw));
+        const tc = await renderFrameComposite(curProj, curFrame, { width: tw, height: th });
+        const tb = await canvasToWebpOrJpegBlob(tc, 0.86).catch(() => null);
+        if (!tb) return;
+        const newThumbKey = await saveBlob(tb, curFrame.thumbKey ?? undefined);
+        const updated = get().projects.map((proj) => {
+          if (proj.id !== pid) return proj;
+          const norm = normalizeProject(proj);
+          const scenes = (norm.scenes ?? []).map((sc) =>
+            sid && sc.id !== sid
+              ? sc
+              : {
+                  ...sc,
+                  frames: sc.frames.map((f) => (f.id === fid ? { ...f, thumbKey: newThumbKey } : f)),
+                }
+          );
+          const active = scenes.find((s) => s.id === norm.activeSceneId) ?? scenes[0];
+          return { ...norm, scenes, frames: active.frames };
+        });
+        schedulePersist(updated);
+        set({ projects: updated });
+      })();
+    }
   },
 
   deleteLayerInCurrentFrame: (layerId) => {
     const pid = get().activeProjectId;
     const fIdx = get().activeFrameIndex;
     let nextActive: string | null = get().activeLayerId;
+    let targetFrameId: string | null = null;
+    let targetSceneId: string | undefined;
 
-    const nextProjects = get().projects.map((proj) =>
-      proj.id === pid
-        ? patchActiveScene(proj, (sc) => ({
-            ...sc,
-            frames: sc.frames.map((f, i) => {
-              if (i !== fIdx || f.layers.length <= 1) return f;
-              const remaining = f.layers.filter((l) => l.id !== layerId);
-              if (nextActive === layerId) nextActive = remaining[remaining.length - 1].id;
-              return { ...f, layers: remaining };
-            }),
-          }))
-        : proj
-    );
+    const nextProjects = get().projects.map((proj) => {
+      if (proj.id !== pid) return proj;
+      targetSceneId = proj.activeSceneId;
+      return patchActiveScene(proj, (sc) => ({
+        ...sc,
+        frames: sc.frames.map((f, i) => {
+          if (i !== fIdx || f.layers.length <= 1) return f;
+          targetFrameId = f.id;
+          const remaining = f.layers.filter((l) => l.id !== layerId);
+          if (nextActive === layerId) nextActive = remaining[remaining.length - 1].id;
+          return { ...f, layers: remaining };
+        }),
+      }));
+    });
     schedulePersist(nextProjects);
     set({ projects: nextProjects, activeLayerId: nextActive, autoSwitchedLayer: null });
+
+    if (pid && targetFrameId && typeof document !== 'undefined') {
+      const fid = targetFrameId;
+      const sid = targetSceneId;
+      void (async () => {
+        const curProj = get().projects.find((p) => p.id === pid);
+        const curFrame = curProj?.frames.find((f) => f.id === fid);
+        if (!curProj || !curFrame) return;
+        const { renderFrameComposite } = await import('../engine/frameComposite');
+        const tw = 512;
+        const th = Math.max(180, Math.round((curProj.height / curProj.width) * tw));
+        const tc = await renderFrameComposite(curProj, curFrame, { width: tw, height: th });
+        const tb = await canvasToWebpOrJpegBlob(tc, 0.86).catch(() => null);
+        if (!tb) return;
+        const newThumbKey = await saveBlob(tb, curFrame.thumbKey ?? undefined);
+        const updated = get().projects.map((proj) => {
+          if (proj.id !== pid) return proj;
+          const norm = normalizeProject(proj);
+          const scenes = (norm.scenes ?? []).map((sc) =>
+            sid && sc.id !== sid
+              ? sc
+              : {
+                  ...sc,
+                  frames: sc.frames.map((f) => (f.id === fid ? { ...f, thumbKey: newThumbKey } : f)),
+                }
+          );
+          const active = scenes.find((s) => s.id === norm.activeSceneId) ?? scenes[0];
+          return { ...norm, scenes, frames: active.frames };
+        });
+        schedulePersist(updated);
+        set({ projects: updated });
+      })();
+    }
   },
 
   upsertRig: (rig) => {

@@ -33,7 +33,7 @@ import {
   X,
 } from 'lucide-react';
 import { useStudioStore } from '../../store/useStudioStore';
-import { localizeActorName, localizeProjectName, localizeSceneOrNote, useT, useTFmt, type TranslationKey } from '../../i18n/translations';
+import { localizeActorName, localizeProjectName, localizeSceneOrNote, toBcp47Locale, useT, useTFmt, type TranslationKey } from '../../i18n/translations';
 import { safeSetPointerCapture } from '../../utils/pointerCapture';
 import { useModalA11y } from '../../hooks/useModalA11y';
 import type {
@@ -80,7 +80,11 @@ import { extractViewAnchorsFromCanvas } from '../../engine/turnaroundSlicer';
 import { MasterRigRuntimeCache } from '../../engine/viewRigBlender';
 import { UNIVERSAL_CREATURE_CATALOG, type UniversalActionId } from '../../engine/universalCreatureRig';
 import CharacterMasterModal from '../rig/CharacterMasterModal';
-import { FilmFoleyEngine } from '../../engine/filmFoleyEngine';
+import {
+  FilmFoleyEngine,
+  renderFilmSoundtrackOffline,
+  type FilmAudioMixMode,
+} from '../../engine/filmFoleyEngine';
 import {
   onSampleHeroReady,
   SAMPLE_HERO_NAME_TR,
@@ -89,6 +93,8 @@ import {
   analyzeAudioBlobToLipSyncTrack,
   analyzePCMToLipSyncTrack,
   classifyLiveAnalyserViseme,
+  decodeAudioBlobToMonoPCM,
+  isAudioBufferSilent,
   synthesizeCartoonDialogueWav,
 } from '../../engine/filmMocapLipSync';
 import {
@@ -106,7 +112,10 @@ import {
 import { drawKagitSealStamp, triggerDownload } from '../../engine/exportEngine';
 import {
   encodeFramesToMp4WebCodecs,
+  ensureEvenDimensions,
   pickBestMediaRecorderFormat,
+  resolveExportDimensions,
+  type ExportAspectPreset,
 } from '../../engine/videoExportEngine';
 import { runGifEncode } from '../../engine/paperWorkerClient';
 import { renderFrameComposite } from '../../engine/frameComposite';
@@ -116,7 +125,7 @@ import { BlobImage, KeycapButton } from '../ui/KeycapButton';
 import { ToggleLeverSwitch } from '../ui/Studio3DControls';
 import { MotionPlayIcon } from '../ui/AnimatedStudioIcons';
 import PerformanceMocapDeck from './PerformanceMocapDeck';
-import { prepareCharacterCanvas } from '../../engine/characterIntakeEngine';
+import { getOrBuildCachedRigPack, prepareCharacterCanvas } from '../../engine/characterIntakeEngine';
 
 function loadImageElement(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -298,6 +307,19 @@ export default function FilmDirectorStudio() {
   const [exportPct, setExportPct] = useState(0);
   const [exportLabel, setExportLabel] = useState('');
   const exportAbortRef = useRef(false);
+  const [exportAspect, setExportAspect] = useState<ExportAspectPreset>('native');
+  const [exportQuality, setExportQuality] = useState<'720p' | '1080p'>('720p');
+  const [exportFps, setExportFps] = useState<24 | 30>(24);
+  const [exportAudioMix, setExportAudioMix] = useState<FilmAudioMixMode>('full');
+
+  const targetExportDims = useMemo(() => {
+    const fullDims = resolveExportDimensions(1920, 1080, 1, exportAspect);
+    if (exportQuality === '1080p') return fullDims;
+    return ensureEvenDimensions(
+      Math.round((fullDims.width * 2) / 3),
+      Math.round((fullDims.height * 2) / 3)
+    );
+  }, [exportAspect, exportQuality]);
 
   // Decompose, Voice & Optional Local Server State (ZERO auto-ping on mount!)
   const [decomposingActor, setDecomposingActor] = useState(false);
@@ -386,6 +408,20 @@ export default function FilmDirectorStudio() {
 
   const dragTargetRef = useRef<{ kind: 'waypoint'; idx: number } | { kind: 'lookAt' } | null>(null);
   const [assetVersion, setAssetVersion] = useState(0);
+
+  const actorPack = useMemo(() => {
+    void assetVersion;
+    void graph.actor.sourceBlobKey;
+    try {
+      return getOrBuildCachedRigPack(actorBitmapRef.current);
+    } catch {
+      return null;
+    }
+  }, [graph.actor.sourceBlobKey, assetVersion]);
+
+  const preferLeftHandWave = Boolean(
+    actorPack?.skinnedMesh?.rightHasRigidProp && !actorPack?.skinnedMesh?.leftHasRigidProp
+  );
 
   const safeShotIdx = Math.max(0, Math.min(graph.shots.length - 1, selectedShotIdx));
   const activeShot = graph.shots[safeShotIdx] ?? graph.shots[0];
@@ -599,9 +635,14 @@ export default function FilmDirectorStudio() {
     const effectiveSound = soundOn && soundEnabled;
     foleyRef.current.setMasterMuted(!effectiveSound);
     if (effectiveSound) {
-      foleyRef.current.updateAmbience(graph.world.weather, graph.world.weatherIntensity, musicOn);
+      foleyRef.current.updateAmbience(
+        graph.world.weather,
+        graph.world.weatherIntensity,
+        musicOn,
+        graph.world.setId
+      );
     }
-  }, [playing, soundOn, soundEnabled, musicOn, graph.world.weather, graph.world.weatherIntensity]);
+  }, [playing, soundOn, soundEnabled, musicOn, graph.world.weather, graph.world.weatherIntensity, graph.world.setId]);
 
   // ROCK-SOLID CONTINUOUS PLAYBACK ENGINE (Zero audio restart on shot cuts, throttled scrubber UI!)
   useEffect(() => {
@@ -619,7 +660,8 @@ export default function FilmDirectorStudio() {
       foley.startAmbience(
         initialGraph.world.weather,
         initialGraph.world.weatherIntensity,
-        musicOnRef.current
+        musicOnRef.current,
+        initialGraph.world.setId
       );
     }
 
@@ -664,6 +706,9 @@ export default function FilmDirectorStudio() {
       const res = drawFrameAt(accSec, true);
       if (res) {
         if (res.shotIndex !== lastShotIdx) {
+          if (lastShotIdx >= 0 && soundOnRef.current && masterSoundRef.current) {
+            foley.triggerWhoosh();
+          }
           lastShotIdx = res.shotIndex;
           wasFootContact = false;
           thunderFiredForShot = -1;
@@ -867,7 +912,7 @@ export default function FilmDirectorStudio() {
     patchActiveShot((sh) => patchShotFromRevisionPrompt(sh, clean));
     if (!instructionText) setRevisionDraft('');
     soundEngine.click(1.12);
-    notify(tf('filmShotUpdatedToast', { num: safeShotIdx + 1 }));
+    notify(tf('filmShotUpdatedToast', { shot: safeShotIdx + 1, num: safeShotIdx + 1 }));
   };
 
   // --- V4 1..6 Cast Helpers (Multi-File Batch Add!) & 2.5D Master Modal ---
@@ -1330,17 +1375,22 @@ export default function FilmDirectorStudio() {
       stopMicVoiceResources();
       if (voiceChunksRef.current.length > 0) {
         const blob = new Blob(voiceChunksRef.current, { type: mr?.mimeType || 'audio/webm' });
+        const decoded = await decodeAudioBlobToMonoPCM(blob);
+        if (isAudioBufferSilent(decoded.pcm)) {
+          notify(t('micSilentWarning'), 'info');
+          return;
+        }
         const blobKey = await saveBlob(blob);
-        const track = await analyzeAudioBlobToLipSyncTrack(
-          blob,
-          blobKey,
-          `${t('filmShotWord')} #${selectedShotIdxRef.current + 1}`,
-          'mic'
-        );
+        const track = analyzePCMToLipSyncTrack(decoded.pcm, decoded.sampleRate, {
+          audioBlobKey: blobKey,
+          label: `${t('filmShotWord')} #${selectedShotIdxRef.current + 1}`,
+          source: 'mic',
+          fps: 24,
+        });
         patchActiveShot((sh) => ({
           ...sh,
           voiceTrack: track,
-          durationSec: Math.max(sh.durationSec, Math.min(6.5, track.durationSec)),
+          durationSec: Math.max(sh.durationSec, Math.min(10, track.durationSec)),
         }));
         soundEngine.clapperSnap();
         notify(tf('filmVoiceLipReady', { sec: track.durationSec }));
@@ -1476,29 +1526,29 @@ export default function FilmDirectorStudio() {
             'file'
           );
         } catch {
-          // Seamless silent fallback to $0 in-browser formant synthesizer
+          // Seamless fallback to $0 Klatt vocal-tract synthesizer with direct phoneme lip-sync
           const local = synthesizeCartoonDialogueWav(text, activeShot.emotion, aiVoiceName);
           const blobKey = await saveBlob(local.blob);
-          track = analyzePCMToLipSyncTrack(local.pcm, local.sampleRate, {
+          track = {
+            ...local.lipSyncTrack,
             audioBlobKey: blobKey,
             label: `${voiceLabel} · ${text.slice(0, 14)}`,
-            source: 'file',
-          });
+          };
         }
       } else {
         const local = synthesizeCartoonDialogueWav(text, activeShot.emotion, aiVoiceName);
         const blobKey = await saveBlob(local.blob);
-        track = analyzePCMToLipSyncTrack(local.pcm, local.sampleRate, {
+        track = {
+          ...local.lipSyncTrack,
           audioBlobKey: blobKey,
           label: `${voiceLabel} · ${text.slice(0, 14)}`,
-          source: 'file',
-        });
+        };
       }
 
       patchActiveShot((sh) => ({
         ...sh,
         voiceTrack: track,
-        durationSec: Math.max(sh.durationSec, Math.min(6.5, track.durationSec + 0.25)),
+        durationSec: Math.max(sh.durationSec, Math.min(10, track.durationSec + 0.25)),
       }));
       soundEngine.clapperSnap();
       notify(tf('filmSynthReadyToast', { sec: track.durationSec }));
@@ -1509,13 +1559,39 @@ export default function FilmDirectorStudio() {
     }
   };
 
+  const handlePreviewWebSpeech = () => {
+    const text = activeShot.dialogue.trim();
+    if (!text) {
+      notify(t('filmTypeLineFirst'), 'info');
+      return;
+    }
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = toBcp47Locale(locale);
+      utter.rate = activeShot.emotion === 'tired' ? 0.88 : activeShot.emotion === 'happy' ? 1.08 : 1.0;
+      utter.pitch =
+        aiVoiceName === 'Kore'
+          ? 1.25
+          : aiVoiceName === 'Charon'
+            ? 0.78
+            : aiVoiceName === 'Puck'
+              ? 1.12
+              : 1.0;
+      window.speechSynthesis.speak(utter);
+    } catch {
+      // ignore unsupported Web Speech quirks
+    }
+  };
+
   const handleCommitMocap = useCallback(
     (track: MotionCaptureTrack, voiceTrack?: VoiceLipSyncTrack | null) => {
       patchActiveShot((sh) => ({
         ...sh,
         mocapTrack: track,
         voiceTrack: voiceTrack ?? sh.voiceTrack,
-        durationSec: Math.max(sh.durationSec, Math.min(6.5, track.durationSec)),
+        durationSec: Math.max(sh.durationSec, Math.min(15.0, track.durationSec)),
       }));
     },
     [patchActiveShot]
@@ -1538,26 +1614,42 @@ export default function FilmDirectorStudio() {
 
     let exportFoley: FilmFoleyEngine | null = null;
     try {
-      const W = 1280;
-      const H = 720;
-      const fps = 24;
+      const { width: W, height: H } = targetExportDims;
+      const fps = exportFps;
+      const wantAudio = exportAudioMix !== 'muted';
+      const wantMusic = exportAudioMix === 'full' && musicOn;
+      const showBars =
+        exportAspect === 'native' ? (graph.world.letterbox ?? graph.world.cinemaGrade) : false;
+
       const off = document.createElement('canvas');
       off.width = W;
       off.height = H;
       const ctx = off.getContext('2d', { alpha: false })!;
 
-      const chosen = pickBestMediaRecorderFormat();
+      const chosen = pickBestMediaRecorderFormat(wantAudio);
       const safeName = (project?.name || 'inktrope_film').replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇ_-]/g, '_');
+      const aspectSuffix = exportAspect === '9:16' ? '_9x16' : exportAspect === '1:1' ? '_1x1' : '';
 
-      // Universal offline H.264 MP4 fast path via WebCodecs (works on iOS/WhatsApp/TikTok, zero real-time wait!)
-      // Used whenever audio is off, or MediaRecorder is unavailable/non-MP4 without sound!
-      if (!soundOn || !chosen || typeof off.captureStream !== 'function') {
+      const offlineFilmAudio = wantAudio
+        ? await renderFilmSoundtrackOffline({
+            graph,
+            totalDuration,
+            sampleRate: 48_000,
+            audioMixMode: exportAudioMix,
+            includeMusic: wantMusic,
+            loadVoiceBlob: loadBlob,
+          })
+        : null;
+
+      if (typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
         const totalSteps = Math.max(12, Math.round(totalDuration * fps));
         const mp4Blob = await encodeFramesToMp4WebCodecs({
           width: W,
           height: H,
           fps,
           totalFrames: totalSteps + 1,
+          audioBuffer: wantAudio ? offlineFilmAudio : null,
+          audioVolume: 1,
           shouldAbort: () => exportAbortRef.current,
           onProgress: (done, total) => {
             setExportPct(Math.min(97, Math.round((done / Math.max(1, total)) * 94) + 3));
@@ -1572,7 +1664,7 @@ export default function FilmDirectorStudio() {
               customBgSource: customBgBitmapRef.current,
               bgPlaneBitmaps: bgPlanesMapRef.current,
               showDirectorGizmos: false,
-              showLetterbox: graph.world.letterbox ?? graph.world.cinemaGrade,
+              showLetterbox: showBars,
             });
             if (idx >= totalSteps - Math.round(fps * 0.55)) {
               const alpha = (idx - (totalSteps - Math.round(fps * 0.55))) / (fps * 0.55);
@@ -1588,16 +1680,16 @@ export default function FilmDirectorStudio() {
           return;
         }
         if (mp4Blob) {
-          triggerDownload(mp4Blob, `${safeName}_film.mp4`);
+          triggerDownload(mp4Blob, `${safeName}${aspectSuffix}_film.mp4`);
           soundEngine.clapperSnap();
           notify(t('filmMp4Downloaded'));
           setFilmExportOpen(false);
           return;
         }
-        if (!chosen || typeof off.captureStream !== 'function') {
-          notify(t('exportWebViewFallbackToast'), 'info');
-          return;
-        }
+      }
+      if (!chosen || typeof off.captureStream !== 'function') {
+        notify(t('exportWebViewFallbackToast'), 'info');
+        return;
       }
       const mime = chosen.mime;
 
@@ -1606,7 +1698,7 @@ export default function FilmDirectorStudio() {
 
       // FIXED: monitorToSpeakers = false so silent export NEVER blasts speakers!
       exportFoley = new FilmFoleyEngine({ monitorToSpeakers: false });
-      const audioStream = soundOn ? exportFoley.attachStreamDestination() : null;
+      const audioStream = wantAudio ? exportFoley.attachStreamDestination() : null;
       if (audioStream) tracks.push(...audioStream.getAudioTracks());
 
       const voiceBlobCache = new Map<string, Blob>();
@@ -1628,8 +1720,13 @@ export default function FilmDirectorStudio() {
       };
 
       recorder.start();
-      if (soundOn) {
-        exportFoley.startAmbience(graph.world.weather, graph.world.weatherIntensity, musicOn);
+      if (wantAudio) {
+        exportFoley.startAmbience(
+          exportAudioMix === 'full' ? graph.world.weather : 'none',
+          graph.world.weatherIntensity,
+          wantMusic,
+          graph.world.setId
+        );
       }
 
       const totalSteps = Math.max(12, Math.round(totalDuration * fps));
@@ -1649,22 +1746,23 @@ export default function FilmDirectorStudio() {
           customBgSource: customBgBitmapRef.current,
           bgPlaneBitmaps: bgPlanesMapRef.current,
           showDirectorGizmos: false,
-          showLetterbox: graph.world.letterbox ?? graph.world.cinemaGrade,
+          showLetterbox: showBars,
         });
 
         if (res.shotIndex !== lastShot) {
+          if (lastShot >= 0 && wantAudio) exportFoley.triggerWhoosh();
           lastShot = res.shotIndex;
           wasFootContact = false;
           thunderShot = -1;
           const sh = graph.shots[res.shotIndex];
-          if (soundOn && sh?.voiceTrack?.audioBlobKey) {
+          if (wantAudio && sh?.voiceTrack?.audioBlobKey) {
             const vb = voiceBlobCache.get(sh.voiceTrack.audioBlobKey);
             if (vb) void exportFoley.playVoiceBlob(sh.voiceTrack.audioBlobKey, vb, 0);
           } else {
             exportFoley.stopVoice();
           }
         }
-        if (soundOn) {
+        if (wantAudio) {
           exportFoley.setDialogueDucking(res.speaking);
           if (res.pose.footContact && !wasFootContact) {
             exportFoley.triggerFootstep(graph.world.setId, 0.85);
@@ -1737,8 +1835,8 @@ export default function FilmDirectorStudio() {
     setExportLabel(t('filmExportPreparing'));
 
     try {
-      const W = 560;
-      const H = 315;
+      const W = exportAspect === '9:16' ? 360 : exportAspect === '1:1' ? 440 : 560;
+      const H = exportAspect === '9:16' ? 640 : exportAspect === '1:1' ? 440 : 315;
       const fps = 10;
       const capDur = Math.min(totalDuration, 9.5);
       const totalFrames = Math.max(8, Math.min(85, Math.round(capDur * fps)));
@@ -1790,8 +1888,8 @@ export default function FilmDirectorStudio() {
   };
 
   const handleDownloadPosterPng = () => {
-    const W = 1280;
-    const H = 720;
+    const W = filmExportOpen ? targetExportDims.width : 1280;
+    const H = filmExportOpen ? targetExportDims.height : 720;
     const c = document.createElement('canvas');
     c.width = W;
     c.height = H;
@@ -2398,12 +2496,15 @@ export default function FilmDirectorStudio() {
                     <Layers className="w-3.5 h-3.5" />
                     {t('filmWorldTitle')}
                   </span>
-                  <div className="grid grid-cols-3 gap-1">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
                     {(
                       [
-                        { id: 'rainy-alley', label: t('filmWorldRain') },
-                        { id: 'golden-hill', label: t('filmWorldSunset') },
-                        { id: 'moonlit-forest', label: t('filmWorldForest') },
+                        { id: 'rainy-alley', label: t('filmWorldRain'), weather: 'rain' as WeatherKind },
+                        { id: 'golden-hill', label: t('filmWorldSunset'), weather: 'wind-leaves' as WeatherKind },
+                        { id: 'moonlit-forest', label: t('filmWorldForest'), weather: 'fireflies' as WeatherKind },
+                        { id: 'cosmic-nebula', label: t('filmWorldSpace'), weather: 'fireflies' as WeatherKind },
+                        { id: 'concert-stage', label: t('filmWorldConcert'), weather: 'none' as WeatherKind },
+                        { id: 'canyon-chase', label: t('filmWorldCanyon'), weather: 'wind-leaves' as WeatherKind },
                       ] as const
                     ).map((s) => (
                       <button
@@ -2414,19 +2515,17 @@ export default function FilmDirectorStudio() {
                             ...graph,
                             world: {
                               ...graph.world,
-                              setId: s.id as WorldSetId,
-                              weather:
-                                s.id === 'rainy-alley'
-                                  ? 'rain'
-                                  : s.id === 'golden-hill'
-                                    ? 'wind-leaves'
-                                    : 'fireflies',
-                              weatherIntensity: Math.max(0.5, graph.world.weatherIntensity),
+                              setId: s.id as unknown as WorldSetId,
+                              weather: s.weather,
+                              weatherIntensity:
+                                s.weather === 'none'
+                                  ? 0
+                                  : Math.max(0.5, graph.world.weatherIntensity),
                             },
                           })
                         }
-                        className={`py-1.5 px-1.5 rounded-lg text-[11px] font-bold border transition-colors ${
-                          graph.world.setId === s.id
+                        className={`py-1.5 px-1.5 rounded-lg text-[11px] font-bold border transition-colors truncate ${
+                          (graph.world.setId as string) === s.id
                             ? 'bg-desk-panel border-ink-brass text-desk-text'
                             : 'bg-desk-surface/60 border-desk-border text-desk-muted hover:text-desk-text'
                         }`}
@@ -2991,6 +3090,9 @@ export default function FilmDirectorStudio() {
             <PerformanceMocapDeck
               activeShot={activeShot}
               shotIndex={safeShotIdx}
+              preferLeftHandWave={preferLeftHandWave}
+              activeShotDialogue={activeShot.dialogue}
+              activeVoiceTrack={activeShot.voiceTrack}
               onLivePoseChange={handleLivePoseChange}
               onCommitMocap={handleCommitMocap}
               onClearMocap={() => patchActiveShot((sh) => ({ ...sh, mocapTrack: null }))}
@@ -3290,9 +3392,9 @@ export default function FilmDirectorStudio() {
                           };
                           const camPatch =
                             f.id === 'closeup'
-                              ? { fromZoom: 1.72, toZoom: 1.96, fromY: -0.14, toY: -0.17, tiltDeg: -1.5, dofStrength: 0.75 }
+                              ? { fromZoom: 2.38, toZoom: 2.68, fromY: -0.18, toY: -0.22, tiltDeg: -1.5, dofStrength: 0.75 }
                               : f.id === 'medium'
-                                ? { fromZoom: 1.24, toZoom: 1.44, fromY: -0.05, toY: -0.08, tiltDeg: 0, dofStrength: 0.45 }
+                                ? { fromZoom: 1.52, toZoom: 1.72, fromY: -0.08, toY: -0.11, tiltDeg: 0, dofStrength: 0.45 }
                                 : f.id === 'low-angle'
                                   ? { fromZoom: 1.16, toZoom: 1.36, fromY: 0.04, toY: -0.02, tiltDeg: -4.5, dofStrength: 0.5 }
                                   : { fromZoom: 1.0, toZoom: 1.12, fromY: 0, toY: -0.02, tiltDeg: 0, dofStrength: 0.22 };
@@ -3447,7 +3549,7 @@ export default function FilmDirectorStudio() {
                     <input
                       type="range"
                       min={1.2}
-                      max={6}
+                      max={15}
                       step={0.2}
                       value={activeShot.durationSec}
                       onChange={(e) =>
@@ -3532,6 +3634,17 @@ export default function FilmDirectorStudio() {
                       {synthesizingVoice ? t('filmVoiceSpeaking') : t('filmVoiceSpeak')}
                     </button>
                   </div>
+
+                  {typeof window !== 'undefined' && 'speechSynthesis' in window && (
+                    <button
+                      type="button"
+                      onClick={handlePreviewWebSpeech}
+                      className="w-full py-1 px-2 rounded-lg bg-desk-surface/80 border border-desk-border hover:border-ink-brass text-[11px] font-semibold text-desk-muted hover:text-desk-text inline-flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Volume2 className="w-3 h-3 text-ink-brass" />
+                      {t('filmWebSpeechPreviewBtn')}
+                    </button>
+                  )}
 
                   <div className="grid grid-cols-2 gap-1.5">
                     <button
@@ -3884,7 +3997,8 @@ export default function FilmDirectorStudio() {
                   {t('filmExportModalTitle')}
                 </h2>
                 <p className="font-mono text-[11px] text-desk-muted mt-0.5">
-                  {graph.shots.length} {t('filmShotWord')} · {totalDuration.toFixed(1)}s · 1280×720 ·{' '}
+                  {graph.shots.length} {t('filmShotWord')} · {totalDuration.toFixed(1)}s ·{' '}
+                  {targetExportDims.width}×{targetExportDims.height} · {exportFps} FPS ·{' '}
                   {t('filmExportModalSub')}
                 </p>
               </div>
@@ -3897,6 +4011,108 @@ export default function FilmDirectorStudio() {
               >
                 <X className="w-4 h-4" />
               </button>
+            </div>
+
+            {/* Social & Broadcast Video Format, Quality/FPS & Audio Mix Selectors */}
+            <div className="px-5 py-3.5 border-b border-desk-border bg-desk-panel/35 space-y-3">
+              <div className="space-y-1">
+                <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-brass block">
+                  {t('filmExportFormatLabel')}
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                  {(
+                    [
+                      { id: 'native', label: t('filmExportAspect169') },
+                      { id: '9:16', label: t('filmExportAspect916') },
+                      { id: '1:1', label: t('filmExportAspect11') },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      disabled={Boolean(exportingKind)}
+                      onClick={() => setExportAspect(opt.id)}
+                      className={`py-1.5 px-2.5 rounded-xl border text-[11px] font-bold transition-colors ${
+                        exportAspect === opt.id
+                          ? 'bg-desk-panel border-ink-vermilion text-desk-text shadow-sm'
+                          : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
+                    {t('filmExportQualityLabel')}
+                  </span>
+                  <div className="grid grid-cols-4 gap-1">
+                    {(['720p', '1080p'] as const).map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        disabled={Boolean(exportingKind)}
+                        onClick={() => setExportQuality(q)}
+                        className={`py-1.5 px-1.5 rounded-lg border font-mono text-[11px] font-bold transition-colors ${
+                          exportQuality === q
+                            ? 'bg-desk-panel border-ink-brass text-desk-text'
+                            : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
+                        }`}
+                      >
+                        {q}
+                      </button>
+                    ))}
+                    {([24, 30] as const).map((fpsVal) => (
+                      <button
+                        key={fpsVal}
+                        type="button"
+                        disabled={Boolean(exportingKind)}
+                        onClick={() => setExportFps(fpsVal)}
+                        className={`py-1.5 px-1.5 rounded-lg border font-mono text-[11px] font-bold transition-colors ${
+                          exportFps === fpsVal
+                            ? 'bg-desk-panel border-ink-brass text-desk-text'
+                            : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
+                        }`}
+                      >
+                        {fpsVal} FPS
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-desk-muted block">
+                    {t('filmExportAudioMixLabel')}
+                  </span>
+                  <div className="grid grid-cols-3 gap-1">
+                    {(
+                      [
+                        { id: 'full', label: t('filmExportAudioFull') },
+                        { id: 'voice-only', label: t('filmExportAudioVoiceOnly') },
+                        { id: 'muted', label: t('filmExportAudioMuted') },
+                      ] as const
+                    ).map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        disabled={Boolean(exportingKind)}
+                        onClick={() => setExportAudioMix(m.id)}
+                        className={`py-1.5 px-1.5 rounded-lg border text-[11px] font-bold truncate transition-colors ${
+                          exportAudioMix === m.id
+                            ? 'bg-desk-panel border-ink-emerald text-desk-text'
+                            : 'console-well border-desk-border text-desk-muted hover:text-desk-text'
+                        }`}
+                        title={m.label}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {exportingKind && (
@@ -3934,7 +4150,7 @@ export default function FilmDirectorStudio() {
                     {t('filmExportVideoTitle')}
                   </div>
                   <p className="text-[11px] text-desk-muted leading-snug">
-                    {t('filmExportVideoDesc')}
+                    {t('filmExportVideoDesc').replace(/1280[x×]720/i, `${targetExportDims.width}×${targetExportDims.height}`)}
                   </p>
                 </div>
                 <KeycapButton

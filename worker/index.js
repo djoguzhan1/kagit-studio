@@ -1295,6 +1295,140 @@ Schema:
   return json({ error: 'Bulunamadı' }, 404);
 }
 
+const MAX_SHARE_PAYLOAD_CHARS = 524_288; // <= 512 KB compressed base64url
+const SHARE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const SHARE_ID_RE = /^[A-Za-z0-9_-]{6,32}$/;
+const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
+let shareTableEnsured = false;
+
+async function ensureShareTable(env) {
+  if (shareTableEnsured || !env.DB) return;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS shared_snapshots (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      payload_b64 TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      byte_size INTEGER NOT NULL,
+      ip_hash TEXT,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    )`
+  ).run();
+  shareTableEnsured = true;
+}
+
+async function handleShare(request, url, env) {
+  if (!env.DB) {
+    return json({ error: 'Paylaşım depolaması yapılandırılmamış.' }, 503);
+  }
+  await ensureShareTable(env);
+  const now = Date.now();
+
+  if (request.method === 'POST' && (url.pathname === '/api/share' || url.pathname === '/api/share/')) {
+    const contentLength = Number(request.headers.get('content-length') || '0');
+    if (contentLength > MAX_SHARE_PAYLOAD_CHARS + 4096) {
+      return json({ error: 'Paylaşım paketi 512 KB sınırını aşıyor.' }, 413);
+    }
+
+    let body;
+    try {
+      const rawText = await request.text();
+      if (rawText.length > MAX_SHARE_PAYLOAD_CHARS + 4096) {
+        return json({ error: 'Paylaşım paketi 512 KB sınırını aşıyor.' }, 413);
+      }
+      body = JSON.parse(rawText);
+    } catch {
+      return json({ error: 'Geçersiz JSON yükü.' }, 400);
+    }
+
+    const kind = body && typeof body.kind === 'string' ? body.kind : '';
+    const payloadB64 = body && typeof body.payloadB64 === 'string' ? body.payloadB64.trim() : '';
+    const mimeType =
+      body && typeof body.mimeType === 'string'
+        ? body.mimeType.trim()
+        : 'application/x-inktrope-snapshot';
+
+    if (kind !== 'project' && kind !== 'stage-image') {
+      return json({ error: 'Geçersiz paylaşım türü.' }, 400);
+    }
+    if (!payloadB64 || payloadB64.length < 8 || !BASE64URL_RE.test(payloadB64)) {
+      return json({ error: 'Geçersiz sıkıştırılmış paylaşım verisi.' }, 400);
+    }
+    if (payloadB64.length > MAX_SHARE_PAYLOAD_CHARS) {
+      return json({ error: 'Paylaşım paketi 512 KB sınırını aşıyor.' }, 413);
+    }
+    if (mimeType !== 'application/x-inktrope-snapshot') {
+      return json({ error: 'İzin verilmeyen MIME türü.' }, 400);
+    }
+
+    const clientIp =
+      request.headers.get('CF-Connecting-IP') ||
+      request.headers.get('X-Forwarded-For') ||
+      'anon';
+    const ipHash = (await sha256Hex('share:' + clientIp)).slice(0, 24);
+
+    // Opportunistic expired snapshot cleanup + IP rate-limit (<= 30 creations per 10 minutes)
+    await env.DB.prepare('DELETE FROM shared_snapshots WHERE expires_at < ?')
+      .bind(now)
+      .run()
+      .catch(() => {});
+
+    const recentRow = await env.DB.prepare(
+      'SELECT COUNT(*) as cnt FROM shared_snapshots WHERE ip_hash = ? AND created_at > ?'
+    )
+      .bind(ipHash, now - 10 * 60 * 1000)
+      .first()
+      .catch(() => ({ cnt: 0 }));
+    if (recentRow && Number(recentRow.cnt) >= 30) {
+      return json({ error: 'Çok sık paylaşım oluşturuldu — birkaç dakika sonra tekrar dene.' }, 429);
+    }
+
+    const id = bytesToBase64Url(randomBytes(8)).slice(0, 10);
+    const expiresAt = now + SHARE_TTL_MS;
+    const approxBytes = Math.floor((payloadB64.length * 3) / 4);
+
+    await env.DB.prepare(
+      `INSERT INTO shared_snapshots (id, kind, payload_b64, mime_type, byte_size, ip_hash, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(id, kind, payloadB64, mimeType, approxBytes, ipHash, now, expiresAt)
+      .run();
+
+    return json({ ok: true, id, expiresAt }, 201);
+  }
+
+  if (request.method === 'GET' && url.pathname.startsWith('/api/share/')) {
+    const id = decodeURIComponent(url.pathname.slice('/api/share/'.length)).trim();
+    if (!SHARE_ID_RE.test(id)) {
+      return json({ error: 'Geçersiz paylaşım kodu.' }, 400);
+    }
+    const row = await env.DB.prepare(
+      'SELECT id, kind, payload_b64, mime_type, byte_size, expires_at FROM shared_snapshots WHERE id = ?'
+    )
+      .bind(id)
+      .first();
+
+    if (!row || Number(row.expires_at) < now) {
+      return json({ error: 'Paylaşım bağlantısı bulunamadı veya süresi doldu.' }, 404);
+    }
+    return json(
+      {
+        ok: true,
+        id: row.id,
+        kind: row.kind,
+        payloadB64: row.payload_b64,
+        mimeType: 'application/x-inktrope-snapshot',
+        byteSize: row.byte_size,
+      },
+      200,
+      { 'Cache-Control': 'public, max-age=3600' }
+    );
+  }
+
+  return json({ error: 'Bulunamadı' }, 404);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1307,6 +1441,9 @@ export default {
       }
       if (url.pathname.startsWith('/api/ai/')) {
         return await handleAi(request, url, env);
+      }
+      if (url.pathname === '/api/share' || url.pathname.startsWith('/api/share/')) {
+        return await handleShare(request, url, env);
       }
       return await env.ASSETS.fetch(request);
     } catch (error) {

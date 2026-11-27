@@ -1,22 +1,17 @@
 import type { ConformingSkinnedMesh } from './conformingMeshEngine';
 import { computeDepthAndNormalRGBA } from './kagit25dPipeline';
+import type { GpuBoneTransform2D } from './webglSkinnedRenderer';
 
 /**
- * INKTROPE V3 Zero-Allocation TypedArray Scanline Affine Texture Rasterizer
- * -------------------------------------------------------------------------
- * Replaces 1,500x Canvas2D `ctx.save() + ctx.clip() + ctx.drawImage()` calls
- * (~50-120 ms/frame, 0.55px seam fringes, no depth shading) with a single
- * flat Uint32Array scanline rasterizer (~2.5-4.5 ms/frame on pure CPU!):
- *
+ * INKTROPE V3/V4 Zero-Allocation TypedArray Scanline Affine Texture Rasterizer
+ * ----------------------------------------------------------------------------
  *  1. Exact Top-Left Fill Rule -> 0.000 px seam cracks & 0 double-blended edges
  *  2. 100% Zero-GC hot path -> reuses bucketed scratch Uint32Array + rowStride
- *     with `putImageData(img, 0, 0, 0, 0, cw, ch)` (0 heap allocations/frame!)
  *  3. Crisp Premultiplied-Safe Bilinear Texture Sampling (matches WebGL2 gl.LINEAR!)
- *  4. Full Per-Vertex 2.5D Depth Shading + Live Klaus Normal-Map Lighting
- *     (directional cel shadow + Fresnel rim highlight matching WebGL2 pixel-for-pixel!)
- *  5. 1-Pass Perimeter Warm Paper-Cutout Night Halo directly on Uint32Array alpha
- *  6. 100% Pure Buffer API (`rasterizeSkinnedMeshToRgba`) works identically in
- *     Browser, Web Worker, OffscreenCanvas, and Node/Vitest benchmarks!
+ *  4. Full Per-Vertex 2.5D Depth Shading + Unit-Normalized Live Klaus Normal-Map Lighting
+ *     with Per-Vertex / Jacobian Bone-Rotated World Normals (1:1 parity with WebGL2!)
+ *  5. Multi-Bone Cropped Socket Sub-Patch Backing (`pelvis=0, chest=1, neck=12`)
+ *  6. 1-Pass Perimeter Warm Paper-Cutout Night Halo directly on Uint32Array alpha
  */
 
 export interface KlausLightConfig {
@@ -41,7 +36,7 @@ export interface KlausLightConfig {
 export interface CpuRasterOptions {
   /** Use mirrored triangle Z-order (for facingLeft characters) */
   mirroredOrder?: boolean;
-  /** Render crisp 2.4px outer-perimeter warm ivory paper cutout halo (for dark night sets!) */
+  /** Render crisp 2.4px outer-perimeter warm ivory paper cutout halo (only when explicitly true!) */
   nightHalo?: boolean;
   /** Slightly cooler/softer halo tone when rendering puddle reflections */
   isReflection?: boolean;
@@ -51,6 +46,12 @@ export interface CpuRasterOptions {
   klausLight?: KlausLightConfig | null;
   /** Optional precomputed 2.5D normal map RGBA (width * height * 4) matching source dimensions */
   normalRgba?: Uint8ClampedArray | null;
+  /** Optional live bone transforms for exact per-vertex normal rotation & multi-bone socket backing */
+  gpuBones?: readonly GpuBoneTransform2D[] | null;
+  /** Optional actor bounds for multi-bone socket sub-patch backing */
+  bounds?: { x: number; y: number; w: number; h: number } | null;
+  /** Optional precomputed per-vertex (cosTheta, sinTheta) array (length = vertexCount * 2) */
+  vertexRotCS?: Float32Array | null;
   /** Enable 2x2 bilinear filtering (default true for WebGL-matching crispness) */
   bilinear?: boolean;
   /** Optional row stride of outRgba in pixels (defaults to cw; enables 0-GC sub-rect rasterization!) */
@@ -60,25 +61,21 @@ export interface CpuRasterOptions {
 interface CachedSourcePixels {
   w: number;
   h: number;
-  /** Straight RGBA bytes (used by pure scanline sampler) */
   rgba: Uint8ClampedArray;
-  /** Lazily computed 2.5D Sobel surface normal map for Klaus volumetric cel lighting */
   normalRgba: Uint8ClampedArray | null;
 }
 
 const sourcePixelCache = new WeakMap<HTMLCanvasElement, CachedSourcePixels>();
 
-// Reusable scratch output canvas & ImageData (bucketed 64px high-water mark -> 0 GC churn!)
 let _scratchCanvas: HTMLCanvasElement | null = null;
 let _scratchCtx: CanvasRenderingContext2D | null = null;
 let _scratchImageData: ImageData | null = null;
 let _scratchW = 0;
 let _scratchH = 0;
 
-// Reusable scratch alpha mask for 1-pass night cutout perimeter halo
 let _haloAlphaBuf = new Uint8Array(0);
+let _vertRotCSBuf = new Float32Array(0);
 
-// Detect host endianness once (little-endian on x86/ARM -> 0xAABBGGRR in Uint32Array)
 const IS_LITTLE_ENDIAN = (() => {
   const b = new ArrayBuffer(4);
   new Uint32Array(b)[0] = 0x0a0b0c0d;
@@ -108,7 +105,6 @@ export function getOrExtractSourcePixels(
       cached = { w: sw, h: sh, rgba, normalRgba: null };
       sourcePixelCache.set(sourceCanvas, cached);
     } catch {
-      // Cross-origin tainted canvas
       return null;
     }
   }
@@ -121,13 +117,52 @@ export function getOrExtractSourcePixels(
   return cached;
 }
 
+function buildVertexRotCSFromBones(
+  mesh: ConformingSkinnedMesh,
+  bones: readonly GpuBoneTransform2D[]
+): Float32Array {
+  const vCount = mesh.vertexCount;
+  if (_vertRotCSBuf.length < vCount * 2) {
+    _vertRotCSBuf = new Float32Array(vCount * 2);
+  }
+  const bIdx = mesh.boneIndices;
+  const bWt = mesh.boneWeights;
+  const bLen = bones.length;
+
+  for (let vi = 0; vi < vCount; vi++) {
+    const o4 = vi * 4;
+    const i0 = bIdx[o4] < bLen ? bIdx[o4] : 0;
+    const w0 = bWt[o4];
+    const r0 = bones[i0]?.rotRad ?? 0;
+    const refC = Math.cos(r0);
+    const refS = Math.sin(r0);
+    if (w0 >= 0.998 || bLen === 0) {
+      _vertRotCSBuf[vi * 2] = refC;
+      _vertRotCSBuf[vi * 2 + 1] = refS;
+      continue;
+    }
+    let sumC = refC * w0;
+    let sumS = refS * w0;
+    for (let k = 1; k < 4; k++) {
+      const wk = bWt[o4 + k];
+      if (wk <= 0.0001) continue;
+      const ik = bIdx[o4 + k] < bLen ? bIdx[o4 + k] : 0;
+      const rk = bones[ik]?.rotRad ?? 0;
+      const ck = Math.cos(rk);
+      const sk = Math.sin(rk);
+      const sign = refC * ck + refS * sk < 0 ? -1 : 1;
+      sumC += wk * sign * ck;
+      sumS += wk * sign * sk;
+    }
+    const len = Math.hypot(sumC, sumS) || 1;
+    _vertRotCSBuf[vi * 2] = sumC / len;
+    _vertRotCSBuf[vi * 2 + 1] = sumS / len;
+  }
+  return _vertRotCSBuf;
+}
+
 /**
  * Pure, zero-DOM RGBA scanline triangle rasterizer for any ConformingSkinnedMesh.
- * Writes straight RGBA pixels directly into `outRgba` covering world rectangle
- * `[ox, oy, ox + cw, oy + ch]` with optional `rowStride >= cw`.
- *
- * Uses strict top-left edge fill rule + incremental affine UV & per-vertex depth shading
- * + bilinear filtering + optional Klaus 2.5D normal-map directional cel shadow & rim!
  */
 export function rasterizeSkinnedMeshToRgba(
   srcRgba: Uint8ClampedArray,
@@ -145,7 +180,6 @@ export function rasterizeSkinnedMeshToRgba(
   const stride = Math.max(cw, opts?.rowStride ?? cw);
   const outU32 = new Uint32Array(outRgba.buffer, outRgba.byteOffset, stride * ch);
 
-  // Fast sub-rect clear (only touches active cw x ch region!)
   if (stride === cw) {
     outU32.fill(0);
   } else {
@@ -167,9 +201,16 @@ export function rasterizeSkinnedMeshToRgba(
   const klaus = opts?.klausLight ?? null;
   const normalRgba = klaus ? opts?.normalRgba ?? null : null;
   const hasKlaus = Boolean(klaus && normalRgba && normalRgba.length >= sw * sh * 4);
-  const klx = klaus ? (mirrorAxisX !== null ? -klaus.lx : klaus.lx) : 0;
-  const kly = klaus ? klaus.ly : 0;
-  const klz = 0.52;
+
+  // Unit-normalized 3D Klaus light vector (exact 1:1 parity with WebGL2 bindKlausUniforms!)
+  const rawKlx = klaus ? (mirrorAxisX !== null ? -klaus.lx : klaus.lx) : 0;
+  const rawKly = klaus ? klaus.ly : 0;
+  const rawKlz = 0.52;
+  const invKlLen = klaus ? 1 / (Math.hypot(rawKlx, rawKly, rawKlz) || 1) : 1;
+  const klx = rawKlx * invKlLen;
+  const kly = rawKly * invKlLen;
+  const klz = rawKlz * invKlLen;
+
   const kRimR = klaus ? klaus.rimR * 255 * klaus.rimStrength : 0;
   const kRimG = klaus ? klaus.rimG * 255 * klaus.rimStrength : 0;
   const kRimB = klaus ? klaus.rimB * 255 * klaus.rimStrength : 0;
@@ -177,6 +218,15 @@ export function rasterizeSkinnedMeshToRgba(
   const kShG = klaus ? klaus.shadowG * 255 : 0;
   const kShB = klaus ? klaus.shadowB * 255 : 0;
   const kShStr = klaus ? klaus.shadowStrength : 0;
+
+  let vRotCS: Float32Array | null = null;
+  if (hasKlaus) {
+    if (opts?.vertexRotCS && opts.vertexRotCS.length >= mesh.vertexCount * 2) {
+      vRotCS = opts.vertexRotCS;
+    } else if (opts?.gpuBones && opts.gpuBones.length > 0) {
+      vRotCS = buildVertexRotCSFromBones(mesh, opts.gpuBones);
+    }
+  }
 
   const swMax = sw - 1;
   const shMax = sh - 1;
@@ -192,12 +242,19 @@ export function rasterizeSkinnedMeshToRgba(
     const ib = indices[i + 1];
     const ic = indices[i + 2];
 
-    let x0 = (mirrorAxisX !== null ? 2 * mirrorAxisX - positions[ia * 2] : positions[ia * 2]) - ox;
-    let y0 = positions[ia * 2 + 1] - oy;
-    let x1 = (mirrorAxisX !== null ? 2 * mirrorAxisX - positions[ib * 2] : positions[ib * 2]) - ox;
-    let y1 = positions[ib * 2 + 1] - oy;
-    let x2 = (mirrorAxisX !== null ? 2 * mirrorAxisX - positions[ic * 2] : positions[ic * 2]) - ox;
-    let y2 = positions[ic * 2 + 1] - oy;
+    const preX0 = positions[ia * 2];
+    const preY0 = positions[ia * 2 + 1];
+    const preX1 = positions[ib * 2];
+    const preY1 = positions[ib * 2 + 1];
+    const preX2 = positions[ic * 2];
+    const preY2 = positions[ic * 2 + 1];
+
+    let x0 = (mirrorAxisX !== null ? 2 * mirrorAxisX - preX0 : preX0) - ox;
+    let y0 = preY0 - oy;
+    let x1 = (mirrorAxisX !== null ? 2 * mirrorAxisX - preX1 : preX1) - ox;
+    let y1 = preY1 - oy;
+    let x2 = (mirrorAxisX !== null ? 2 * mirrorAxisX - preX2 : preX2) - ox;
+    let y2 = preY2 - oy;
 
     let u0 = restUV[ia * 2] * swF;
     let v0 = restUV[ia * 2 + 1] * shF;
@@ -210,8 +267,53 @@ export function rasterizeSkinnedMeshToRgba(
     let s1 = isRefl ? 1.0 : shadeArr[ib];
     let s2 = isRefl ? 1.0 : shadeArr[ic];
 
-    // Signed 2x triangle area in screen space (y-down).
-    // Normalize winding so area > 0 for consistent top-left fill rule!
+    let c0 = 1.0;
+    let rSin0 = 0.0;
+    let c1 = 1.0;
+    let rSin1 = 0.0;
+    let c2 = 1.0;
+    let rSin2 = 0.0;
+
+    if (hasKlaus) {
+      if (vRotCS) {
+        c0 = vRotCS[ia * 2];
+        rSin0 = vRotCS[ia * 2 + 1];
+        c1 = vRotCS[ib * 2];
+        rSin1 = vRotCS[ib * 2 + 1];
+        c2 = vRotCS[ic * 2];
+        rSin2 = vRotCS[ic * 2 + 1];
+      } else {
+        // Exact 2x2 Polar Decomposition rotation from pre-mirror triangle Jacobian!
+        const du1 = u1 - u0;
+        const dv1 = v1 - v0;
+        const du2 = u2 - u0;
+        const dv2 = v2 - v0;
+        const detUV = du1 * dv2 - dv1 * du2;
+        if (Math.abs(detUV) > 1e-5) {
+          const invDet = 1 / detUV;
+          const dx1 = preX1 - preX0;
+          const dy1 = preY1 - preY0;
+          const dx2 = preX2 - preX0;
+          const dy2 = preY2 - preY0;
+          const j00 = (dx1 * dv2 - dx2 * dv1) * invDet;
+          const j01 = (-dx1 * du2 + dx2 * du1) * invDet;
+          const j10 = (dy1 * dv2 - dy2 * dv1) * invDet;
+          const j11 = (-dy1 * du2 + dy2 * du1) * invDet;
+          const rc = j00 + j11;
+          const rs = j10 - j01;
+          const rLen = Math.hypot(rc, rs);
+          if (rLen > 1e-5) {
+            c0 = rc / rLen;
+            rSin0 = rs / rLen;
+            c1 = c0;
+            rSin1 = rSin0;
+            c2 = c0;
+            rSin2 = rSin0;
+          }
+        }
+      }
+    }
+
     let area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
     if (Math.abs(area) < 0.05) continue;
     if (area < 0) {
@@ -220,6 +322,8 @@ export function rasterizeSkinnedMeshToRgba(
       tmp = u1; u1 = u2; u2 = tmp;
       tmp = v1; v1 = v2; v2 = tmp;
       tmp = s1; s1 = s2; s2 = tmp;
+      tmp = c1; c1 = c2; c2 = tmp;
+      tmp = rSin1; rSin1 = rSin2; rSin2 = tmp;
       area = -area;
     }
 
@@ -232,7 +336,6 @@ export function rasterizeSkinnedMeshToRgba(
     trianglesDrawn++;
     const invArea = 1 / area;
 
-    // Edge equations E_k(x, y) >= 0 inside normalized triangle
     const a0 = y1 - y2;
     const b0 = x2 - x1;
     const a1 = y2 - y0;
@@ -240,7 +343,6 @@ export function rasterizeSkinnedMeshToRgba(
     const a2 = y0 - y1;
     const b2 = x1 - x0;
 
-    // Strict top-left fill rule bias: 0.000 px seam cracks & 0 double-drawn shared edges!
     const isTopLeft0 = y1 > y2 || (y1 === y2 && x1 < x2);
     const isTopLeft1 = y2 > y0 || (y2 === y0 && x2 < x0);
     const isTopLeft2 = y0 > y1 || (y0 === y1 && x0 < x1);
@@ -250,9 +352,13 @@ export function rasterizeSkinnedMeshToRgba(
 
     const startX = minX + 0.5;
     const startY = minY + 0.5;
-    let w0Row = (x2 - x1) * (startY - y1) - (y2 - y1) * (startX - x1) + bias0;
-    let w1Row = (x0 - x2) * (startY - y2) - (y0 - y2) * (startX - x2) + bias1;
-    let w2Row = (x1 - x0) * (startY - y0) - (y1 - y0) * (startX - x0) + bias2;
+    const w0Base = (x2 - x1) * (startY - y1) - (y2 - y1) * (startX - x1);
+    const w1Base = (x0 - x2) * (startY - y2) - (y0 - y2) * (startX - x2);
+    const w2Base = (x1 - x0) * (startY - y0) - (y1 - y0) * (startX - x0);
+
+    let w0Row = w0Base + bias0;
+    let w1Row = w1Base + bias1;
+    let w2Row = w2Base + bias2;
 
     const duDx = (a0 * u0 + a1 * u1 + a2 * u2) * invArea;
     const duDy = (b0 * u0 + b1 * u1 + b2 * u2) * invArea;
@@ -260,10 +366,16 @@ export function rasterizeSkinnedMeshToRgba(
     const dvDy = (b0 * v0 + b1 * v1 + b2 * v2) * invArea;
     const dsDx = (a0 * s0 + a1 * s1 + a2 * s2) * invArea;
     const dsDy = (b0 * s0 + b1 * s1 + b2 * s2) * invArea;
+    const dcDx = hasKlaus ? (a0 * c0 + a1 * c1 + a2 * c2) * invArea : 0;
+    const dcDy = hasKlaus ? (b0 * c0 + b1 * c1 + b2 * c2) * invArea : 0;
+    const drsDx = hasKlaus ? (a0 * rSin0 + a1 * rSin1 + a2 * rSin2) * invArea : 0;
+    const drsDy = hasKlaus ? (b0 * rSin0 + b1 * rSin1 + b2 * rSin2) * invArea : 0;
 
-    let uRow = ((w0Row - bias0) * u0 + (w1Row - bias1) * u1 + (w2Row - bias2) * u2) * invArea;
-    let vRow = ((w0Row - bias0) * v0 + (w1Row - bias1) * v1 + (w2Row - bias2) * v2) * invArea;
-    let sRow = ((w0Row - bias0) * s0 + (w1Row - bias1) * s1 + (w2Row - bias2) * s2) * invArea;
+    let uRow = (w0Base * u0 + w1Base * u1 + w2Base * u2) * invArea;
+    let vRow = (w0Base * v0 + w1Base * v1 + w2Base * v2) * invArea;
+    let sRow = (w0Base * s0 + w1Base * s1 + w2Base * s2) * invArea;
+    let cRow = hasKlaus ? (w0Base * c0 + w1Base * c1 + w2Base * c2) * invArea : 1;
+    let rsRow = hasKlaus ? (w0Base * rSin0 + w1Base * rSin1 + w2Base * rSin2) * invArea : 0;
 
     for (let py = minY; py <= maxY; py++) {
       let w0 = w0Row;
@@ -271,7 +383,9 @@ export function rasterizeSkinnedMeshToRgba(
       let w2 = w2Row;
       let u = uRow;
       let v = vRow;
-      let sh = sRow;
+      let shVal = sRow;
+      let rc = cRow;
+      let rs = rsRow;
       const rowOff = py * stride;
 
       let enteredSpan = false;
@@ -315,7 +429,6 @@ export function rasterizeSkinnedMeshToRgba(
 
             sa = (a00 * m00 + a10 * m10 + a01 * m01 + a11 * m11 + 0.5) | 0;
             if (sa > 6) {
-              // Premultiplied-safe bilinear prevents dark fringes around transparent edges!
               const w00 = m00 * a00;
               const w10 = m10 * a10;
               const w01 = m01 * a01;
@@ -340,15 +453,22 @@ export function rasterizeSkinnedMeshToRgba(
 
           if (sa > 6) {
             pixelsShaded++;
-            const shClamped = sh < 0.72 ? 0.72 : sh > 1.12 ? 1.12 : sh;
+            const shClamped = shVal < 0.72 ? 0.72 : shVal > 1.12 ? 1.12 : shVal;
             sr *= shClamped;
             sg *= shClamped;
             sb *= shClamped;
 
             if (hasKlaus && normalRgba) {
-              const nx = normalRgba[centerIdx] * (2 / 255) - 1;
-              const ny = normalRgba[centerIdx + 1] * (2 / 255) - 1;
+              const rawNx = normalRgba[centerIdx] * (2 / 255) - 1;
+              const rawNy = normalRgba[centerIdx + 1] * (2 / 255) - 1;
               const nz = normalRgba[centerIdx + 2] * (2 / 255) - 1;
+
+              const rInv = 1 / (Math.hypot(rc, rs) || 1);
+              const nrc = rc * rInv;
+              const nrs = rs * rInv;
+              const nx = nrc * rawNx - nrs * rawNy;
+              const ny = nrs * rawNx + nrc * rawNy;
+
               const ndl = nx * klx + ny * kly + nz * klz;
               if (ndl < 0.22) {
                 const t = Math.min(1, (0.22 - ndl) * 2.1) * kShStr;
@@ -401,7 +521,11 @@ export function rasterizeSkinnedMeshToRgba(
         w2 += a2;
         u += duDx;
         v += dvDx;
-        sh += dsDx;
+        shVal += dsDx;
+        if (hasKlaus) {
+          rc += dcDx;
+          rs += drsDx;
+        }
       }
 
       w0Row += b0;
@@ -410,6 +534,10 @@ export function rasterizeSkinnedMeshToRgba(
       uRow += duDy;
       vRow += dvDy;
       sRow += dsDy;
+      if (hasKlaus) {
+        cRow += dcDy;
+        rsRow += drsDy;
+      }
     }
   }
 
@@ -484,10 +612,6 @@ function applyNightPerimeterHaloRGBA(
   }
 }
 
-/**
- * Browser 2D-canvas entry point for the Zero-GC CPU Scanline Rasterizer.
- * Returns `true` if rasterized cleanly, or `false` if source canvas pixels could not be read.
- */
 export function renderConformingMeshCpuScanline(
   ctx: CanvasRenderingContext2D,
   sourceCanvas: HTMLCanvasElement,
@@ -542,7 +666,6 @@ export function renderConformingMeshCpuScanline(
   }
   if (!_scratchCtx || !_scratchImageData) return false;
 
-  // 100% Zero-GC: rasterize directly into top-left cw x ch slice of reusable _scratchImageData!
   rasterizeSkinnedMeshToRgba(
     srcPixels.rgba,
     srcPixels.w,
@@ -561,7 +684,6 @@ export function renderConformingMeshCpuScanline(
     }
   );
 
-  // Single dirty-rect blit to scratch canvas, then composite cleanly onto stage ctx!
   _scratchCtx.putImageData(_scratchImageData, 0, 0, 0, 0, cw, ch);
   ctx.drawImage(_scratchCanvas, 0, 0, cw, ch, ox, oy, cw, ch);
   return true;

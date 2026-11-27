@@ -1,6 +1,7 @@
 import type { DrawingAnatomy } from './cartoonMotionEngine';
 import type { Vec2 } from './skeletonSkinEngine';
-import { inpaintBehindLimbSocketsRGBA } from './socketInpaint';
+import { inpaintBehindLimbSocketsRGBA, type SocketSubPatch } from './socketInpaint';
+export type { SocketSubPatch };
 
 /**
  * INKTROPE V3 Topology-Aware Conforming Skinned Mesh, Ink-Watershed & CoR Engine
@@ -106,11 +107,59 @@ export interface CustomSlitLine {
   y1: number;
 }
 
+export interface WeightStrokeSpec {
+  region: number;
+  x: number;
+  y: number;
+  radius: number;
+  strength: number;
+}
+
 export interface ConformingMeshBuildOptions {
   /** Optional 5-second user-drawn scissors slit lines in normalized 0..1 space */
   customSlitLines?: CustomSlitLine[];
   /** Optional 5-second user-calibrated joint overrides in normalized 0..1 space */
   jointOverrides?: Partial<Record<string, Vec2>>;
+  /** Optional user-painted weight/region strokes preserving Σw = 1 */
+  weightStrokes?: WeightStrokeSpec[];
+}
+
+/**
+ * Normalizes both canonical snake_case (`shoulder_l, elbow_l, wrist_l, hip_l, knee_l, ankle_l`)
+ * and legacy camelCase (`shoulderL, handL, footL, ...`) pin keys into a unified joint map.
+ */
+export function normalizeCanonicalJointOverrides(
+  raw?: Partial<Record<string, Vec2>> | null
+): Partial<Record<string, Vec2>> {
+  if (!raw) return {};
+  const out: Partial<Record<string, Vec2>> = { ...raw };
+  const aliasPairs: Array<[string, string[]]> = [
+    ['head', ['head', 'headCenter', 'head_top', 'headTop']],
+    ['neck', ['neck', 'collar']],
+    ['pelvis', ['pelvis', 'root', 'hip', 'waist']],
+    ['shoulder_l', ['shoulder_l', 'shoulderL', 'leftShoulder', 'arm_l']],
+    ['elbow_l', ['elbow_l', 'elbowL', 'leftElbow']],
+    ['wrist_l', ['wrist_l', 'wristL', 'handL', 'hand_l', 'leftHand']],
+    ['shoulder_r', ['shoulder_r', 'shoulderR', 'rightShoulder', 'arm_r']],
+    ['elbow_r', ['elbow_r', 'elbowR', 'rightElbow']],
+    ['wrist_r', ['wrist_r', 'wristR', 'handR', 'hand_r', 'rightHand']],
+    ['hip_l', ['hip_l', 'hipL', 'leftHip']],
+    ['knee_l', ['knee_l', 'kneeL', 'leftKnee']],
+    ['ankle_l', ['ankle_l', 'ankleL', 'footL', 'foot_l', 'leftFoot']],
+    ['hip_r', ['hip_r', 'hipR', 'rightHip']],
+    ['knee_r', ['knee_r', 'kneeL_alt_unused', 'kneeR', 'rightKnee']],
+    ['ankle_r', ['ankle_r', 'ankleR', 'footR', 'foot_r', 'rightFoot']],
+  ];
+  for (const [canon, aliases] of aliasPairs) {
+    for (const k of aliases) {
+      const pt = raw[k];
+      if (pt && Number.isFinite(pt.x) && Number.isFinite(pt.y)) {
+        out[canon] = pt;
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 export interface DistalSlitCut {
@@ -161,10 +210,10 @@ export interface ConformingSkinnedMesh {
   topologyResolution?: { w: number; h: number };
   /** Universal creature rig class (default: 'humanoid') */
   creatureClass?: UniversalCreatureClass;
-  /** Optional 2.5D inpainted torso backing RGBA (fills behind swinging arms/sockets) */
-  inpaintedBackRgba?: Uint8ClampedArray;
   /** Isolated transparent-except-socket patch RGBA for zero-ghost 2nd-pass chest backing */
   inpaintedSocketOnlyRgba?: Uint8ClampedArray;
+  /** Multi-bone cropped socket sub-patches (pelvis=0, chest=1, neck=12) */
+  inpaintedSubPatches?: SocketSubPatch[];
   /** Dimensions of inpainted backing buffers */
   inpaintedDims?: { w: number; h: number };
   inpaintedPixels?: number;
@@ -1749,33 +1798,104 @@ export function buildConformingSkinnedMeshRGBA(
   const lumbarV = anatomy.hipV - spineH * 0.56;
   const chestTopV = anatomy.headEndV + spineH * 0.08;
 
-  // Apply optional 5-second user joint calibration pins (clamped safely to 0.02..0.98!)
+  let pelvisStartPt: Vec2 = { x: anatomy.centerX, y: anatomy.hipV };
+  let neckEndPt: Vec2 = { x: anatomy.neckX, y: anatomy.headEndV };
+  let headEndPt: Vec2 = { x: anatomy.headCenterX, y: Math.max(0.03, anatomy.headCenterY - 0.12) };
+
+  // Apply optional user joint calibration pins (supports BOTH canonical snake_case & legacy camelCase!)
   if (options?.jointOverrides) {
-    const ov = options.jointOverrides;
+    const ov = normalizeCanonicalJointOverrides(options.jointOverrides);
     const clampPt = (p: Vec2): Vec2 => ({
       x: Math.max(0.02, Math.min(0.98, p.x)),
       y: Math.max(0.02, Math.min(0.98, p.y)),
     });
+    if (ov.pelvis) pelvisStartPt = clampPt(ov.pelvis);
+    if (ov.neck) neckEndPt = clampPt(ov.neck);
+    if (ov.head) headEndPt = clampPt(ov.head);
+
+    const prevWrL = { ...armL.wrist };
     if (ov.shoulder_l) armL.shoulder = clampPt(ov.shoulder_l);
-    if (ov.elbow_l) armL.elbow = clampPt(ov.elbow_l);
-    if (ov.wrist_l) armL.wrist = clampPt(ov.wrist_l);
+    if (ov.wrist_l) {
+      armL.wrist = clampPt(ov.wrist_l);
+      armL.hand = clampPt({
+        x: armL.hand.x + (armL.wrist.x - prevWrL.x),
+        y: armL.hand.y + (armL.wrist.y - prevWrL.y),
+      });
+    }
+    if (ov.elbow_l) {
+      armL.elbow = clampPt(ov.elbow_l);
+    } else if (ov.shoulder_l || ov.wrist_l) {
+      armL.elbow = clampPt({
+        x: (armL.shoulder.x + armL.wrist.x) * 0.5,
+        y: (armL.shoulder.y + armL.wrist.y) * 0.5,
+      });
+    }
+
+    const prevWrR = { ...armR.wrist };
     if (ov.shoulder_r) armR.shoulder = clampPt(ov.shoulder_r);
-    if (ov.elbow_r) armR.elbow = clampPt(ov.elbow_r);
-    if (ov.wrist_r) armR.wrist = clampPt(ov.wrist_r);
+    if (ov.wrist_r) {
+      armR.wrist = clampPt(ov.wrist_r);
+      armR.hand = clampPt({
+        x: armR.hand.x + (armR.wrist.x - prevWrR.x),
+        y: armR.hand.y + (armR.wrist.y - prevWrR.y),
+      });
+    }
+    if (ov.elbow_r) {
+      armR.elbow = clampPt(ov.elbow_r);
+    } else if (ov.shoulder_r || ov.wrist_r) {
+      armR.elbow = clampPt({
+        x: (armR.shoulder.x + armR.wrist.x) * 0.5,
+        y: (armR.shoulder.y + armR.wrist.y) * 0.5,
+      });
+    }
+
+    const prevAnkL = { ...legL.ankle };
     if (ov.hip_l) legL.hip = clampPt(ov.hip_l);
-    if (ov.knee_l) legL.knee = clampPt(ov.knee_l);
-    if (ov.ankle_l) legL.ankle = clampPt(ov.ankle_l);
+    if (ov.ankle_l) {
+      legL.ankle = clampPt(ov.ankle_l);
+      const dx = legL.ankle.x - prevAnkL.x;
+      const dy = legL.ankle.y - prevAnkL.y;
+      legL.heel = clampPt({ x: legL.heel.x + dx, y: legL.heel.y + dy });
+      legL.ball = clampPt({ x: legL.ball.x + dx, y: legL.ball.y + dy });
+      legL.toe = clampPt({ x: legL.toe.x + dx, y: legL.toe.y + dy });
+      legL.soleY = Math.max(0.05, Math.min(0.99, legL.soleY + dy));
+    }
+    if (ov.knee_l) {
+      legL.knee = clampPt(ov.knee_l);
+    } else if (ov.hip_l || ov.ankle_l) {
+      legL.knee = clampPt({
+        x: (legL.hip.x + legL.ankle.x) * 0.5,
+        y: (legL.hip.y + legL.ankle.y) * 0.5,
+      });
+    }
+
+    const prevAnkR = { ...legR.ankle };
     if (ov.hip_r) legR.hip = clampPt(ov.hip_r);
-    if (ov.knee_r) legR.knee = clampPt(ov.knee_r);
-    if (ov.ankle_r) legR.ankle = clampPt(ov.ankle_r);
+    if (ov.ankle_r) {
+      legR.ankle = clampPt(ov.ankle_r);
+      const dx = legR.ankle.x - prevAnkR.x;
+      const dy = legR.ankle.y - prevAnkR.y;
+      legR.heel = clampPt({ x: legR.heel.x + dx, y: legR.heel.y + dy });
+      legR.ball = clampPt({ x: legR.ball.x + dx, y: legR.ball.y + dy });
+      legR.toe = clampPt({ x: legR.toe.x + dx, y: legR.toe.y + dy });
+      legR.soleY = Math.max(0.05, Math.min(0.99, legR.soleY + dy));
+    }
+    if (ov.knee_r) {
+      legR.knee = clampPt(ov.knee_r);
+    } else if (ov.hip_r || ov.ankle_r) {
+      legR.knee = clampPt({
+        x: (legR.hip.x + legR.ankle.x) * 0.5,
+        y: (legR.hip.y + legR.ankle.y) * 0.5,
+      });
+    }
   }
 
   // Canonical 21-Bone Broadcast Cartoon Skeleton (strictly sequential non-overlapping spine -> 0 squash inversions!)
   const bones: RestBoneSpec[] = [
     // 0..2: Sequential S-Curve Spine & Rigid Head
-    { id: 'pelvis', index: 0, parent: -1, start: { x: anatomy.centerX, y: anatomy.hipV }, end: { x: anatomy.centerX, y: pelvisEndV } },
-    { id: 'chest', index: 1, parent: 11, start: { x: anatomy.centerX, y: lumbarV }, end: { x: anatomy.neckX, y: chestTopV } },
-    { id: 'head', index: 2, parent: 12, start: { x: anatomy.neckX, y: anatomy.headEndV }, end: { x: anatomy.headCenterX, y: Math.max(0.03, anatomy.headCenterY - 0.12) } },
+    { id: 'pelvis', index: 0, parent: -1, start: pelvisStartPt, end: { x: pelvisStartPt.x, y: pelvisEndV } },
+    { id: 'chest', index: 1, parent: 11, start: { x: pelvisStartPt.x, y: lumbarV }, end: { x: neckEndPt.x, y: chestTopV } },
+    { id: 'head', index: 2, parent: 12, start: neckEndPt, end: headEndPt },
     // 3..6: Arms (Upper + Forearm ending at true wrist!)
     { id: 'arm_l_upper', index: 3, parent: 13, start: armL.shoulder, end: armL.elbow },
     { id: 'arm_l_lower', index: 4, parent: 3, start: armL.elbow, end: armL.wrist },
@@ -1788,7 +1908,7 @@ export function buildConformingSkinnedMeshRGBA(
     { id: 'leg_r_lower', index: 10, parent: 9, start: legR.knee, end: legR.ankle },
     // 11..20: V3 Broadcast Spine, Neck, Clavicles, Wrists/Hands, Feet/Ankles & Toes!
     { id: 'lumbar', index: 11, parent: 0, start: { x: anatomy.centerX, y: pelvisEndV }, end: { x: anatomy.centerX, y: lumbarV } },
-    { id: 'neck', index: 12, parent: 1, start: { x: anatomy.neckX, y: chestTopV }, end: { x: anatomy.neckX, y: anatomy.headEndV } },
+    { id: 'neck', index: 12, parent: 1, start: { x: neckEndPt.x, y: chestTopV }, end: neckEndPt },
     { id: 'clavicle_l', index: 13, parent: 1, start: { x: anatomy.centerX, y: chestTopV }, end: armL.shoulder },
     { id: 'hand_l', index: 14, parent: 4, start: armL.wrist, end: armL.hand },
     { id: 'clavicle_r', index: 15, parent: 1, start: { x: anatomy.centerX, y: chestTopV }, end: armR.shoulder },
@@ -2287,10 +2407,24 @@ export function buildConformingSkinnedMeshRGBA(
     const isSeamVertex = votes.filter((c) => c > 0).length > 1;
     const off = vi * SKIN_BONE_COUNT;
 
-    // 1. RIGID SKULL LOCK: upper head interior strictly locked 100% to bone 2 (head)!
-    if (reg === 0 && !isSeamVertex && v <= anatomy.headEndV - 0.02) {
+    // 1. RIGID SKULL LOCK above neck collar band (`headEndV - 0.045`):
+    //    Keeps skull interior 100% rigid on bone 2 while `headEndV ± 0.045` gets C1 Hermite neck blending!
+    if (reg === 0 && !isSeamVertex && v <= neckEndPt.y - 0.045) {
       W[off + 2] = 1;
       pinned[vi] = 1;
+      continue;
+    }
+
+    // 1B. C1 CUBIC HERMITE NECK COLLAR BAND (`headEndV ± 0.045`) — eliminates dance/tilt neck spikes!
+    if (
+      (reg === 0 || (reg === 1 && Math.abs(u - neckEndPt.x) <= torsoHalfU * 0.72)) &&
+      Math.abs(v - neckEndPt.y) < 0.045
+    ) {
+      const tRaw = Math.max(0, Math.min(1, (v - (neckEndPt.y - 0.045)) / 0.09));
+      const h = tRaw * tRaw * (3 - 2 * tRaw);
+      W[off + 2] = 1 - h;
+      W[off + 12] = h * (1 - h * 0.45);
+      W[off + 1] = h * h * 0.45;
       continue;
     }
 
@@ -2434,6 +2568,71 @@ export function buildConformingSkinnedMeshRGBA(
     const tmp = W;
     W = WNext;
     WNext = tmp;
+  }
+
+  // Apply optional interactive user weight/region paint strokes while strictly preserving Σw = 1!
+  if (options?.weightStrokes && options.weightStrokes.length > 0) {
+    for (const stroke of options.weightStrokes) {
+      const sReg = Math.max(0, Math.min(5, Math.round(stroke.region)));
+      const rad = Math.max(0.008, Math.min(0.6, stroke.radius));
+      const str = Math.max(0, Math.min(1, stroke.strength));
+      if (str <= 1e-4) continue;
+      for (let vi = 0; vi < vertexCount; vi++) {
+        const u = restUV[vi * 2];
+        const v = restUV[vi * 2 + 1];
+        const d = Math.hypot(u - stroke.x, v - stroke.y);
+        if (d >= rad) continue;
+        const t = 1 - d / rad;
+        const alpha = str * t * t * (3 - 2 * t);
+        if (alpha <= 1e-4) continue;
+
+        let targetBone = 1;
+        if (sReg === 0) {
+          targetBone = 2;
+        } else if (sReg === 1) {
+          if (v > anatomy.hipV - spineH * 0.26) targetBone = 0;
+          else if (v > lumbarV) targetBone = 11;
+          else if (v < neckEndPt.y + 0.03) targetBone = 12;
+          else targetBone = 1;
+        } else if (sReg === 2) {
+          const dUp = distToSeg(u, v, bones[3].start, bones[3].end).dist;
+          const dLo = distToSeg(u, v, bones[4].start, bones[4].end).dist;
+          const dHd = distToSeg(u, v, bones[14].start, bones[14].end).dist;
+          targetBone = dHd < dLo && dHd < dUp ? 14 : dUp <= dLo ? 3 : 4;
+        } else if (sReg === 3) {
+          const dUp = distToSeg(u, v, bones[5].start, bones[5].end).dist;
+          const dLo = distToSeg(u, v, bones[6].start, bones[6].end).dist;
+          const dHd = distToSeg(u, v, bones[16].start, bones[16].end).dist;
+          targetBone = dHd < dLo && dHd < dUp ? 16 : dUp <= dLo ? 5 : 6;
+        } else if (sReg === 4) {
+          if (v >= legL.ankle.y + 0.008) targetBone = u > legL.ball.x + 0.006 ? 18 : 17;
+          else {
+            const dUp = distToSeg(u, v, bones[7].start, bones[7].end).dist;
+            const dLo = distToSeg(u, v, bones[8].start, bones[8].end).dist;
+            targetBone = dUp <= dLo ? 7 : 8;
+          }
+        } else {
+          if (v >= legR.ankle.y + 0.008) targetBone = u > legR.ball.x + 0.006 ? 20 : 19;
+          else {
+            const dUp = distToSeg(u, v, bones[9].start, bones[9].end).dist;
+            const dLo = distToSeg(u, v, bones[10].start, bones[10].end).dist;
+            targetBone = dUp <= dLo ? 9 : 10;
+          }
+        }
+
+        const off = vi * SKIN_BONE_COUNT;
+        let curSum = 0;
+        for (let b = 0; b < SKIN_BONE_COUNT; b++) curSum += W[off + b];
+        const invCur = curSum > 1e-6 ? (1 - alpha) / curSum : 0;
+        for (let b = 0; b < SKIN_BONE_COUNT; b++) {
+          W[off + b] *= invCur;
+        }
+        W[off + targetBone] += alpha;
+        if (alpha >= 0.35) {
+          vertexRegion[vi] = sReg;
+        }
+      }
+    }
   }
 
   const boneIndices = new Uint8Array(vertexCount * 4);
@@ -2589,8 +2788,8 @@ export function buildConformingSkinnedMeshRGBA(
     inkWatershedCuts,
     topologyResolution: { w: aw, h: ah },
     creatureClass: 'humanoid',
-    inpaintedBackRgba: inpainted.inpaintedPixels > 0 ? inpainted.rgba : undefined,
     inpaintedSocketOnlyRgba: inpainted.inpaintedPixels > 0 ? inpainted.socketOnlyRgba : undefined,
+    inpaintedSubPatches: inpainted.subPatches.length > 0 ? inpainted.subPatches : undefined,
     inpaintedDims: inpainted.inpaintedPixels > 0 ? { w: srcW, h: srcH } : undefined,
     inpaintedPixels: inpainted.inpaintedPixels,
     disconnectedLimbIslands,

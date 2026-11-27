@@ -385,7 +385,7 @@ export async function getBlobBitmap(key: string | null | undefined): Promise<Ima
 /**
  * Exhaustive collector of EVERY binary blob referenced anywhere in any project
  * (including multi-scene frames, paper originals, fixed backgrounds, FK rigs,
- * 2D Mesh Warp rigs, audio tracks, and character model-sheet references).
+ * 2D Mesh Warp rigs, 1..6 multi-actor Film casts, audio tracks, and reference sheets).
  */
 export function collectAllReferencedBlobKeys(projects: StudioProject[]): Set<string> {
   const refs = new Set<string>();
@@ -395,6 +395,20 @@ export function collectAllReferencedBlobKeys(projects: StudioProject[]): Set<str
       if (frame.paperOriginalBlobKey) refs.add(frame.paperOriginalBlobKey);
       for (const layer of frame.layers) {
         if (layer.blobKey) refs.add(layer.blobKey);
+      }
+    }
+  };
+
+  const collectFilmActor = (
+    actor: NonNullable<StudioProject['filmGraph']>['actor'] | null | undefined
+  ) => {
+    if (!actor) return;
+    if (actor.sourceBlobKey) refs.add(actor.sourceBlobKey);
+    if (actor.decomposed) {
+      if (actor.decomposed.depthBlobKey) refs.add(actor.decomposed.depthBlobKey);
+      if (actor.decomposed.normalBlobKey) refs.add(actor.decomposed.normalBlobKey);
+      for (const pt of actor.decomposed.parts) {
+        if (pt.blobKey) refs.add(pt.blobKey);
       }
     }
   };
@@ -421,12 +435,10 @@ export function collectAllReferencedBlobKeys(projects: StudioProject[]): Set<str
     }
     if (project.filmGraph) {
       const fg = project.filmGraph;
-      if (fg.actor.sourceBlobKey) refs.add(fg.actor.sourceBlobKey);
-      if (fg.actor.decomposed) {
-        if (fg.actor.decomposed.depthBlobKey) refs.add(fg.actor.decomposed.depthBlobKey);
-        if (fg.actor.decomposed.normalBlobKey) refs.add(fg.actor.decomposed.normalBlobKey);
-        for (const pt of fg.actor.decomposed.parts) {
-          if (pt.blobKey) refs.add(pt.blobKey);
+      collectFilmActor(fg.actor);
+      if (fg.actors) {
+        for (const castActor of fg.actors) {
+          collectFilmActor(castActor);
         }
       }
       if (fg.world.customBgBlobKey) refs.add(fg.world.customBgBlobKey);
